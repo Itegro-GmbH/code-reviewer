@@ -17,7 +17,12 @@ import {
 } from "../workflows/connectors.ts";
 import { ISSUE_NUMBER_MAX } from "../workflows/limits.ts";
 import { STRING, type ValueType } from "../workflows/value-type.ts";
-import { renderText, resolveValue, type RunValues } from "./templates.ts";
+import {
+  TemplateError,
+  renderText,
+  resolveValue,
+  type RunValues,
+} from "./templates.ts";
 
 /** What a connector is told about a call. */
 export type ActionCall = {
@@ -34,8 +39,10 @@ export type ActionCall = {
   idempotencyKey: string;
   /** When the step was written (ISO 8601): nothing the step did, also in an earlier attempt, is older. Bounds a search for what a repeat finds. */
   stepCreatedAt: string;
-  /** Aborted when the call has taken `ACTION_TIMEOUT_MS`; a connector passes it on to what it calls. */
+  /** Aborted when the call has taken its budget; a connector passes it on to what it calls. */
   signal: AbortSignal;
+  /** #1094: the time the engine gives the call (`ActionConnector.budgetMs`, else `ACTION_TIMEOUT_MS`), for a connector that does several things and stops before the signal aborts. Left out by callers that do not time it. */
+  budgetMs?: number;
 };
 
 /** What a step says when an action that cannot be repeated ended without an answer: the run page does not know whether it took effect. */
@@ -48,6 +55,8 @@ export type ActionConnector = {
   idempotent?: boolean;
   /** Does the action; the output has the fields the spec's `output` names. A `ConnectorError` ends the step with its code, an `ActionInputError` with `action_input_invalid`, any other throw with `action_failed`; an answer later than `ACTION_TIMEOUT_MS` is not waited for (`action_timeout`). */
   run(call: ActionCall): Promise<Record<string, unknown>>;
+  /** #1094: the time one call may take, from its resolved inputs, when it does more than one thing (a pull request step with `repos`); `ACTION_TIMEOUT_MS` when left out. */
+  budgetMs?(inputs: Record<string, unknown>): number;
 };
 
 export type ConnectorRegistry = {
@@ -79,17 +88,28 @@ export const CONNECTOR_FAILURE_CODES = [
   "ticket_rejected",
   "ticket_status_unknown",
   "ticket_status_unreachable",
+  /** #1094: a step that does one thing per repository ran out of its budget; `output` says what it had done. */
+  "action_timeout",
+  /** #1094: an unexpected failure of one repository of such a step; the message names what was done before. */
+  "action_failed",
 ] as const;
 export type ConnectorFailureCode = (typeof CONNECTOR_FAILURE_CODES)[number];
 
 /** A connector's failure with a stable code; the message is for the run page (no token, no text of the action). */
 export class ConnectorError extends Error {
   readonly code: ConnectorFailureCode;
+  /** #1094: what the action had done when it failed (the `pullRequests` of a step that opened some and not others); kept as the output of the failed step. */
+  readonly output: Record<string, unknown> | undefined;
 
-  constructor(code: ConnectorFailureCode, message: string) {
+  constructor(
+    code: ConnectorFailureCode,
+    message: string,
+    output?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "ConnectorError";
     this.code = code;
+    this.output = output;
   }
 }
 
@@ -134,12 +154,15 @@ export type RepoInput = {
   branch: string;
   pushed: boolean;
   headCommit: string | null;
+  /** The push of the working branch was refused (`pushRejected` of the fact). */
+  pushRejected: boolean;
   title?: string;
   body?: string;
 };
 
 function reposOf(value: unknown, input: string): RepoInput[] {
-  if (!Array.isArray(value) || value.length === 0)
+  // An empty list is what an agent step that reported no repository gives: nothing to open, not a mistake of the lane.
+  if (!Array.isArray(value))
     throw new ActionInputError(`${input} must be a list of repositories.`);
   return value.map((entry): RepoInput => {
     if (
@@ -159,10 +182,25 @@ function reposOf(value: unknown, input: string): RepoInput[] {
       base: entry.base,
       branch: entry.branch,
       pushed: entry.pushed === true,
+      pushRejected: entry.pushRejected === true,
       headCommit:
         typeof entry.headCommit === "string" ? entry.headCommit : null,
     };
   });
+}
+
+function isMissing(raw: string, values: RunValues): boolean {
+  try {
+    resolveValue(raw, values);
+    return false;
+  } catch (error) {
+    if (
+      error instanceof TemplateError &&
+      error.code === "template_missing_value"
+    )
+      return true;
+    throw error;
+  }
 }
 
 /** A value held to the type the spec states for the input; the issue (an object with a number, or a number) is reduced to its number. */
@@ -247,6 +285,14 @@ export function resolveActionInputs(
       if (input.required) throw new ActionInputError(`${name} is missing.`);
       continue;
     }
+    // #1094: a reference to a value that does not exist (the number of a pull request step with `repos` that opened none) leaves the input out;
+    // the connector skips then.
+    if (
+      input.skipsWhenMissing === true &&
+      typeof raw === "string" &&
+      isMissing(raw, values)
+    )
+      continue;
     // #1094: with `repos` the title and the body are written once for every repository (below), not once for the step.
     if (perRepo && (name === "title" || name === "body")) continue;
     const resolved =
@@ -312,6 +358,8 @@ export function resolveActionInputs(
     spec.atLeastOneOf !== undefined &&
     !spec.atLeastOneOf.some((name) => {
       const given = inputs[name];
+      // An empty `repos` is what an agent step that reported no repository gives: a step with nothing to open, not a mistake of the lane.
+      if (perRepo && name === "repos") return given !== undefined;
       return Array.isArray(given) ? given.length > 0 : given !== undefined;
     })
   )

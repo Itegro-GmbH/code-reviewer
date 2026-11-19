@@ -142,18 +142,122 @@ describe("the pull request step with repos", () => {
   });
 
   // #1094-T07
-  it("lets the review request take the number of the first pull request", () => {
-    const review: Json = {
+  it("lets the review request take the number and the repository of the first pull request, with no default", () => {
+    const review = (extra: Json = {}): Json => ({
       id: "review",
       kind: "action",
       connector: "ticket.requestReview",
       pullRequest: "{{pr.number}}",
       reviewers: ["octocat"],
-    };
+      ...extra,
+    });
+    const pr = { repos: "{{implement.repos}}" };
     expect(
-      codes(lane({ repos: "{{implement.repos}}" }, [review])).map(
-        ([, code]) => code,
+      codes(lane(pr, [review({ repository: "{{pr.repository}}" })])),
+    ).toEqual([]);
+    // Without a pull request the step skips (`no_pull_request`), so no default is needed; a literal repository of the workspace is a target too.
+    expect(codes(lane(pr, [review({ repository: "a/c" })]))).toEqual([]);
+    expect(
+      codes(
+        lane(pr, [review({ repository: "{{trigger.ticket.repo.fullName}}" })]),
       ),
-    ).not.toContain("target_from_untrusted_value");
+    ).toEqual([]);
+  });
+
+  // #1094-T35
+  it("refuses a default for the number of a step with repos, and a repository that is not a vouched value", () => {
+    const review = (extra: Json): Json => ({
+      id: "review",
+      kind: "action",
+      connector: "ticket.requestReview",
+      reviewers: ["octocat"],
+      ...extra,
+    });
+    const pr = { repos: "{{implement.repos}}" };
+    expect(
+      codes(lane(pr, [review({ pullRequest: "{{pr.number | default 7}}" })])),
+    ).toEqual([["/steps/2/pullRequest", "invalid_value"]]);
+    expect(
+      codes(
+        lane(pr, [
+          review({
+            pullRequest: "{{pr.number}}",
+            repository: "{{implement.summary}}",
+          }),
+        ]),
+      ).map(([, code]) => code),
+    ).toContain("target_from_untrusted_value");
+    // The single form's number is always there: a default stays harmless there.
+    expect(
+      codes(
+        lane(
+          { head: "{{implement.branch}}", title: "Fix" },
+          [review({ pullRequest: "{{pr.number}}" })],
+          {
+            repos: undefined,
+          },
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  // #1094-T36
+  it("does not offer the pull request repository of a single-form step, and refuses the number of a repos step for a comment", () => {
+    const single = lane(
+      { head: "{{implement.branch}}", title: "Fix" },
+      [
+        {
+          id: "review",
+          kind: "action",
+          connector: "ticket.requestReview",
+          pullRequest: "{{pr.number}}",
+          repository: "{{pr.repository}}",
+          reviewers: ["octocat"],
+        },
+      ],
+      { repos: undefined },
+    );
+    expect(codes(single).map(([, code]) => code)).toEqual([
+      "reference_unknown_field",
+    ]);
+    const comment = (pullRequest: string): Json => ({
+      id: "note",
+      kind: "action",
+      connector: "pullRequest.comment",
+      pullRequest,
+      body: "hi",
+    });
+    const pr = { repos: "{{implement.repos}}" };
+    expect(codes(lane(pr, [comment("{{pr.number}}")])).length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      codes(lane(pr, [comment("{{pr.number | default 3}}")])).length,
+    ).toBeGreaterThan(0);
+  });
+
+  // #1094-T55
+  it("keeps `{{repo.…}}` for the repository in the title and the body: a step called repo is valid, and is not read there", () => {
+    const stepRepo: Json = {
+      id: "repo",
+      kind: "agent",
+      profile: "implementer",
+      environment: "node",
+      instruction: "Look.",
+    };
+    const withStep = lane({ repos: "{{implement.repos}}" });
+    (withStep.steps as Json[]).splice(1, 0, stepRepo);
+    expect(codes(withStep)).toEqual([]);
+    // In the title of the step with repos `repo` is the repository, never that step.
+    (withStep.steps as Json[])[2] = {
+      id: "pr",
+      kind: "action",
+      connector: "pullRequest.open",
+      repos: "{{implement.repos}}",
+      title: "Fix {{repo.summary}}",
+    };
+    expect(codes(withStep)).toEqual([
+      ["/steps/2/title", "reference_unknown_field"],
+    ]);
   });
 });

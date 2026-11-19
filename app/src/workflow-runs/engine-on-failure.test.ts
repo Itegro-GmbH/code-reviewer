@@ -225,6 +225,7 @@ function harness(options: {
       row.status = "failed";
       row.errorCode = outcome.errorCode;
       row.errorMessage = outcome.errorMessage;
+      row.output = outcome.output ?? null;
     }
   };
   const lock = (): RunLock => {
@@ -433,6 +434,35 @@ describe("a run that fails, in a workflow with onFailure steps", () => {
 
     expect(app.calls).toHaveLength(2);
     expect(app.run.status).toBe("failed");
+  });
+
+  // #1094-T53
+  it("keeps what a pull request step with repos had opened as the output of the step when it fails", async () => {
+    const output = {
+      pullRequests: [{ fullName: "acme/app", state: "opened", number: 5 }],
+      number: 5,
+    };
+    const app = harness({
+      onFailure: CLEANUP,
+      opensPullRequest: true,
+      steps: [stepRow(0, {})],
+      failing: {
+        "github.pullRequest.open": new ConnectorError(
+          "action_timeout",
+          "The step ran out of time.",
+          output,
+        ),
+      },
+    });
+
+    await app.engine.advance(RUN_ID);
+
+    expect(app.steps[1]).toMatchObject({
+      stepId: "pr",
+      status: "failed",
+      errorCode: "action_timeout",
+    });
+    expect(JSON.parse(app.steps[1]?.output ?? "null")).toEqual(output);
   });
 
   // #902-T53

@@ -54,6 +54,7 @@ import {
 import {
   GITHUB_ISSUE_LABELS,
   PROJECT_MEMBERS,
+  PULL_REQUEST_COMMENT,
   PULL_REQUEST_OPENING_CONNECTORS,
   REPOS_BASE_ROOTS,
   REPOS_BRANCH_ROOTS,
@@ -365,7 +366,7 @@ function outputOf(
       kind: "object",
       fields: Object.fromEntries(
         Object.entries(spec.output.fields).filter(
-          ([name]) => name !== "pullRequests",
+          ([name]) => name !== "pullRequests" && name !== "repository",
         ),
       ),
     };
@@ -374,12 +375,26 @@ function outputOf(
     fields: Object.fromEntries(
       Object.entries(spec.output.fields).map(([name, field]) => [
         name,
-        ["number", "url", "existing"].includes(name)
+        ["number", "url", "existing", "repository"].includes(name)
           ? { ...field, required: false }
           : field,
       ]),
     ),
   };
+}
+
+/** #1094: what the `pullRequest` (and `repository`) input of an action that acts on a pull request tells the scope check about its references. */
+function pullRequestUse(
+  connector: string,
+  input: string,
+): { pullRequestInput?: "review" | "comment" } {
+  if (connector === TICKET_REQUEST_REVIEW.name)
+    return input === "pullRequest" || input === "repository"
+      ? { pullRequestInput: "review" }
+      : {};
+  if (connector === PULL_REQUEST_COMMENT.name && input === "pullRequest")
+    return { pullRequestInput: "comment" };
+  return {};
 }
 
 export function actionBinding(
@@ -1188,7 +1203,11 @@ function checkAction(
       field.type,
       at,
       c,
-      { ...reachOf(env, at, state), ...(perRepo ? { repoScope: true } : {}) },
+      {
+        ...reachOf(env, at, state),
+        ...(perRepo ? { repoScope: true } : {}),
+        ...pullRequestUse(spec.name, input),
+      },
       target,
     );
   }

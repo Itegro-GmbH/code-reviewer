@@ -40,12 +40,17 @@ export const FACT_TYPES: Record<string, ValueType> = {
 export const REPOS_FACT = "repos";
 
 /** One entry of `{{<step>.repos}}`: the repository, its base and working branch, the commits this turn made on it, its tip and whether it is on the remote. */
-export const REPOS_FACT_ENTRY_TYPE = objectOf({
-  fullName: STRING,
-  base: STRING,
-  branch: STRING,
-  commits: listOf(STRING),
-  headCommit: STRING,
-  pushed: BOOLEAN,
-});
+export const REPOS_FACT_ENTRY_TYPE = objectOf(
+  {
+    fullName: STRING,
+    base: STRING,
+    branch: STRING,
+    commits: listOf(STRING),
+    headCommit: STRING,
+    pushed: BOOLEAN,
+    // #1094: present (true) only when the push of the working branch was refused; the pull request step reports that repository as `push_rejected`.
+    pushRejected: BOOLEAN,
+  },
+  ["pushRejected"],
+);
 export const REPOS_FACT_TYPE: ValueType = listOf(REPOS_FACT_ENTRY_TYPE);

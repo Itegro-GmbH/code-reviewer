@@ -184,9 +184,21 @@ function repoFacts(block: Record<string, unknown>): Record<string, unknown>[] {
             commits: commitShas(entry.commits),
             headCommit: tipOf(entry),
             pushed: entry.pushed === true,
+            ...(workingBranchRejected(entry) ? { pushRejected: true } : {}),
           },
         ]
       : [],
+  );
+}
+
+/** Whether the runner reported the working branch of a repository as rejected by the remote (#1094): it is not on the remote, and says why. */
+function workingBranchRejected(entry: Record<string, unknown>): boolean {
+  if (entry.pushed === true || !Array.isArray(entry.branches)) return false;
+  return entry.branches.some(
+    (branch: unknown) =>
+      isRecord(branch) &&
+      branch.name === entry.branch &&
+      branch.result === "rejected",
   );
 }
 
