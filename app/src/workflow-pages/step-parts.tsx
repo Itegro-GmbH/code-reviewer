@@ -160,9 +160,10 @@ function ActionOutcome({
         <div data-slot="step-pull-requests" className="flex flex-col gap-1">
           <p className="font-semibold">{PAGE_COPY.stepPullRequests}</p>
           <ul className="flex flex-col gap-2">
-            {result.pullRequests.map((pr) => (
+            {result.pullRequests.map((pr, index) => (
               <li
-                key={pr.fullName}
+                // The same repository may be named twice (two branches): the position tells the entries apart.
+                key={`${pr.fullName}-${String(index)}`}
                 data-state={pr.state}
                 className="break-words"
               >
@@ -241,8 +242,11 @@ function AgentOutcome({
         <div data-slot="step-agent-repos" className="flex flex-col gap-1">
           <p className="font-semibold">{PAGE_COPY.stepRepos}</p>
           <ul className="flex flex-col gap-2">
-            {result.repos.map((repo) => (
-              <li key={repo.fullName} className="break-words">
+            {result.repos.map((repo, index) => (
+              <li
+                key={`${repo.fullName}-${String(index)}`}
+                className="break-words"
+              >
                 <span>{repo.fullName}</span>{" "}
                 <span className="text-muted-foreground">
                   {repo.branch === repo.base ? (

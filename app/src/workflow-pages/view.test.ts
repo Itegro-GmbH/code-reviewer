@@ -305,6 +305,13 @@ describe("the result of a pull request step with several repositories", () => {
               reason: "direct",
             },
             {
+              fullName: "acme/locked",
+              base: "main",
+              head: "x",
+              state: "skipped",
+              reason: "push_rejected",
+            },
+            {
               fullName: "acme/evil",
               base: "main",
               head: "x",
@@ -341,6 +348,13 @@ describe("the result of a pull request step with several repositories", () => {
         head: "main",
         state: "skipped",
         reason: "direct",
+      },
+      {
+        fullName: "acme/locked",
+        base: "main",
+        head: "x",
+        state: "skipped",
+        reason: "push_rejected",
       },
       // An address that is not in the repository the entry names is not linked.
       {

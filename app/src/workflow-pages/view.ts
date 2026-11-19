@@ -3,6 +3,10 @@
 // What the workflow pages show of a run, made from the run as the routes give it (#873). Pure: no clock, no network. Everything in a
 // step's output is data from outside the page (an agent's result, what a connector got from GitHub): this file only picks the few
 // values the page shows, checks their types, and decides which of them may become a link; the components render them as text.
+import {
+  PULL_REQUEST_SKIP_REASONS,
+  type PullRequestSkipReason,
+} from "../workflows/connectors.ts";
 import { isRecord } from "../workflows/json.ts";
 import { formatUtc } from "../ui/format-time.ts";
 import { formatMoney } from "../workspace-billing/money.ts";
@@ -140,8 +144,8 @@ export type PullRequestResult = {
   base: string;
   head: string;
   state: "opened" | "existing" | "skipped";
-  /** Why a skipped one got none: direct work, nothing pushed, no commits ahead of the base. */
-  reason?: "direct" | "not_pushed" | "no_commits";
+  /** Why a skipped one got none: direct work, nothing pushed (or a push the remote refused), no commits ahead of the base. */
+  reason?: PullRequestSkipReason;
   number?: number;
   /** A link to the pull request, only when it is an address of that repository. */
   url?: string;
@@ -209,12 +213,8 @@ function pullRequestsOf(value: unknown): PullRequestResult[] {
     )
       continue;
     const result: PullRequestResult = { fullName, base, head, state };
-    if (
-      reason === "direct" ||
-      reason === "not_pushed" ||
-      reason === "no_commits"
-    )
-      result.reason = reason;
+    if (PULL_REQUEST_SKIP_REASONS.some((known) => known === reason))
+      result.reason = reason as PullRequestSkipReason;
     if (typeof number === "number" && Number.isInteger(number))
       result.number = number;
     // The link is the pull request's own address in the repository the entry names, never one of the run's repository.

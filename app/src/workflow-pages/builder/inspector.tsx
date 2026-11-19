@@ -17,8 +17,11 @@ import { TRIGGER_KINDS } from "../../workflows/triggers.ts";
 import {
   CONNECTOR_NAMES,
   controlOf,
+  inputRequired,
   inputsOf,
+  isPullRequestStep,
   specOf,
+  withPullRequestRepos,
   textOfValue,
   valueOfText,
   withConnector,
@@ -33,6 +36,7 @@ import { ReachProvider } from "./reach-context.tsx";
 import { ReferenceControl } from "./reference-control.tsx";
 import {
   agentIds,
+  agentIdsWithRepos,
   canMove,
   hasEnvironment,
   isInLoop,
@@ -525,6 +529,77 @@ function ValueControl({
   );
 }
 
+const OTHER_REPOS = "__other__";
+
+/**
+ * The `repos` of a pull request step (#1094): a choice among the agent steps that have repositories (`{{<id>.repos}}`), "one branch" for the
+ * single form, or another reference typed. Choosing one takes `head` and `base` out of the document (the validator refuses them next to
+ * `repos`); choosing "one branch" puts the empty `head` back.
+ */
+function PullRequestReposControl({
+  doc,
+  pointer,
+  node,
+  onChange,
+}: Pick<FieldsProps, "doc" | "pointer" | "node" | "onChange">) {
+  const ids = agentIdsWithRepos(doc);
+  const references = ids.map((id) => `{{${id}.repos}}`);
+  const [custom, setCustom] = useState(false);
+  const current = typeof node.repos === "string" ? node.repos : undefined;
+  const typed =
+    node.repos !== undefined &&
+    (current === undefined || !references.includes(current));
+  const selected =
+    node.repos === undefined && !custom
+      ? ""
+      : typed || custom
+        ? OTHER_REPOS
+        : (current ?? "");
+  const write = (repos: string): void =>
+    onChange(setAt(doc, pointer, withPullRequestRepos(node, repos)));
+  return (
+    <>
+      <SelectControl
+        name="repos"
+        label="Repositories (optional)"
+        value={selected}
+        options={[
+          { value: "", label: "One branch of the repository of the run" },
+          ...ids.map((id) => ({
+            value: `{{${id}.repos}}`,
+            label: `Every repository of step ${id}`,
+          })),
+          { value: OTHER_REPOS, label: "Another reference" },
+        ]}
+        onChange={(next) => {
+          if (next === OTHER_REPOS) {
+            setCustom(true);
+            return;
+          }
+          setCustom(false);
+          write(next);
+        }}
+        hint="One pull request for every repository of an agent step that has its own branch with commits, each into its own base. Then the step takes no head and no base."
+      />
+      {selected === OTHER_REPOS ? (
+        <ValueControl
+          key={`${pointer}-repos-text`}
+          name="repos"
+          label="repos reference"
+          at={pointer}
+          control="text"
+          required={false}
+          value={node.repos}
+          multiline={false}
+          target={["repos"]}
+          placeholder="one {{reference}} to the repositories of an agent step"
+          onChange={(next) => write(typeof next === "string" ? next : "")}
+        />
+      ) : null}
+    </>
+  );
+}
+
 function ActionFields({ doc, pointer, node, statuses, onChange }: FieldsProps) {
   const connector = textOf(node.connector);
   const spec = specOf(connector);
@@ -558,8 +633,19 @@ function ActionFields({ doc, pointer, node, statuses, onChange }: FieldsProps) {
               (name === "head" || name === "base")
             )
               return null;
+            if (name === "repos" && isPullRequestStep(connector))
+              return (
+                <PullRequestReposControl
+                  key={`${pointer}-repos`}
+                  doc={doc}
+                  pointer={pointer}
+                  node={node}
+                  onChange={onChange}
+                />
+              );
             const control = controlOf(name, input);
-            const label = `${name}${input.required ? "" : " (optional)"}`;
+            const required = inputRequired(spec, name, input);
+            const label = `${name}${required ? "" : " (optional)"}`;
             // The status a `ticket.setStatus` step sets (#1040): a choice among the statuses of the project's board or Jira workflow
             // (the same names the status trigger offers); a project with none to offer keeps the plain literal field.
             if (
@@ -613,7 +699,7 @@ function ActionFields({ doc, pointer, node, statuses, onChange }: FieldsProps) {
                 label={label}
                 at={pointer}
                 control={control}
-                required={input.required === true}
+                required={required}
                 value={node[name]}
                 multiline={
                   control === "longText" ||

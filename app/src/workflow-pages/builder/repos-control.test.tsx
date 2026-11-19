@@ -180,6 +180,38 @@ describe("the repository list of an agent step in the inspector", () => {
     ]);
   });
 
+  // #1094-T64
+  it("keeps what was typed with its own repository when an entry before it is removed", async () => {
+    render(
+      <Step
+        start={lane({
+          repos: [
+            { repo: "acme/app" },
+            { repo: "acme/lib" },
+            { repo: "acme/app", branch: "x" },
+          ],
+        })}
+        api={apiOf()}
+      />,
+    );
+    // The third one is switched to typing its repository.
+    await userEvent.selectOptions(
+      await screen.findByLabelText("Repository 3"),
+      "\u0000other",
+    );
+    expect(
+      screen.getByRole("textbox", { name: /Repository 3 \(owner\/name\)/ }),
+    ).toBeTruthy();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove repository 1" }),
+    );
+    // It is the second now, and still typed; the one before it is still picked.
+    expect(
+      screen.getByRole("textbox", { name: /Repository 2 \(owner\/name\)/ }),
+    ).toBeTruthy();
+    expect(screen.getByLabelText("Repository 1").tagName).toBe("SELECT");
+  });
+
   // #1094-T62
   it("types the repository when the routes give nothing, and says so", async () => {
     const api = {

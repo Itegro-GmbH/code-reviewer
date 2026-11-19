@@ -198,6 +198,17 @@ function RepoBlock({
   );
 }
 
+type EntryKeys = { list: number[]; next: number };
+
+/** The keys for `count` entries: those there are, with new ones added or the surplus cut; the same object when nothing changes. */
+function fitKeys(keys: EntryKeys, count: number): EntryKeys {
+  if (keys.list.length === count) return keys;
+  const list = keys.list.slice(0, count);
+  let next = keys.next;
+  while (list.length < count) list.push(next++);
+  return { list, next };
+}
+
 /** The `repos` of an agent step; a step that continues a session shows why it has none. */
 export function ReposControl({
   doc,
@@ -214,6 +225,11 @@ export function ReposControl({
 }) {
   const choices = useRepoChoices();
   const entries = repoEntries(node);
+  // Each entry keeps its own key while the list changes: the block holds state of its own (a typed repository, a custom base) that must stay
+  // with the entry when one before it is removed. Keys follow the entries by position, and a removal takes its key out.
+  const [keys, setKeys] = useState<EntryKeys>({ list: [], next: 0 });
+  const fitted = fitKeys(keys, entries.length);
+  if (fitted !== keys) setKeys(fitted);
   if (continued && entries.length === 0)
     return (
       <p className="text-xs text-muted-foreground">
@@ -233,8 +249,7 @@ export function ReposControl({
       </span>
       {entries.map((entry, index) => (
         <RepoBlock
-          // The position is the identity of an entry: nothing else in it is unique or stable while it is typed.
-          key={index}
+          key={fitted.list[index]}
           index={index}
           pointer={pointer}
           entry={entry}
@@ -242,9 +257,13 @@ export function ReposControl({
           onChange={(change) =>
             onChange(changeRepoEntry(doc, pointer, entries, index, change))
           }
-          onRemove={() =>
-            onChange(removeRepoEntry(doc, pointer, entries, index))
-          }
+          onRemove={() => {
+            setKeys({
+              ...fitted,
+              list: fitted.list.filter((_, at) => at !== index),
+            });
+            onChange(removeRepoEntry(doc, pointer, entries, index));
+          }}
         />
       ))}
       {entries.length >= SESSION_REPOS_MAX ? (

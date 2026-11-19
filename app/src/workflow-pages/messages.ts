@@ -422,6 +422,7 @@ export const PAGE_COPY = {
   stepPrReason: {
     direct: "the agent worked directly on the base branch",
     not_pushed: "nothing was pushed",
+    push_rejected: "GitHub refused the push of the branch",
     no_commits: "no commits ahead of the base",
   },
   stepLink: "Open on GitHub",

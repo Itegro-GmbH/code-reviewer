@@ -371,6 +371,35 @@ describe("the detail page of an implementer run", () => {
     );
   });
 
+  // #1094-T72
+  it("says '1 repository' for a list of one, and does not point at a first one", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          repos: [
+            {
+              fullName: "acme/widgets",
+              url: "https://github.com/acme/widgets",
+              base: "main",
+              branch: "feature/7",
+              branchUrl: "https://github.com/acme/widgets/tree/feature/7",
+              created: true,
+              commits: 2,
+              files: 1,
+              pushed: true,
+              shortSha: SHA.slice(0, 7),
+            },
+          ],
+        }),
+      }),
+    );
+    expect(container.textContent).toContain(
+      "This task worked on 1 repository.",
+    );
+    expect(container.textContent).not.toContain("1 repositories");
+    expect(container.textContent).not.toContain("those of the first one");
+  });
+
   it("shows no list of repositories for a task of one", () => {
     const { container } = renderDetail(detail({ implementer: task() }));
     expect(container.querySelector('[data-slot="run-repos"]')).toBeNull();

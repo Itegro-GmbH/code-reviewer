@@ -122,11 +122,51 @@ export function withConnector(node: Doc, connector: string): Doc {
   return next;
 }
 
+/**
+ * Whether the editor treats an input as required. `head` of a pull request step is optional in the spec only because `repos` replaces it
+ * (#1094); in the editor it is required whenever the step has no `repos`, so it is shown as a required field and kept as `""` when emptied.
+ */
+export function inputRequired(
+  spec: ConnectorSpec,
+  name: string,
+  input: InputSpec,
+): boolean {
+  if (PULL_REQUEST_OPENING_CONNECTORS.includes(spec.name) && name === "head")
+    return true;
+  return input.required === true;
+}
+
 /** Inputs in the order the connector lists them, required ones first. */
 export function inputsOf(spec: ConnectorSpec): [string, InputSpec][] {
   const entries = Object.entries(spec.inputs);
   return [
-    ...entries.filter(([, input]) => input.required),
-    ...entries.filter(([, input]) => !input.required),
+    ...entries.filter(([name, input]) => inputRequired(spec, name, input)),
+    ...entries.filter(([name, input]) => !inputRequired(spec, name, input)),
   ];
+}
+
+/** Whether a connector is the pull request step that takes `repos` (#1094). */
+export function isPullRequestStep(connector: unknown): boolean {
+  return (
+    typeof connector === "string" &&
+    PULL_REQUEST_OPENING_CONNECTORS.includes(connector)
+  );
+}
+
+/**
+ * The pull request step with this `repos` (a reference to the repositories of an agent step): `head` and `base` leave the document, since
+ * the validator refuses them next to `repos`. An empty value takes `repos` out again and puts the empty `head` back, so the step is the
+ * single form it was before (#1094).
+ */
+export function withPullRequestRepos(node: Doc, repos: string): Doc {
+  const next: Doc = { ...node };
+  if (repos.trim() === "") {
+    delete next.repos;
+    if (next.head === undefined) next.head = "";
+    return next;
+  }
+  next.repos = repos;
+  delete next.head;
+  delete next.base;
+  return next;
 }

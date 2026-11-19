@@ -1011,3 +1011,116 @@ describe("a status trigger (#1036)", () => {
     expect(screen.queryByRole("note")).toBeNull();
   });
 });
+
+describe("a pull request step with repositories", () => {
+  function lane(prStep: Record<string, unknown>): Doc {
+    return {
+      ...shippedLane(),
+      steps: [
+        {
+          id: "implement",
+          kind: "agent",
+          profile: "implementer@1",
+          instruction: "Do it.",
+          repos: [{ repo: "acme/app", base: "main", branch: "feat/x" }],
+        },
+        {
+          id: "other",
+          kind: "agent",
+          profile: "implementer@1",
+          instruction: "x",
+        },
+        {
+          id: "open",
+          kind: "action",
+          connector: "github.pullRequest.open",
+          ...prStep,
+        },
+      ],
+    };
+  }
+
+  // #1094-T40
+  it("shows head as a required field of the single form, with no optional mark", () => {
+    render(<Harness start={lane({ head: "" })} pointer="/steps/2" />);
+    expect(screen.getByLabelText("head")).toBeTruthy();
+    expect(screen.queryByLabelText("head (optional)")).toBeNull();
+    expect(screen.getByLabelText("base (optional)")).toBeTruthy();
+  });
+
+  // #1094-T41
+  it("offers the agent steps that have repositories and takes head and base out when one is picked", async () => {
+    const seen = vi.fn();
+    render(
+      <Harness
+        start={lane({ head: "feat/x", base: "main" })}
+        pointer="/steps/2"
+        seen={seen}
+      />,
+    );
+    const select = screen.getByLabelText(/Repositories/);
+    const options = within(select)
+      .getAllByRole("option")
+      .map((o) => o.textContent);
+    expect(options).toContain("Every repository of step implement");
+    expect(options.join("|")).not.toContain("step other");
+    await userEvent.selectOptions(select, "{{implement.repos}}");
+    const doc = seen.mock.calls.at(-1)?.[0] as Doc;
+    expect(nodeAt(doc, "/steps/2")).toEqual({
+      id: "open",
+      kind: "action",
+      connector: "github.pullRequest.open",
+      repos: "{{implement.repos}}",
+    });
+    expect(screen.queryByLabelText("head")).toBeNull();
+    expect(screen.queryByLabelText("base (optional)")).toBeNull();
+  });
+
+  // #1094-T42
+  it("puts an empty head back when the repositories are taken out again", async () => {
+    const seen = vi.fn();
+    render(
+      <Harness
+        start={lane({ repos: "{{implement.repos}}" })}
+        pointer="/steps/2"
+        seen={seen}
+      />,
+    );
+    expect(screen.queryByLabelText("head")).toBeNull();
+    await userEvent.selectOptions(screen.getByLabelText(/Repositories/), "");
+    const doc = seen.mock.calls.at(-1)?.[0] as Doc;
+    expect(nodeAt(doc, "/steps/2")).toEqual({
+      id: "open",
+      kind: "action",
+      connector: "github.pullRequest.open",
+      head: "",
+    });
+    expect(screen.getByLabelText("head")).toBeTruthy();
+  });
+
+  // #1094-T43
+  it("takes another reference typed, and leaves no head or base next to it", async () => {
+    const seen = vi.fn();
+    render(
+      <Harness
+        start={lane({ head: "a", base: "b" })}
+        pointer="/steps/2"
+        seen={seen}
+      />,
+    );
+    await userEvent.selectOptions(
+      screen.getByLabelText(/Repositories/),
+      "__other__",
+    );
+    await userEvent.type(
+      screen.getByLabelText("repos reference"),
+      "{{{{implement.repos}}",
+    );
+    const doc = seen.mock.calls.at(-1)?.[0] as Doc;
+    expect(nodeAt(doc, "/steps/2")).toMatchObject({
+      repos: "{{implement.repos}}",
+    });
+    expect(nodeAt(doc, "/steps/2")).not.toHaveProperty("head");
+    expect(nodeAt(doc, "/steps/2")).not.toHaveProperty("base");
+  });
+});

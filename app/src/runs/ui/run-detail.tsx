@@ -428,13 +428,14 @@ function TaskResult({
       {task.repos.length === 0 ? null : (
         <Section title="Repositories">
           <p className="text-sm text-muted-foreground">
-            This task worked on {task.repos.length} repositories. The branch,
-            the commits and the files below are those of the first one.
+            {task.repos.length === 1
+              ? "This task worked on 1 repository."
+              : `This task worked on ${String(task.repos.length)} repositories. The branch, the commits and the files below are those of the first one.`}
           </p>
           <ul data-slot="run-repos" className="flex flex-col gap-2 text-sm">
-            {task.repos.map((repo) => (
+            {task.repos.map((repo, index) => (
               <li
-                key={repo.fullName}
+                key={`${repo.fullName}-${String(index)}`}
                 data-repo-result={repo.pushed ? "pushed" : "not-pushed"}
                 className="break-words"
               >

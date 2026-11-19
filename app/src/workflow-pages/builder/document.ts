@@ -473,13 +473,24 @@ export function isInOnFailure(pointer: Pointer): boolean {
 
 /** The ids of the agent steps in the document, in document order: what `session.continue` may name. */
 export function agentIds(doc: Doc): string[] {
-  const ids: string[] = [];
+  return agentsOf(doc).map((node) => node.id as string);
+}
+
+/** The ids of the agent steps that have a `repos` list of their own (#1094): the steps whose `{{<id>.repos}}` a pull request step takes. */
+export function agentIdsWithRepos(doc: Doc): string[] {
+  return agentsOf(doc)
+    .filter((node) => Array.isArray(node.repos))
+    .map((node) => node.id as string);
+}
+
+function agentsOf(doc: Doc): Doc[] {
+  const ids: Doc[] = [];
   const visit = (entries: unknown): void => {
     if (!Array.isArray(entries)) return;
     for (const entry of entries as unknown[]) {
       if (!isRecord(entry)) continue;
       if (entry.kind === "agent" && typeof entry.id === "string")
-        ids.push(entry.id);
+        ids.push(entry);
       visit(entry.steps);
       for (const key of CHILD_LISTS) visit(entry[key]);
     }
