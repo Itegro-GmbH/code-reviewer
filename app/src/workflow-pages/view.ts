@@ -3,6 +3,10 @@
 // What the workflow pages show of a run, made from the run as the routes give it (#873). Pure: no clock, no network. Everything in a
 // step's output is data from outside the page (an agent's result, what a connector got from GitHub): this file only picks the few
 // values the page shows, checks their types, and decides which of them may become a link; the components render them as text.
+import {
+  PULL_REQUEST_SKIP_REASONS,
+  type PullRequestSkipReason,
+} from "../workflows/connectors.ts";
 import { isRecord } from "../workflows/json.ts";
 import { formatUtc } from "../ui/format-time.ts";
 import { formatMoney } from "../workspace-billing/money.ts";
@@ -135,7 +139,21 @@ export function readableMessageOf(message: string | null): string | null {
 export const URL_TEXT_MAX_CHARS = 200;
 
 /** What an action step returned that the page shows, whatever the action is. A value of another type is left out. */
+export type PullRequestResult = {
+  fullName: string;
+  base: string;
+  head: string;
+  state: "opened" | "existing" | "skipped";
+  /** Why a skipped one got none: direct work, nothing pushed (or a push the remote refused), no commits ahead of the base. */
+  reason?: PullRequestSkipReason;
+  number?: number;
+  /** A link to the pull request, only when it is an address of that repository. */
+  url?: string;
+};
+
 export type ActionResult = {
+  /** #1094: one entry per repository of a pull request step with several repositories. */
+  pullRequests?: PullRequestResult[];
   /** A link to GitHub: only an address of the run's own repository. */
   url?: string;
   /** The address as it was returned, when it was not safe to link: shown as text. */
@@ -163,7 +181,48 @@ export function actionResultOf(
   if (typeof number === "number" && Number.isInteger(number))
     result.number = number;
   if (typeof existing === "boolean") result.existing = existing;
+  const pullRequests = pullRequestsOf(step.output.pullRequests);
+  if (pullRequests.length > 0) result.pullRequests = pullRequests;
   return Object.keys(result).length === 0 ? undefined : result;
+}
+
+const FULL_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const PULL_REQUESTS_SHOWN_MAX = 10;
+const BRANCH_TEXT_MAX_CHARS = 255;
+
+function shortText(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+/** The pull requests of a step with several repositories (#1094): each one checked, an entry that is not what the connector yields is left out. */
+function pullRequestsOf(value: unknown): PullRequestResult[] {
+  if (!Array.isArray(value)) return [];
+  const found: PullRequestResult[] = [];
+  for (const entry of value.slice(0, PULL_REQUESTS_SHOWN_MAX)) {
+    if (!isRecord(entry)) continue;
+    const { fullName, state, reason, number, url } = entry;
+    const base = shortText(entry.base, BRANCH_TEXT_MAX_CHARS);
+    const head = shortText(entry.head, BRANCH_TEXT_MAX_CHARS);
+    if (
+      typeof fullName !== "string" ||
+      !FULL_NAME.test(fullName) ||
+      base === undefined ||
+      head === undefined ||
+      (state !== "opened" && state !== "existing" && state !== "skipped")
+    )
+      continue;
+    const result: PullRequestResult = { fullName, base, head, state };
+    if (PULL_REQUEST_SKIP_REASONS.some((known) => known === reason))
+      result.reason = reason as PullRequestSkipReason;
+    if (typeof number === "number" && Number.isInteger(number))
+      result.number = number;
+    // The link is the pull request's own address in the repository the entry names, never one of the run's repository.
+    const link = githubLinkInRepository(url, fullName);
+    if (link !== undefined) result.url = link;
+    found.push(result);
+  }
+  return found;
 }
 
 /** What a condition or a loop decided, as the engine wrote it into the step: the branch it took, or how a loop ended and after how many rounds. */
@@ -189,7 +248,20 @@ export function controlResultOf(
 }
 
 /** What an agent step returned: the branch it pushed to (a link when the repository is known), and the rest of the output as data. */
+/** One repository of an agent step with several (#1094): the entry of `{{<step>.repos}}`. */
+export type AgentRepoResult = {
+  fullName: string;
+  base: string;
+  branch: string;
+  /** A link to the branch in that repository, when it is on the remote. */
+  branchUrl?: string;
+  commits: number;
+  pushed: boolean;
+};
+
 export type AgentResult = {
+  /** #1094: one entry per repository, in the order of the step; the single `branch` is then not shown (it is the first entry). */
+  repos?: AgentRepoResult[];
   /** What the agent said it did, as the text it is (the `summary` of its result). */
   summary?: string;
   branch?: string;
@@ -198,7 +270,38 @@ export type AgentResult = {
   fields?: Record<string, unknown>;
 };
 
-const SHOWN_FACTS = ["branch"] as const;
+const SHOWN_FACTS = ["branch", "repos"] as const;
+
+/** The repositories of an agent step with several (#1094), as the engine stored them; an entry that is not what the fact says is left out. */
+function agentReposOf(value: unknown): AgentRepoResult[] {
+  if (!Array.isArray(value)) return [];
+  const found: AgentRepoResult[] = [];
+  for (const entry of value.slice(0, PULL_REQUESTS_SHOWN_MAX)) {
+    if (!isRecord(entry)) continue;
+    const base = shortText(entry.base, BRANCH_TEXT_MAX_CHARS);
+    const branch = shortText(entry.branch, BRANCH_TEXT_MAX_CHARS);
+    if (
+      typeof entry.fullName !== "string" ||
+      !FULL_NAME.test(entry.fullName) ||
+      base === undefined ||
+      branch === undefined
+    )
+      continue;
+    const link =
+      entry.pushed === true && branch === entry.branch
+        ? githubBranchLink(entry.fullName, entry.branch)
+        : undefined;
+    found.push({
+      fullName: entry.fullName,
+      base,
+      branch,
+      ...(link === undefined ? {} : { branchUrl: link }),
+      commits: Array.isArray(entry.commits) ? entry.commits.length : 0,
+      pushed: entry.pushed === true,
+    });
+  }
+  return found;
+}
 
 export function agentResultOf(
   step: Pick<StepView, "kind" | "output">,
@@ -209,7 +312,10 @@ export function agentResultOf(
   const { branch, summary } = step.output;
   if (typeof summary === "string" && summary.trim() !== "")
     result.summary = summary;
-  if (typeof branch === "string" && branch !== "") {
+  const repos = agentReposOf(step.output.repos);
+  if (repos.length > 0) result.repos = repos;
+  // With several repositories the list says it all: the single branch is the first entry's.
+  if (repos.length === 0 && typeof branch === "string" && branch !== "") {
     result.branch = branch;
     const link = githubBranchLink(repository, branch);
     if (link !== undefined) result.branchUrl = link;

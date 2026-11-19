@@ -54,6 +54,8 @@ import {
 import {
   GITHUB_ISSUE_LABELS,
   PROJECT_MEMBERS,
+  PULL_REQUEST_COMMENT,
+  PULL_REQUEST_OPENING_CONNECTORS,
   REPOS_BASE_ROOTS,
   REPOS_BRANCH_ROOTS,
   REPOS_REPO_ROOTS,
@@ -349,6 +351,52 @@ function connectorOf(
     : undefined;
 }
 
+/**
+ * What an action yields. A pull request step with `repos` (#1094) yields the single fields of the first pull request that exists, and none when
+ * every repository is skipped, so they are optional there (read them with a default); without `repos` they are always there, as before.
+ */
+function outputOf(
+  spec: ConnectorSpec,
+  node: Record<string, unknown>,
+): ConnectorSpec["output"] {
+  if (!PULL_REQUEST_OPENING_CONNECTORS.includes(spec.name)) return spec.output;
+  // The single form yields the three fields of its one pull request, as it always did.
+  if (node.repos === undefined)
+    return {
+      kind: "object",
+      fields: Object.fromEntries(
+        Object.entries(spec.output.fields).filter(
+          ([name]) => name !== "pullRequests" && name !== "repository",
+        ),
+      ),
+    };
+  return {
+    kind: "object",
+    fields: Object.fromEntries(
+      Object.entries(spec.output.fields).map(([name, field]) => [
+        name,
+        ["number", "url", "existing", "repository"].includes(name)
+          ? { ...field, required: false }
+          : field,
+      ]),
+    ),
+  };
+}
+
+/** #1094: what the `pullRequest` (and `repository`) input of an action that acts on a pull request tells the scope check about its references. */
+function pullRequestUse(
+  connector: string,
+  input: string,
+): { pullRequestInput?: "review" | "comment" } {
+  if (connector === TICKET_REQUEST_REVIEW.name)
+    return input === "pullRequest" || input === "repository"
+      ? { pullRequestInput: "review" }
+      : {};
+  if (connector === PULL_REQUEST_COMMENT.name && input === "pullRequest")
+    return { pullRequestInput: "comment" };
+  return {};
+}
+
 export function actionBinding(
   node: Record<string, unknown>,
   resolver: WorkflowResolver,
@@ -357,7 +405,7 @@ export function actionBinding(
   return {
     id: node.id as string,
     kind: "action",
-    type: spec?.output ?? { kind: "unknown" },
+    type: spec === undefined ? { kind: "unknown" } : outputOf(spec, node),
     unavailable: {},
     ...(spec === undefined ? {} : { connector: spec.name }),
   };
@@ -1144,8 +1192,38 @@ function checkAction(
     }
     const target: TargetCheck | undefined =
       field.target === undefined ? undefined : { input, roots: field.target };
-    checkInput(node[input], field.type, at, c, reachOf(env, at, state), target);
+    // #1094: the title and the body of a pull request step with `repos` are written once for every repository: `{{repo.fullName}}`,
+    // `{{repo.base}}` and `{{repo.branch}}` stand for the one being opened.
+    const perRepo =
+      node.repos !== undefined &&
+      PULL_REQUEST_OPENING_CONNECTORS.includes(spec.name) &&
+      (input === "title" || input === "body");
+    checkInput(
+      node[input],
+      field.type,
+      at,
+      c,
+      {
+        ...reachOf(env, at, state),
+        ...(perRepo ? { repoScope: true } : {}),
+        ...pullRequestUse(spec.name, input),
+      },
+      target,
+    );
   }
+  if (
+    node.repos !== undefined &&
+    PULL_REQUEST_OPENING_CONNECTORS.includes(spec.name)
+  )
+    for (const input of ["head", "base"])
+      if (node[input] !== undefined)
+        c.report(
+          issue(
+            pointer(path, input),
+            "invalid_value",
+            `A pull request step with 'repos' opens each pull request from the branch of its entry into that entry's base, so it takes no '${input}'. Take '${input}' out, or take 'repos' out.`,
+          ),
+        );
   // A list of no entries holds nothing: `add: [], remove: []` is as good as neither.
   if (
     spec.atLeastOneOf?.every(

@@ -4,6 +4,7 @@
 // connectors, and the three entry points the rest of the app uses: the run service behind the routes, the hook of the runner API that
 // says a turn is over, and the reconciler of the sweep.
 import { repositoryByName } from "./repository-by-name.ts";
+import { targetOfNamedRepository } from "./repository-target.ts";
 import "server-only";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
@@ -165,6 +166,12 @@ const projectOfRun = runTicketTargets.projectOfRun;
 const connectors = createConnectorRegistry(
   createGithubConnectors({
     targetOf: (call) => connectorTargetOf(call.workspaceId, call.repository.id),
+    // #1094: a pull request step with `repos` acts on any active repository of the workspace, by its full name.
+    targetOfRepository: targetOfNamedRepository({
+      repositories: (workspaceId) =>
+        createRepositoriesRepository(getDatabase(), workspaceId),
+      targetOf: connectorTargetOf,
+    }),
     ticketTargetOf,
     // #922: the board of the project the run's lane belongs to.
     async projectBoard(call) {

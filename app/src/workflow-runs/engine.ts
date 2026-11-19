@@ -1553,6 +1553,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         "action_failed",
         "The repository of the run is no longer one of the workspace.",
       );
+    // #1094: a connector that does one thing per repository has a budget that grows with their number (a test may shorten it).
+    const budgetMs =
+      deps.actionTimeoutMs ?? connector.budgetMs?.(inputs) ?? ACTION_TIMEOUT_MS;
     try {
       const output = await withTimeout(
         (signal) =>
@@ -1566,8 +1569,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             idempotencyKey: requestIdOf(run, step),
             stepCreatedAt: step.createdAt,
             signal,
+            budgetMs,
           }),
-        deps.actionTimeoutMs ?? ACTION_TIMEOUT_MS,
+        budgetMs,
       );
       return {
         status: "succeeded",
@@ -1583,7 +1587,13 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             : `The connector did not answer in time and the action was not repeated. ${MAY_HAVE_HAPPENED}`,
         );
       if (error instanceof ConnectorError)
-        return failed(error.code, error.message);
+        return {
+          ...failed(error.code, error.message),
+          // What the action had done before it failed stays with the step (the pull requests a step with `repos` opened).
+          ...(error.output === undefined
+            ? {}
+            : { output: JSON.stringify(error.output) }),
+        };
       if (error instanceof ActionInputError)
         return failed("action_input_invalid", error.message);
       // Whatever else the connector threw is not for people to read: it goes to the log, the step keeps a sentence.

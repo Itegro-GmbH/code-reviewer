@@ -261,6 +261,18 @@ are `ErrorCode`s of the runner contract.
 - **Direct work and read access.** For a profile that may not push the installation need not have the right to write, in the start of the task, the follow-up and the claim
   alike; the token is then a read-only one.
 
+## Notes from the implementation of the pull request step and the lane editor (#1094)
+
+- **No separate "commits ahead" call.** The provider's `openPullRequest` already looks for an open pull request from the head into the base first and answers
+  "no commits between the branches" (`INTEGRATION_NO_CHANGES_TO_COMPARE`) when GitHub refuses for that reason, so the step uses those two answers (`existing`,
+  skipped as `no_commits`) instead of a compare call of its own: one request fewer per repository and the same result. Direct work and a branch that is not
+  pushed are skipped before any request.
+- **Optional single outputs.** With `repos` the validator treats `number`, `url` and `existing` as optional fields (a reference needs `| default`), because
+  they are absent when every repository is skipped; the single form keeps them required, so existing lanes validate as before.
+- **`repos` is a target and the repository is checked again at run time.** The connector acts only on a repository that is an active repository of the
+  workspace (looked up by full name without regard to case); the token is the provider's usual one, limited to that repository.
+- **The editor reads the same routes as the Implementer form** (`GET .../implementer/repositories`, `.../repositories/:id/branches`) and nothing new.
+
 ## Out of scope
 
 - Dropping `projects.repository_id`, or any change to which repository a project belongs to.

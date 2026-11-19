@@ -130,8 +130,11 @@ const ROOT_WORDS: Record<TargetRoot, string> = {
   ticketKey:
     "the key of the ticket the run is about, {{trigger.ticket.key}} or {{trigger.ticket.number}}",
   branch: "the branch of an agent step that may push, {{<step id>.branch}}",
+  repos: "the repositories of an agent step that may push, {{<step id>.repos}}",
   pullRequest:
     "the number of the pull request an action opened, {{<step id>.number}} of a pullRequest.open step",
+  prRepository:
+    "the repository of the first pull request of a pullRequest.open step with repos, {{<step id>.repository}}",
 };
 
 function refuseTarget(
@@ -198,6 +201,16 @@ export function targetVerdict(
     binding.connector !== undefined &&
     PULL_REQUEST_OPENING_CONNECTORS.includes(binding.connector);
   if (branchOfAgent) return takes("branch") ? "ok" : "refused";
+  if (binding.kind === "agent" && field === "repos" && more.length === 0)
+    return takes("repos") ? "ok" : "refused";
+  if (
+    field === "repository" &&
+    more.length === 0 &&
+    binding.kind === "action" &&
+    binding.connector !== undefined &&
+    PULL_REQUEST_OPENING_CONNECTORS.includes(binding.connector)
+  )
+    return takes("prRepository") ? "ok" : "refused";
   return openedPullRequest && takes("pullRequest") ? "ok" : "refused";
 }
 

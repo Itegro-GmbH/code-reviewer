@@ -17,10 +17,12 @@ import {
   shown,
   type Issue,
 } from "./issues.ts";
+import { PULL_REQUEST_OPENING_CONNECTORS } from "./connectors.ts";
 import { NAMES_LISTED_MAX } from "./limits.ts";
 import {
   describeType,
   valueFits,
+  STRING,
   UNKNOWN,
   type FieldType,
   type ObjectType,
@@ -134,6 +136,14 @@ export type Use = {
   env: Env;
   /** `previous.` is fine without a default here (the `next` instruction of a loop). */
   previousOk: boolean;
+  /** #1094: the text is written once for every repository of a pull request step with `repos`: `repo.fullName`, `repo.base` and `repo.branch` are texts. */
+  repoScope?: true;
+  /**
+   * #1094: the text is the `pullRequest` input of an action that acts on a pull request. `review` (`ticket.requestReview`): the number of a pull
+   * request step with `repos` may be missing (every repository skipped) and the step then skips, so it takes no default (which would be a number
+   * of the run's repository). `comment` (`pullRequest.comment`): it acts on the repository of the run, so it takes no number of such a step at all.
+   */
+  pullRequestInput?: "review" | "comment";
   /** Where the node that holds the text sits, to tell a step that comes later from one in another branch. */
   nodePath: string;
   /** The branches around the node, outermost first. */
@@ -302,7 +312,28 @@ function descend(
         known,
       );
     }
-    if (!field.required && ref.default === undefined)
+    const manyPullRequests =
+      use.pullRequestInput !== undefined &&
+      position === 0 &&
+      !field.required &&
+      binding.connector !== undefined &&
+      PULL_REQUEST_OPENING_CONNECTORS.includes(binding.connector) &&
+      (name === "number" || name === "repository");
+    if (manyPullRequests && use.pullRequestInput === "comment")
+      return fail(
+        context,
+        use,
+        "invalid_value",
+        `${shown(ref.path.join("."))} may be a pull request of another repository (a pull request step with 'repos' opens one in each), and 'pullRequest.comment' acts on the repository of the run. Ask for a review with 'ticket.requestReview' and its 'repository', or open the pull request with 'head' and 'base'.`,
+      );
+    if (manyPullRequests && ref.default !== undefined)
+      return fail(
+        context,
+        use,
+        "invalid_value",
+        `${shown(ref.path.join("."))} has no default: a pull request step with 'repos' yields no number when every repository was skipped, and the step then skips instead of acting on a number of the run's repository.`,
+      );
+    if (!field.required && ref.default === undefined && !manyPullRequests)
       return fail(
         context,
         use,
@@ -341,6 +372,13 @@ function notPreviousMessage(
   return `${shown(stepId)} is no step of the body of the loop '${frame.id}'. 'previous.' names its direct steps.`;
 }
 
+/** #1094: what `{{repo.…}}` offers in the title and the body of a pull request step with `repos`. */
+export const REPO_SCOPE_FIELDS: readonly string[] = [
+  "fullName",
+  "base",
+  "branch",
+];
+
 /** The type of what `ref` points at, or an issue reported and `unknown` returned (so a mistake is reported once). */
 export function resolveReference(
   ref: Reference,
@@ -348,6 +386,22 @@ export function resolveReference(
   use: Use,
 ): Resolution {
   const [root, ...rest] = ref.path as [string, ...string[]];
+  if (root === "repo" && use.repoScope === true) {
+    const [field, ...more] = rest;
+    if (
+      field !== undefined &&
+      more.length === 0 &&
+      REPO_SCOPE_FIELDS.includes(field)
+    )
+      return { type: STRING };
+    return fail(
+      context,
+      use,
+      "reference_unknown_field",
+      `'repo' stands for the repository a pull request is opened in; it has ${listNames(REPO_SCOPE_FIELDS)}.`,
+      REPO_SCOPE_FIELDS,
+    );
+  }
   if (root === "previous") {
     const frame = use.env.loops[use.env.loops.length - 1];
     if (frame === undefined)
