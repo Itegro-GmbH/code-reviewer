@@ -910,10 +910,23 @@ describe("the change description of a version (#1107)", () => {
     const { a } = await setup();
     const created = await a.create(USER, tiny());
 
-    for (const bad of ["", "   \n\t ", 7, null, ["x"], "x".repeat(1001)]) {
+    for (const bad of [
+      "",
+      "   \n\t ",
+      7,
+      null,
+      ["x"],
+      "x".repeat(1001),
+      "fixed\u0000",
+    ]) {
       const failure = await failureOf(
         a.update(USER, created.id, { ...tiny(), changeDescription: bad }),
       );
+      expect(failure.code).toBe("WORKFLOW_CHANGE_DESCRIPTION_REQUIRED");
+    }
+    // A body that is not an object is refused for its missing change description, before the document is read.
+    for (const body of [null, [], "text"]) {
+      const failure = await failureOf(a.update(USER, created.id, body));
       expect(failure.code).toBe("WORKFLOW_CHANGE_DESCRIPTION_REQUIRED");
     }
     expect((await a.get(created.id)).version).toBe(1);

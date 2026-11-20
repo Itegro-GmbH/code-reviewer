@@ -21,7 +21,7 @@ at a step that ran before on every path, the types of the values that flow, the 
 ## How an AI should use it: validate, fix, save
 
 1. Write the document.
-2. `POST /api/w/<slug>/workflows/validate` with the document as the body. The answer is `200` with `{"valid": false, "errors": [...]}` or
+2. `POST /api/w/<slug>/workflows/validate` with the document as the body (the document alone: `changeDescription` belongs only to the `PUT` of a new version, and `validate` refuses it as `unknown_field`). The answer is `200` with `{"valid": false, "errors": [...]}` or
    `{"valid": true, "errors": [], "truncated": false, "budgetUsd": 20, "turnTimeLimitMinutes": 60, "steps": 6}`. Nothing is stored.
 3. Read **every** error. Each has a `path` (a JSON pointer into your document), a `code` (stable: branch on it), a `message` (the cause in a
    sentence) and, where a name was wrong, `available`: the names that exist at that point (steps in reach, fields of a step, profiles,

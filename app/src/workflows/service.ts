@@ -450,11 +450,16 @@ export function createWorkflowService({
     document: unknown;
     changeDescription: string;
   } {
-    if (!isRecord(body)) return { document: body, changeDescription: "" };
+    if (!isRecord(body)) throw changeDescriptionRequired();
     const { changeDescription, ...document } = body;
     const text =
       typeof changeDescription === "string" ? changeDescription.trim() : "";
-    if (text === "" || textLength(text) > CHANGE_DESCRIPTION_MAX_LENGTH)
+    // Postgres refuses NUL in a text column; refusing it here keeps the answer a 422 instead of a failed insert.
+    if (
+      text === "" ||
+      text.includes("\u0000") ||
+      textLength(text) > CHANGE_DESCRIPTION_MAX_LENGTH
+    )
       throw changeDescriptionRequired();
     return { document, changeDescription: text };
   }

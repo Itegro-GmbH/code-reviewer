@@ -333,10 +333,10 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   },
   { route: "/w/[workspace]/environments", class: "implementer" },
   // The agent workflows, written through the API (#833, milestone 1): the list and the save, the check without storing, one
-  // workflow with its versions. The lane builder and the pages below edit, show and start them.
+  // workflow with its versions. The pages below show and start them; lanes are written through the API only (#1107).
   { route: "/api/w/[workspace]/workflows", class: "implementer" },
   { route: "/api/w/[workspace]/workflows/validate", class: "implementer" },
-  // The values a step can reach, for the picker of the lane builder (#927).
+  // The values a step can reach (#927); the lane builder that used it is gone (#1107), the route stays for the API.
   { route: "/api/w/[workspace]/workflows/scope", class: "implementer" },
   {
     route: "/api/w/[workspace]/workflows/[workflowId]",
