@@ -33,7 +33,10 @@ export function workflowServiceFor(
     projects: createProjectsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
-    models: implementerModelsFor(workspaceId),
+    // Built when a document names a model of its own, not for every request: it reads the workspace's keys, which a validation without one never needs.
+    models: {
+      check: (model) => implementerModelsFor(workspaceId).check(model),
+    },
     mcpServers: createMcpServersRepository(db, workspaceId),
     mcpOAuth: createMcpOAuthRepository(db, workspaceId),
     onlineRunners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),

@@ -594,7 +594,7 @@ const WORKFLOW_CASES: Case[] = [
     "an agent with a session continue that is a number",
     (d) => (implement(d).session = { continue: 5 }),
   ],
-  ["an agent with a key it does not know", (d) => (implement(d).model = "x")],
+  ["an agent with a key it does not know", (d) => (implement(d).mood = "x")],
   [
     "an agent with a result that is no object schema",
     (d) => (implement(d).result = { type: "string" }),
@@ -948,7 +948,7 @@ const REPLACEMENTS: unknown[] = [
   { type: "integer" },
   { type: "object", properties: { a: { type: "string" } } },
 ];
-const KEYS = ["extra", "repo", "model", "id", "kind", "type", "items", "enum"];
+const KEYS = ["extra", "repo", "mood", "id", "kind", "type", "items", "enum"];
 
 type Where = Array<string | number>;
 
