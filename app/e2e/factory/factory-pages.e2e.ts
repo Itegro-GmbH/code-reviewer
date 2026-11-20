@@ -232,41 +232,48 @@ test.describe("the pages of the factory", () => {
     await expect(page.getByText("Done · 1")).toBeVisible();
   });
 
-  // #951
-  test("@smoke the lane builder saves a version with one value from the picker", async ({
+  // #951, #1107
+  test("@smoke the lane page is read only and lists the versions with their change descriptions", async ({
     page,
   }) => {
     await openProject(page, "lanes");
+    // A new version through the API: it needs a change description, and the page shows it (#1107).
+    const refused = await page.request.put(
+      `/api/w/default/workflows/${laneId}`,
+      {
+        data: { ...LANE_DOCUMENT, description: "Writes a note on the issue." },
+      },
+    );
+    expect(refused.status()).toBe(422);
+    expect(((await refused.json()) as { error: string }).error).toBe(
+      "WORKFLOW_CHANGE_DESCRIPTION_REQUIRED",
+    );
+    const saved = await page.request.put(`/api/w/default/workflows/${laneId}`, {
+      data: {
+        ...LANE_DOCUMENT,
+        description: "Writes a note on the issue.",
+        changeDescription: "Shortened the description.",
+      },
+    });
+    expect(saved.status()).toBe(200);
     await page
       .getByRole("table", { name: "Lanes" })
       .getByRole("link", { name: LANE_DOCUMENT.name })
       .click();
-    // The only step of the lane is open in the inspector.
-    await expect(page.getByRole("region", { name: "Inspector" })).toBeVisible();
-    await page
-      .getByRole("button", { name: "Insert a value into body" })
-      .click();
-    const picker = page.getByRole("dialog", { name: "Values for body" });
-    await picker
-      .getByRole("option")
-      .and(page.locator('[data-reference="trigger.ticket.title"]'))
-      .click();
-    await page.getByRole("button", { name: "Save as v2" }).click();
-    await expect(page.getByText("Saved.")).toBeVisible();
 
-    // The version is the one the route holds now: the picker's value is in the saved text.
-    const saved = await page.request.get(`/api/w/default/workflows/${laneId}`);
-    expect(saved.status()).toBe(200);
-    const { workflow } = (await saved.json()) as {
-      workflow: {
-        version: number;
-        document: { steps: Array<{ body?: string }> };
-      };
-    };
-    expect(workflow.version).toBe(2);
-    expect(workflow.document.steps[0]?.body).toContain(
-      "{{trigger.ticket.title}}",
+    await expect(
+      page.getByRole("heading", { name: LANE_DOCUMENT.name }),
+    ).toBeVisible();
+    await expect(page.getByText("Writes a note on the issue.")).toBeVisible();
+    const versions = page.getByRole("list", { name: "Versions" });
+    await expect(versions.getByRole("listitem")).toHaveCount(2);
+    await expect(versions).toContainText("Shortened the description.");
+    await expect(versions).toContainText(LANE_DOCUMENT.description);
+    // Nothing to edit: no inspector, no save, no JSON.
+    await expect(page.getByRole("region", { name: "Inspector" })).toHaveCount(
+      0,
     );
+    await expect(page.getByRole("button", { name: /Save as/ })).toHaveCount(0);
   });
 
   // #951

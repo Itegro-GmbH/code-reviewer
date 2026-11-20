@@ -9,9 +9,9 @@ import {
   BUDGET_DEFAULT_USD,
   TURN_TIME_LIMIT_MINUTES_DEFAULT,
 } from "../workflows/limits.ts";
-import { describeNode } from "../workflow-pages/builder/describe.ts";
-import { KIND_LABEL } from "../workflow-pages/builder/describe.ts";
-import type { NodeKind } from "../workflow-pages/builder/document.ts";
+import { describeNode } from "../workflow-pages/flow/describe.ts";
+import { KIND_LABEL } from "../workflow-pages/flow/describe.ts";
+import type { NodeKind } from "../workflow-pages/flow/document.ts";
 import {
   startFormOf,
   type StartFormFields,

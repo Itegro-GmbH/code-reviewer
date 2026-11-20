@@ -647,7 +647,7 @@ describe("the Runs section of a lane's page (#1080)", () => {
   });
 
   // #1080-T32
-  it("says that the lane has not run yet, not that a filter matched nothing, and promises Run now only where it is offered", () => {
+  it("says that the lane has not run yet, not that a filter matched nothing, and promises the Start form only where it is offered", () => {
     renderInLane(page([]), true);
     expect(screen.getByText(LANE_RUNS_COPY.emptyInLaneStartable)).toBeTruthy();
     expect(screen.queryByText(LANE_RUNS_COPY.emptyFiltered)).toBeNull();
@@ -656,7 +656,7 @@ describe("the Runs section of a lane's page (#1080)", () => {
     // A member who may not start, or an archived lane (the page offers no start): no promise of the button.
     renderInLane(page([]), false);
     expect(screen.getByText(LANE_RUNS_COPY.emptyInLane)).toBeTruthy();
-    expect(LANE_RUNS_COPY.emptyInLane).not.toContain("Run now");
+    expect(LANE_RUNS_COPY.emptyInLane).not.toContain("form");
     expect(screen.queryByText(LANE_RUNS_COPY.emptyInLaneStartable)).toBeNull();
   });
 

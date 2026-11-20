@@ -15,7 +15,10 @@ import {
   addWorkspace,
   defaultWorkspaceId,
 } from "../../src/test-support/workspaces.ts";
-import { issueToPr, tiny } from "../../src/workflows/test-fixtures.ts";
+import {
+  issueToPr as bareIssueToPr,
+  tiny as bareTiny,
+} from "../../src/workflows/test-fixtures.ts";
 import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../../src/db/repositories/profiles-repository.ts";
 import { createProjectsRepository } from "../../src/db/repositories/projects-repository.ts";
@@ -42,6 +45,16 @@ const DEPLOYMENTS = {
   },
   codeReviewCom: { PRODUCT_ID: "code-review-com" },
 } as const;
+
+/** A new lane has a description of its own (#1107). */
+const tiny = (): ReturnType<typeof bareTiny> => ({
+  ...bareTiny(),
+  description: "A tiny lane.",
+});
+const issueToPr = (): ReturnType<typeof bareIssueToPr> => ({
+  description: "Implements an issue.",
+  ...bareIssueToPr(),
+});
 
 async function startRoutes(
   options: { role?: WorkspaceRole; deployment?: keyof typeof DEPLOYMENTS } = {},
@@ -144,15 +157,23 @@ async function startRoutes(
     itemRoute.GET(new Request(`${base(workspace)}/${id}${query}`), {
       params: Promise.resolve({ workspace, workflowId: id }),
     } as Parameters<typeof itemRoute.GET>[1]);
+  /** A save of a new version says what it changes (#1107): added unless the test sets it (or sends no document). */
+  const withChange = (body: unknown) =>
+    typeof body === "object" && body !== null && !Array.isArray(body)
+      ? { changeDescription: "Changed in the test.", ...body }
+      : body;
   const update = (
     id: string,
     body: unknown,
     query = "",
     workspace = "default",
   ) =>
-    itemRoute.PUT(json("PUT", `${base(workspace)}/${id}${query}`, body), {
-      params: Promise.resolve({ workspace, workflowId: id }),
-    } as Parameters<typeof itemRoute.PUT>[1]);
+    itemRoute.PUT(
+      json("PUT", `${base(workspace)}/${id}${query}`, withChange(body)),
+      {
+        params: Promise.resolve({ workspace, workflowId: id }),
+      } as Parameters<typeof itemRoute.PUT>[1],
+    );
   const archive = (id: string, workspace = "default") =>
     itemRoute.DELETE(
       new Request(`${base(workspace)}/${id}`, { method: "DELETE" }),
@@ -389,6 +410,46 @@ describe("the workflow route files", () => {
       { id, name: "Theirs", current_version: 1, archived_at: null },
     ]);
     expect(await versions()).toHaveLength(1);
+  });
+
+  // #1107-T01
+  it("refuse a new version without a change description with 422 and store nothing, and take it as a root key of the body", async () => {
+    const { create, update, get, versions, addEnvironment } =
+      await startRoutes();
+    await addEnvironment("node");
+    const created = await create(tiny());
+    const { workflow } = (await created.json()) as { workflow: { id: string } };
+
+    // `changeDescription: undefined` is left out of the JSON body: the test sends none.
+    const refused = await update(workflow.id, {
+      ...tiny(),
+      changeDescription: undefined,
+    });
+    const blank = await update(workflow.id, {
+      ...tiny(),
+      changeDescription: "  ",
+    });
+    const saved = await update(workflow.id, {
+      ...tiny(),
+      changeDescription: "Reworded.",
+    });
+
+    for (const response of [refused, blank]) {
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({
+        error: "WORKFLOW_CHANGE_DESCRIPTION_REQUIRED",
+      });
+    }
+    expect(saved.status).toBe(200);
+    expect((await versions()).map((v) => v.version)).toEqual([1, 2]);
+    expect(await (await get(workflow.id)).json()).toMatchObject({
+      workflow: {
+        versions: [
+          { version: 2, changeDescription: "Reworded." },
+          { version: 1, changeDescription: null },
+        ],
+      },
+    });
   });
 
   // #833-M1-T225

@@ -28,8 +28,18 @@ const VIEW: WorkflowView = {
   documentVersion: 2,
   document: { version: 1 },
   versions: [
-    { version: 2, savedAt: "2026-11-04T09:00:00.000Z" },
-    { version: 1, savedAt: "2026-11-04T08:00:00.000Z" },
+    {
+      version: 2,
+      savedAt: "2026-11-04T09:00:00.000Z",
+      savedBy: "user-1",
+      changeDescription: "Raised the budget",
+    },
+    {
+      version: 1,
+      savedAt: "2026-11-04T08:00:00.000Z",
+      savedBy: "user-1",
+      changeDescription: null,
+    },
   ],
 };
 

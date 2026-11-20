@@ -38,6 +38,8 @@ export const WORKFLOW_ERROR_CODES = [
   "WORKFLOW_PROJECT_NOT_FOUND",
   /** The project is switched off (a deactivated project takes no new lane). */
   "WORKFLOW_PROJECT_INACTIVE",
+  /** A new version needs `changeDescription` (#1107): 1 to 1,000 characters saying what it changes against the version before, not only white space. */
+  "WORKFLOW_CHANGE_DESCRIPTION_REQUIRED",
 ] as const;
 export type WorkflowErrorCode = (typeof WORKFLOW_ERROR_CODES)[number];
 
@@ -58,6 +60,7 @@ export const WORKFLOW_ERROR_STATUS: Record<WorkflowErrorCode, number> = {
   WORKFLOW_PROJECT_REQUIRED: 400,
   WORKFLOW_PROJECT_NOT_FOUND: 404,
   WORKFLOW_PROJECT_INACTIVE: 409,
+  WORKFLOW_CHANGE_DESCRIPTION_REQUIRED: 422,
 };
 
 /** A request value that cannot be used (#922), with the names that would have been accepted. */

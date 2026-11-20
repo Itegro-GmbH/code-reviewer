@@ -10,7 +10,7 @@ import { Button } from "../components/button.tsx";
 import { PageHeader } from "../components/page-header.tsx";
 import { Alert } from "../components/ui/alert.tsx";
 import { ROLE_NOT_ALLOWED } from "../copy/messages.ts";
-import type { ProfileService } from "../profiles/service.ts";
+import type { ProjectService } from "../projects/service.ts";
 import { WorkflowError } from "../workflows/errors.ts";
 import type { WorkflowService, WorkflowView } from "../workflows/service.ts";
 import { workspacePath } from "../workspaces/paths.ts";
@@ -19,11 +19,10 @@ import type { LaneRunListView } from "../workflow-runs/lane-run-list.ts";
 import type { RunView, WorkflowRunService } from "../workflow-runs/service.ts";
 import type { RunsApi } from "../runs/ui/api.ts";
 import type { WorkflowRunsApi } from "./api.ts";
-import type { BuilderApi } from "./builder/api.ts";
-import { LaneBuilder } from "./builder/builder.tsx";
-import type { ProfileOption } from "./builder/inspector.tsx";
-import type { McpServerOption } from "./builder/mcp-edit.ts";
-import type { McpService } from "../mcp/service.ts";
+import { describeNode } from "./flow/describe.ts";
+import { normalise } from "./flow/document.ts";
+import { isRecord } from "../workflows/json.ts";
+import { LaneOverview, type LaneOverviewData } from "./lane-overview.tsx";
 import { PAGE_COPY, START_COPY } from "./messages.ts";
 import { WorkflowRunDetail } from "./run-detail.tsx";
 import { LaneRunsList } from "./lane-runs-list.tsx";
@@ -54,32 +53,46 @@ export type WorkflowPageData =
   | NotFound
   | {
       kind: "ready";
-      workflow: Pick<
-        WorkflowView,
-        "id" | "name" | "version" | "archivedAt" | "versions" | "document"
-      >;
+      workflow: Pick<WorkflowView, "id" | "name" | "version" | "archivedAt">;
+      /** What the page says of the lane itself: description, project, triggers and the versions (#1107). */
+      lane: LaneOverviewData;
       form: StartFormSpec;
       /** The first page of the runs of this lane (#1080): the list of the Runs page, filtered by the lane. */
       runs: LaneRunListView;
-      /** The profiles of the workspace that can be run: what the builder's profile field offers (#926). */
-      profiles: ProfileOption[];
-      /** The status names of the board of the lane's project (#1036): what a status trigger offers; empty when the project has no board. */
-      statuses: string[];
-      /** The MCP servers of the workspace (#1052): what the lane card and the agent steps offer. Never an address or a header. */
-      mcpServers: McpServerOption[];
     };
+
+/** The description of a saved lane document, or null when it has none. */
+function descriptionOf(document: unknown): string | null {
+  const text = isRecord(document) ? document.description : undefined;
+  return typeof text === "string" && text.trim() !== "" ? text : null;
+}
+
+/** One line per trigger of the saved document: what starts the lane. */
+function triggerLinesOf(document: unknown): string[] {
+  const doc = normalise(document);
+  const triggers =
+    doc !== undefined && Array.isArray(doc.triggers) ? doc.triggers : [];
+  return triggers.flatMap((trigger) =>
+    isRecord(trigger)
+      ? [
+          (() => {
+            const { title, summary } = describeNode(trigger, "trigger");
+            return `${title} · ${summary}`;
+          })(),
+        ]
+      : [],
+  );
+}
 
 export async function loadWorkflowPage(
   workflowId: string,
   deps: {
     workflows: Pick<WorkflowService, "get">;
     runs: Pick<WorkflowRunService, "listWorkspace">;
-    /** Left out, the builder offers no list of profiles and the profile of a step is typed. */
-    profiles?: Pick<ProfileService, "list">;
-    /** #1036: the status names of the board of a project; never throws. Left out, the builder offers none and the names are typed. */
-    statuses?: (projectId: string) => Promise<string[]>;
-    /** #1052: the MCP servers of the workspace. Left out: the builder offers none. */
-    mcp?: Pick<McpService, "list">;
+    /** The projects of the workspace: the lane's project is named from its repository. Left out, the page names none. */
+    projects?: Pick<ProjectService, "listProjects">;
+    /** The members of the workspace: the names of whoever saved a version. Left out, no author is named. */
+    authors?: { list(): Promise<{ userId: string; name: string }[]> };
   },
 ): Promise<WorkflowPageData> {
   const found = await orNotFound(async () => ({
@@ -89,13 +102,15 @@ export async function loadWorkflowPage(
   }));
   if (found === undefined) return { kind: "not_found" };
   const { workflow, runs } = found;
-  const listed =
-    deps.profiles === undefined ? [] : (await deps.profiles.list()).profiles;
-  const statuses =
-    deps.statuses === undefined || workflow.projectId === null
-      ? []
-      : await deps.statuses(workflow.projectId);
-  const servers = deps.mcp === undefined ? [] : await deps.mcp.list();
+  const [entries, members, first] = await Promise.all([
+    deps.projects === undefined || workflow.projectId === null
+      ? Promise.resolve([])
+      : deps.projects.listProjects(),
+    deps.authors === undefined ? Promise.resolve([]) : deps.authors.list(),
+    firstDescription(deps.workflows, workflow),
+  ]);
+  const entry = entries.find((each) => each.project?.id === workflow.projectId);
+  const names = new Map(members.map((member) => [member.userId, member.name]));
   return {
     kind: "ready",
     workflow: {
@@ -103,22 +118,49 @@ export async function loadWorkflowPage(
       name: workflow.name,
       version: workflow.version,
       archivedAt: workflow.archivedAt,
-      versions: workflow.versions,
-      document: workflow.document,
+    },
+    lane: {
+      description: descriptionOf(workflow.document),
+      project:
+        entry === undefined
+          ? null
+          : {
+              name: entry.repository.fullName,
+              repositoryId: entry.repository.id,
+            },
+      triggers: triggerLinesOf(workflow.document),
+      readable: normalise(workflow.document) !== undefined,
+      versions: workflow.versions.map((row) => ({
+        version: row.version,
+        savedAt: row.savedAt,
+        author: names.get(row.savedBy) ?? null,
+        text: row.version === 1 ? first : row.changeDescription,
+      })),
     },
     form: startFormOf(workflow.document),
     runs,
-    profiles: listed
-      .filter((profile) => profile.archivedAt === null)
-      .map((profile) => ({ name: profile.name, version: profile.version })),
-    statuses,
-    // Only what the pickers need: the name, and whether the last test failed. No address, no header name, no tool list.
-    mcpServers: servers.map((server) => ({
-      id: server.id,
-      name: server.name,
-      status: server.status,
-    })),
   };
+}
+
+/** The lane's description as version 1 said it (the current document's when version 1 is current). */
+async function firstDescription(
+  workflows: Pick<WorkflowService, "get">,
+  workflow: Pick<
+    WorkflowView,
+    "id" | "version" | "documentVersion" | "document"
+  >,
+): Promise<string | null> {
+  if (workflow.documentVersion === 1) return descriptionOf(workflow.document);
+  try {
+    return descriptionOf((await workflows.get(workflow.id, 1)).document);
+  } catch (error) {
+    if (
+      error instanceof WorkflowError &&
+      error.code === "WORKFLOW_VERSION_NOT_FOUND"
+    )
+      return null;
+    throw error;
+  }
 }
 
 function StartSection({
@@ -184,15 +226,12 @@ export function WorkflowPageContent({
   data,
   mayStart,
   api,
-  builderApi,
 }: {
   workspaceSlug: string;
   data: Extract<WorkflowPageData, { kind: "ready" }>;
   mayStart: boolean;
   /** Only tests pass this: a server component cannot hand functions to the client component. */
   api?: WorkflowRunsApi;
-  /** Only tests pass this, for the same reason: the builder's calls to the validate and save routes. */
-  builderApi?: BuilderApi;
 }) {
   const { workflow } = data;
   return (
@@ -212,23 +251,16 @@ export function WorkflowPageContent({
           />
         }
       />
-      <LaneBuilder
+      <LaneOverview
         workspaceSlug={workspaceSlug}
-        workflowId={workflow.id}
-        version={workflow.version}
-        versions={workflow.versions}
-        document={workflow.document}
-        profiles={data.profiles}
-        statuses={data.statuses}
-        mcpServers={data.mcpServers}
-        startPanel={
-          <StartSection
-            workspaceSlug={workspaceSlug}
-            data={data}
-            mayStart={mayStart}
-          />
-        }
-        {...(builderApi === undefined ? {} : { api: builderApi })}
+        data={data.lane}
+        current={workflow.version}
+        archived={workflow.archivedAt !== null}
+      />
+      <StartSection
+        workspaceSlug={workspaceSlug}
+        data={data}
+        mayStart={mayStart}
       />
       <section aria-labelledby="runs-heading" className="flex flex-col gap-4">
         <h2 id="runs-heading" className="text-xl font-semibold">
