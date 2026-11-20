@@ -305,6 +305,9 @@ export type WorkflowRunServiceDependencies = {
   maxBudgetUsd?: number;
 };
 
+/** The input of a manual or api trigger that declares none (#1106): no field at all. */
+const NO_INPUT_SCHEMA: ResultSchema = { type: "object", properties: {} };
+
 const REPO_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 
 const notFound = (): WorkflowRunError =>
@@ -653,9 +656,11 @@ export function createWorkflowRunService(
           { step: { id: unsupported.id, kind: unsupported.kind } },
         );
 
-      const schema = validateResultSchema(trigger.input, "", {
-        allowTicket: true,
-      }).schema;
+      // #1106: a trigger without `input` takes no fields; its run works on the repository of the lane's project.
+      const noInput = trigger.input === undefined;
+      const schema = noInput
+        ? NO_INPUT_SCHEMA
+        : validateResultSchema(trigger.input, "", { allowTicket: true }).schema;
       if (schema === undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_DOCUMENT_UNUSABLE",
@@ -667,7 +672,20 @@ export function createWorkflowRunService(
         found.workflow.projectId === null
           ? undefined
           : await deps.projects.getById(found.workflow.projectId);
-      const given = await withProjectRepository(input, schema, project);
+      if (noInput && project === undefined)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_PROJECT_REQUIRED",
+          "The trigger takes no input, so its run works on the repository of the project of the lane, and this lane has no project.",
+        );
+      // A switched-off project is never worked on, and a trigger without input has no other source of the repository (#1106).
+      if (noInput && project !== undefined && !project.active)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_PROJECT_INACTIVE",
+          "The project of this lane is switched off, so its run would work on a repository nobody reviews. Switch the project on first.",
+        );
+      const given = noInput
+        ? input
+        : await withProjectRepository(input, schema, project);
       const problems = checkResultValue(schema, given);
       if (problems.length > 0)
         throw new WorkflowRunError(
@@ -696,18 +714,39 @@ export function createWorkflowRunService(
             ? "A lane without a project takes GitHub issues only."
             : `The tickets of the project of this lane are ${sourceProvider === "jira" ? "Jira issues" : "GitHub issues"}: name one as ${sourceProvider}:owner/repo#key.`,
         );
-      const repoName = ref === undefined ? given.repo : ref.ref.repo;
-      if (typeof repoName !== "string" || !REPO_NAME.test(repoName))
-        throw new WorkflowRunError(
+      // The repository of a trigger without input is the project's: when it cannot be had, the message names it, never `input.repo`.
+      const projectRepository =
+        noInput && ref === undefined && project !== undefined
+          ? await deps.repositoryName(project.ticketSource.repositoryId)
+          : undefined;
+      const unavailable = (): WorkflowRunError =>
+        new WorkflowRunError(
           "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
-          "input.repo must be a repository of the workspace, as owner/name.",
+          projectRepository === undefined
+            ? "The repository of the project of this lane is not available: it is switched off, its installation is gone, or it was removed."
+            : `The repository of the project of this lane, ${projectRepository}, is not available: it is switched off or its installation is gone.`,
         );
+      const repoName =
+        ref !== undefined
+          ? ref.ref.repo
+          : noInput
+            ? projectRepository
+            : given.repo;
+      if (typeof repoName !== "string" || !REPO_NAME.test(repoName))
+        throw noInput && ref === undefined
+          ? unavailable()
+          : new WorkflowRunError(
+              "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
+              "input.repo must be a repository of the workspace, as owner/name.",
+            );
       const repository = await deps.resolveRepository(repoName);
       if (repository === undefined)
-        throw new WorkflowRunError(
-          "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
-          "There is no such repository in this workspace.",
-        );
+        throw noInput && ref === undefined
+          ? unavailable()
+          : new WorkflowRunError(
+              "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
+              "There is no such repository in this workspace.",
+            );
       // #922: a lane works within the ticket source of its project; checked before the platform is asked about the ticket.
       if (
         project !== undefined &&

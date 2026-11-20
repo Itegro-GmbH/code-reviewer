@@ -132,7 +132,7 @@ matches nothing and never fails the query for the other jobs.
 
 ### Routing
 
-> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105. Lane steps will not reach a runner by the labels it announced: a step names one concrete runner. How a job then reaches it is a **proposal awaiting the owner** (a reserved label `cr:runner:<id>` carried by that runner's own credential), which would amend ADR 0005 §1 and change the claim and the doorbell; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Proposal / awaiting owner", point 1.
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105. Lane steps will not reach a runner by the labels it announced: a step names one concrete runner. A job reaches it by a reserved label `cr:runner:<id>` that only that runner's own credential carries (decided 2026-11-20); this amends ADR 0005 §1 and changes the claim and the doorbell; see [ADR 0007](decisions/0007-ai-configured-factory.md), decision 10.
 
 One rule routes every job to every dispatcher (Runner v2, #971, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)): **a job requires labels
 and a dispatcher takes it only when it has all of them.** There is no special case for hosted jobs or for runner turns; the two that existed

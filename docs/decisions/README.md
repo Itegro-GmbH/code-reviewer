@@ -32,4 +32,4 @@ Every record is a file `NNNN-short-title.md` (four digits, counting up) with the
 | [0004](0004-dynamic-runner-image-and-self-check.md) | The Dynamic runner image and the startup self-check | Accepted |
 | [0005](0005-runner-v2-one-dispatcher-contract.md) | Runner v2: one Dispatcher contract | Accepted |
 | [0006](0006-multi-repo-agent-steps.md) | Several repositories per agent step | Accepted |
-| [0007](0007-ai-configured-factory.md) | An AI-configured factory: no configuration UI, profiles removed | Proposed |
+| [0007](0007-ai-configured-factory.md) | An AI-configured factory: no configuration UI, profiles removed | Accepted |

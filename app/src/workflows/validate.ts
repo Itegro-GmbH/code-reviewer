@@ -175,8 +175,9 @@ const CRON = /^[^\s]+( [^\s]+){4}$/;
 const CRON_MAX_LENGTH = 100;
 
 /**
- * A run works on one repository. A label trigger brings it (the ticket's); a manual or api one gets it from its input: a required
- * `ticket` (the run works in the repository of the ticket) or, as before #916, a required text `repo` (owner/name).
+ * A run works on one repository. A label trigger brings it (the ticket's); a manual or api one that declares `input` gets it from it: a
+ * required `ticket` (the run works in the repository of the ticket) or, as before #916, a required text `repo` (owner/name). A manual or
+ * api trigger without `input` (#1106) works on the repository of the project of its lane.
  */
 function checkRepositoryInput(
   schema: ResultSchema,
@@ -420,16 +421,8 @@ function checkTrigger(
   }
   if (trigger === "manual" || trigger === "api") {
     const where = pointer(path, "input");
-    if (value.input === undefined) {
-      report(
-        issue(
-          path,
-          "repo_required",
-          `A ${trigger} trigger needs 'input', a result schema for what the caller hands in. It must declare 'ticket' (type ticket, required: the run works in the repository of the ticket) or 'repo' (a required text, owner/name): the repository the run works on.`,
-        ),
-      );
-      return checked;
-    }
+    // #1106: without `input` the trigger takes no fields and its run works on the repository of the lane's project.
+    if (value.input === undefined) return checked;
     const result = validateResultSchema(value.input, where, {
       allowTicket: true,
     });

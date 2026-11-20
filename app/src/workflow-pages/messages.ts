@@ -581,6 +581,10 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
     "That ticket is not of the ticket source of this lane's project: name a GitHub issue or a Jira issue the way the project's tickets are.",
   WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT:
     "That repository is not the one this project takes its tickets from.",
+  WORKFLOW_RUN_PROJECT_INACTIVE:
+    "The project of this lane is switched off. Switch it on to start this lane.",
+  WORKFLOW_RUN_PROJECT_REQUIRED:
+    "This lane has no project, and its trigger takes no input, so there is no repository to work on. Put the lane in a project.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
     "The workflow has a step of a kind the engine does not run (a reserved one), so it cannot be started.",
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,
