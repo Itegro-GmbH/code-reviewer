@@ -76,6 +76,16 @@ export const SEMANTIC_ISSUE_CODES = [
   "repo_duplicate",
   /** #1092: the mount names of two repositories of `repos` (`app` or `<owner>__<name>`) are equal without regard to case. */
   "repo_name_clash",
+  /** #1105: a step names a profile and also has settings of its own (`harness`, `model`, `canPush`, `instructions`, `setupScript`, `network`). */
+  "profile_with_inline_settings",
+  /** #1105: a step names no profile and has no settings of its own. */
+  "agent_settings_required",
+  /** #1105: the workspace cannot run the model of a step's own settings (the rule of the Implementer form, as for a profile). */
+  "model_not_allowed",
+  /** #1105: a host of the `network` rule of a step is no host name the rule can hold (an address, a port, a scheme; only the validator knows). */
+  "network_host_invalid",
+  /** #1105: `setupScript` or `network` in a step whose environment runs on a runner (ADR 0007, decision 11). */
+  "hosted_only_setting",
   /** The profile does not exist (`available` names those that do). */
   "profile_unknown",
   /** The profile was archived (`available` names those that can be run). */

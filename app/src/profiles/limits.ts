@@ -12,9 +12,10 @@ export const DESCRIPTION_MAX_LENGTH = 1000;
  * The system-level text a profile gives the agent, in characters. It travels with every turn of the profile, so it is bounded; the
  * task's own instruction has the same bound (`INSTRUCTION_MAX_LENGTH` of the Implementer form).
  */
-export const INSTRUCTIONS_MAX_LENGTH = 20_000;
-/** A provider, a model or an entry id inside a model choice. */
-export const MODEL_FIELD_MAX_LENGTH = 200;
+export {
+  INSTRUCTIONS_MAX_LENGTH,
+  MODEL_FIELD_MAX_LENGTH,
+} from "../workflows/limits.ts";
 
 /** Per workspace, not counting the archived. */
 export const PROFILES_PER_WORKSPACE_MAX = 100;

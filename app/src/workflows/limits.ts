@@ -75,3 +75,13 @@ export const WORKFLOWS_PER_PROJECT_MAX = 100;
  */
 export const ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX = 1000;
 export const VERSIONS_PER_WORKFLOW_MAX = 500;
+
+// #1105: bounds of the settings an agent step carries itself. A profile has the same ones (`profiles/limits.ts` re-exports the first two);
+// the setup script's is the environment's (`implementer/environments/limits.ts`, held equal by `agent-settings.test.ts`), written here because
+// the workflow format does not import the Implementer.
+/** The standing instructions of an agent, in characters. */
+export const INSTRUCTIONS_MAX_LENGTH = 20_000;
+/** A provider, a model or an entry id inside a model choice. */
+export const MODEL_FIELD_MAX_LENGTH = 200;
+/** The setup script of a hosted environment is literal text, at most 64 KB of UTF-8. */
+export const SETUP_SCRIPT_MAX_BYTES = 64 * 1024;

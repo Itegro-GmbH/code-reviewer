@@ -11,6 +11,7 @@ import { createProjectsRepository } from "../db/repositories/projects-repository
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { implementerModelsFor } from "../implementer/shared.ts";
 import { onlineRunnersFrom } from "../runner-identity/online.ts";
 import {
   createWorkflowService,
@@ -32,6 +33,7 @@ export function workflowServiceFor(
     projects: createProjectsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
+    models: implementerModelsFor(workspaceId),
     mcpServers: createMcpServersRepository(db, workspaceId),
     mcpOAuth: createMcpOAuthRepository(db, workspaceId),
     onlineRunners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),

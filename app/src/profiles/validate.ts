@@ -4,15 +4,7 @@
 // code and a sentence an AI can act on (the `Issue` of the workflow validator, whose codes it shares). What needs the world is not
 // here but in the service: whether the model is one the claim would run, whether the cost limit is within the operator's maximum,
 // whether the name is free. The default result schema is checked by the validator of the workflow format (`validateResultSchema`).
-import {
-  CLAUDE_CODE_HARNESS,
-  CLAUDE_CODE_MODEL_PATTERN,
-  CLAUDE_CODE_PROVIDER,
-  OPENCODE_HARNESS,
-  PROFILE_HARNESSES,
-  isProfileHarness,
-  type ProfileHarness,
-} from "../runner-identity/harness.ts";
+import type { ProfileHarness } from "../runner-identity/harness.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import {
   issue,
@@ -21,10 +13,18 @@ import {
   sortIssues,
   type Issue,
 } from "../workflows/issues.ts";
+import {
+  CONTROL_OR_NEWLINE,
+  MODEL_HINT,
+  checkFreeText,
+  checkHarness,
+  checkModelFitsHarness,
+  readModel,
+} from "../workflows/agent-settings.ts";
 import { ENVIRONMENT_NAME_MAX_LENGTH } from "../implementer/environments/limits.ts";
 import { FACT_NAMES } from "../workflows/facts.ts";
 import { ERRORS_MAX } from "../workflows/limits.ts";
-import { isRecord, jsonTypeName, textLength } from "../workflows/json.ts";
+import { isRecord, jsonTypeName } from "../workflows/json.ts";
 import {
   validateResultSchema,
   type ResultSchema,
@@ -32,7 +32,6 @@ import {
 import {
   DESCRIPTION_MAX_LENGTH,
   INSTRUCTIONS_MAX_LENGTH,
-  MODEL_FIELD_MAX_LENGTH,
   PROFILE_NAME_PATTERN,
 } from "./limits.ts";
 
@@ -89,37 +88,6 @@ export type ProfileCheck = {
   /** The profile, when valid. */
   profile?: ProfileDocument;
 };
-
-// Control characters other than tab, line feed and carriage return; a lone surrogate half is not text at all.
-const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
-const LONE_SURROGATE =
-  /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
-/** Every control character: an id or a model name is one line. */
-const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/;
-
-function isText(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "";
-}
-
-const MODEL_HINT =
-  'A model is {"entryId": "<id>"} (a released catalog entry, for a workspace on the operator\'s key) or {"provider": "<slug>", "model": "<id>"} (a model of the workspace\'s own key). Both come from GET .../implementer/models.';
-
-function readModel(value: unknown): ModelChoice | undefined {
-  if (!isRecord(value)) return undefined;
-  const keys = Object.keys(value).sort().join(",");
-  const fits = (...fields: unknown[]) =>
-    fields.every(
-      (field) =>
-        isText(field) &&
-        field.length <= MODEL_FIELD_MAX_LENGTH &&
-        !CONTROL_OR_NEWLINE.test(field),
-    );
-  if (keys === "entryId" && fits(value.entryId))
-    return { entryId: value.entryId as string };
-  if (keys === "model,provider" && fits(value.provider, value.model))
-    return { provider: value.provider as string, model: value.model as string };
-  return undefined;
-}
 
 export function validateProfile(body: unknown): ProfileCheck {
   const errors: Issue[] = [];
@@ -196,36 +164,8 @@ export function validateProfile(body: unknown): ProfileCheck {
       );
       return undefined;
     }
-    if (textLength(value) > max) {
-      report(
-        issue(
-          pointer("", key),
-          "limit_exceeded",
-          `The field "${key}" may have ${max} characters at most.`,
-        ),
-      );
+    if (checkFreeText(value, pointer("", key), key, max, report) === undefined)
       return undefined;
-    }
-    if (CONTROL.test(value) || LONE_SURROGATE.test(value)) {
-      report(
-        issue(
-          pointer("", key),
-          "invalid_value",
-          `The field "${key}" holds a control character or a broken character. Tabs and line breaks are fine.`,
-        ),
-      );
-      return undefined;
-    }
-    if (key === "instructions" && value !== "" && value.trim() === "") {
-      report(
-        issue(
-          pointer("", key),
-          "invalid_value",
-          `The field "instructions" holds only white space. Write the instructions, or leave the field out.`,
-        ),
-      );
-      return undefined;
-    }
     return value;
   };
   const description = text("description", DESCRIPTION_MAX_LENGTH);
@@ -284,46 +224,16 @@ export function validateProfile(body: unknown): ProfileCheck {
 
   // #854, #856: the harness. Only the two harnesses of a profile are named; a name that is neither is refused. Whether the harness can
   // run is not the profile's to know: `claude-code` runs on a runner environment only, which the workflow check says.
-  const harness = given("harness");
-  let harnessName: ProfileHarness = OPENCODE_HARNESS;
-  if (harness !== undefined) {
-    if (typeof harness === "string" && isProfileHarness(harness))
-      harnessName = harness;
-    else
-      report(
-        issue(
-          "/harness",
-          typeof harness === "string" ? "invalid_value" : "wrong_type",
-          `The harness is ${PROFILE_HARNESSES.map((name) => shown(name)).join(" or ")}; ${typeof harness === "string" ? shown(harness) : `a ${jsonTypeName(harness)}`} is not a harness a profile can name.`,
-          PROFILE_HARNESSES,
-        ),
-      );
-  }
+  const harnessName: ProfileHarness = checkHarness(
+    given("harness"),
+    "/harness",
+    report,
+    "profile",
+  );
 
   // The provider `claude-code` is the harness's own: a model of it is a name Claude Code reads, and no other model is run by it.
-  if (model !== undefined) {
-    const claude =
-      "provider" in model && model.provider === CLAUDE_CODE_PROVIDER
-        ? model
-        : null;
-    if (harnessName === CLAUDE_CODE_HARNESS) {
-      if (claude === null || !CLAUDE_CODE_MODEL_PATTERN.test(claude.model))
-        report(
-          issue(
-            "/model",
-            "invalid_value",
-            `A profile on the harness ${shown(CLAUDE_CODE_HARNESS)} takes {"provider": "${CLAUDE_CODE_PROVIDER}", "model": "<name>"} with the name Claude Code reads (for example "sonnet" or "claude-sonnet-5-5"); its login is the runner's, so no catalog entry and no key of the workspace is used.`,
-          ),
-        );
-    } else if (claude !== null)
-      report(
-        issue(
-          "/model",
-          "invalid_value",
-          `The provider ${shown(CLAUDE_CODE_PROVIDER)} belongs to the harness ${shown(CLAUDE_CODE_HARNESS)}. Name that harness in the field "harness", or choose a model from GET .../implementer/models.`,
-        ),
-      );
-  }
+  if (model !== undefined)
+    checkModelFitsHarness(model, harnessName, "/model", report, "profile");
 
   // #919: where the agent works. Whether the environment exists, and whether it fits the model and the harness, needs the workspace:
   // the service says it.

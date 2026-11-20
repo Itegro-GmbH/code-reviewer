@@ -8,6 +8,7 @@ import type { McpOAuthRepository } from "../db/repositories/mcp-oauth-repository
 import type { McpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type { ProjectsRepository } from "../db/repositories/projects-repository.ts";
 import type {
   StoredWorkflow,
@@ -31,11 +32,13 @@ import {
   ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
   BUDGET_OPERATOR_MAX_USD,
   DOCUMENT_MAX_BYTES,
+  STEPS_MAX,
   VERSIONS_PER_WORKFLOW_MAX,
   WORKFLOW_ID_MAX_LENGTH,
   WORKFLOWS_PER_PROJECT_MAX,
 } from "./limits.ts";
 import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
+import { inlineModelsIn } from "./agent-settings.ts";
 import { isRecord } from "./json.ts";
 import { mcpServersNamedBy } from "./mcp.ts";
 import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
@@ -159,6 +162,11 @@ export type WorkflowServiceDependencies = {
    * announces (`no_runner_announces`). Left out: the validator does not ask.
    */
   onlineRunners?: () => Promise<readonly OnlineRunner[]>;
+  /**
+   * #1105: the rule of the Implementer form for a model, as the claim applies it, so the model of a step with settings of its own is held to
+   * what a profile's model is held to when it is saved (`model_not_allowed`). Left out: such a model is not checked against the workspace.
+   */
+  models?: { check(choice: ModelChoice): Promise<string | null> };
   /** The most a workflow may be given to spend. Until the operator can set it: `BUDGET_OPERATOR_MAX_USD`. */
   maxBudgetUsd?: number;
   /** The most archived workflows a workspace may hold: `ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX`. */
@@ -209,6 +217,7 @@ export function createWorkflowService({
   mcpServers,
   mcpOAuth,
   onlineRunners,
+  models,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
   archivedMax = ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
   samples,
@@ -224,7 +233,15 @@ export function createWorkflowService({
     }));
     const { wanted, build } = profileInfosOf(live, profileRefsIn(body));
     const facts = await profiles.versionFacts(wanted);
+    // #1105: the models the steps name themselves, asked once each; a model not looked at (past the bound) is not refused on a guess.
+    const verdicts = new Map<string, string | null>();
+    if (models !== undefined)
+      for (const model of inlineModelsIn(body, STEPS_MAX))
+        verdicts.set(JSON.stringify(model), await models.check(model));
     return createResolver({
+      ...(models === undefined
+        ? {}
+        : { modelCheck: (model) => verdicts.get(JSON.stringify(model)) }),
       environments: known,
       profiles: build(facts),
       archivedProfiles: await profiles.archivedNames(),

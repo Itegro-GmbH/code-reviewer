@@ -3,9 +3,29 @@
 // The steps of a workflow in the order they run (#833): the shape of each node, and everything that depends on what ran before it.
 // `check-values.ts` checks the texts and values, `scope.ts` what a reference can reach.
 import {
+  CLAUDE_CODE_HARNESS,
+  CLAUDE_CODE_PROVIDER,
+  OPENCODE_HARNESS,
   harnessNeedsRunner,
   harnessOfProfile,
 } from "../runner-identity/harness.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
+import {
+  NETWORK_HOSTS_MAX,
+  NETWORK_HOST_MAX_LENGTH,
+  NETWORK_MODES,
+  isNetworkMode,
+  normalizeHostEntry,
+} from "../network-rule/network.ts";
+import {
+  INLINE_SETTING_KEYS,
+  MODEL_HINT,
+  checkHarness,
+  checkInstructions,
+  checkModelFitsHarness,
+  isInlineStep,
+  readModel,
+} from "./agent-settings.ts";
 import {
   checkCondition,
   checkInput,
@@ -34,6 +54,7 @@ import {
   LOOP_ROUNDS_MAX,
   NAMES_LISTED_MAX,
   NESTING_DEPTH_MAX,
+  SETUP_SCRIPT_MAX_BYTES,
 } from "./limits.ts";
 import { demandOfProfile } from "../runner-identity/access.ts";
 import { announcedBy, describeDemand } from "../runner-identity/announced.ts";
@@ -236,6 +257,46 @@ function findProfile(
   };
 }
 
+/** The model of a step with settings of its own, when it is one of the two shapes. */
+function inlineModelOf(node: Record<string, unknown>): ModelChoice | undefined {
+  return readModel(node.model);
+}
+
+/**
+ * What the validator knows about a step's settings, from the profile version it runs or, for a step with settings of its own, from the
+ * step. Silent: the checks report. A profile nobody knows has no facts (reported where it is written). An inline step whose `canPush`
+ * is not a boolean is taken as one that may push, as a profile without facts is, so one mistake is not reported at every use.
+ */
+function factsOf(
+  node: Record<string, unknown>,
+  resolver: WorkflowResolver,
+): ProfileVersionFacts | undefined {
+  if (!isInlineStep(node)) return findProfile(node.profile, resolver)?.facts;
+  const model = inlineModelOf(node);
+  const harness =
+    node.harness === CLAUDE_CODE_HARNESS
+      ? CLAUDE_CODE_HARNESS
+      : OPENCODE_HARNESS;
+  return {
+    canPush: node.canPush !== false,
+    harness,
+    ...(model === undefined ? {} : { managedModel: "entryId" in model }),
+    ...(model !== undefined &&
+    harness === CLAUDE_CODE_HARNESS &&
+    "provider" in model &&
+    model.provider === CLAUDE_CODE_PROVIDER
+      ? { model: model.model }
+      : {}),
+  };
+}
+
+/** How a message names what holds the settings: the profile, or the step itself. */
+function subjectOf(node: Record<string, unknown>): string {
+  return isInlineStep(node)
+    ? `the step ${shown(String(node.id))}`
+    : `the profile ${shown(parseProfileRef(String(node.profile))?.name ?? "")}`;
+}
+
 /**
  * The environment an agent step runs in (#919): the one of its profile version, else the one the step names (a version saved before
  * profiles had one). `fromProfile` says which; `info` is undefined when the environment is not one of the workspace (reported where it
@@ -278,9 +339,29 @@ function setupOf(
     typeof node.profile === "string"
       ? parseProfileRef(node.profile)?.name
       : undefined;
+  const model = isInlineStep(node) ? inlineModelOf(node) : undefined;
   return {
     ...(profile === undefined ? {} : { profile }),
     ...(environment === undefined ? {} : { environment }),
+    ...(isInlineStep(node)
+      ? {
+          settings: {
+            harness:
+              node.harness === CLAUDE_CODE_HARNESS
+                ? CLAUDE_CODE_HARNESS
+                : OPENCODE_HARNESS,
+            model:
+              model === undefined
+                ? ""
+                : "entryId" in model
+                  ? `entry ${model.entryId}`
+                  : `${model.provider}/${model.model}`,
+            canPush: String(node.canPush !== false),
+            instructions:
+              typeof node.instructions === "string" ? node.instructions : "",
+          },
+        }
+      : {}),
   };
 }
 
@@ -292,16 +373,16 @@ export function agentBinding(
   withRepos = Array.isArray(node.repos),
 ): Binding {
   const id = node.id as string;
-  const found = findProfile(node.profile, resolver);
+  const settings = factsOf(node, resolver);
   // A profile nobody knows is reported where it is written; its facts stay, so one mistake is not reported at every use.
-  const canPush = found?.facts?.canPush ?? true;
+  const canPush = settings?.canPush ?? true;
   const declared =
     node.result === undefined
       ? undefined
       : validateResultSchema(node.result).schema;
   const schema: ResultSchema | undefined =
     declared ??
-    (node.result === undefined ? found?.facts?.defaultResult : undefined);
+    (node.result === undefined ? settings?.defaultResult : undefined);
 
   const entries: [string, FieldType][] =
     schema === undefined
@@ -320,7 +401,9 @@ export function agentBinding(
   if (withRepos && canPush)
     entries.push([REPOS_FACT, { type: REPOS_FACT_TYPE, required: true }]);
   const fields: Record<string, FieldType> = Object.fromEntries(entries);
-  const reason = `The profile ${shown(String(node.profile))} may not push, so ${shown(id)} yields no branch, no commits, no head commit and no push state. Use a profile that may push, or reference the result of the step.`;
+  const reason = isInlineStep(node)
+    ? `The step ${shown(id)} has canPush false, so it yields no branch, no commits, no head commit and no push state. Set canPush to true, or reference the result of the step.`
+    : `The profile ${shown(String(node.profile))} may not push, so ${shown(id)} yields no branch, no commits, no head commit and no push state. Use a profile that may push, or reference the result of the step.`;
   return {
     id,
     kind: "agent",
@@ -442,6 +525,7 @@ function previewBinding(
 const AGENT_KEYS = [
   ...COMMON_KEYS,
   "profile",
+  ...INLINE_SETTING_KEYS,
   "environment",
   "instruction",
   "session",
@@ -522,6 +606,306 @@ function checkProfile(
   }
 }
 
+/**
+ * #1105 (ADR 0007): a step names a profile or carries its settings itself, exactly one of the two. The profile is checked as before; the
+ * settings are checked here against what the workspace allows, with the same rules a profile gets when it is saved.
+ */
+function checkSettingsForm(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const given = INLINE_SETTING_KEYS.filter((key) => node[key] !== undefined);
+  if (node.profile !== undefined) {
+    checkProfile(node, path, c);
+    if (given.length > 0)
+      c.report(
+        issue(
+          pointer(path, "profile"),
+          "profile_with_inline_settings",
+          `A step names a profile or carries its settings, not both. This one names a profile and also has ${listNames([...given])}. Take the profile out and keep the settings, or take the settings out.`,
+          [...INLINE_SETTING_KEYS],
+        ),
+      );
+    return;
+  }
+  if (given.length === 0) {
+    c.report(
+      issue(
+        path,
+        "agent_settings_required",
+        `An agent step needs its settings: a "profile" (like "implementer"), or the settings themselves: "model", "canPush" and optionally "harness", "instructions", "setupScript", "network".`,
+        [...INLINE_SETTING_KEYS],
+      ),
+    );
+    return;
+  }
+  checkInlineSettings(node, path, c);
+}
+
+function checkInlineSettings(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const harness = checkHarness(
+    node.harness,
+    pointer(path, "harness"),
+    c.report,
+    "step",
+  );
+
+  const modelAt = pointer(path, "model");
+  let model: ModelChoice | undefined;
+  if (node.model === undefined)
+    c.report(
+      issue(
+        pointer(path, "model"),
+        "missing_field",
+        `The field "model" is required in a step with settings of its own. ${MODEL_HINT}`,
+      ),
+    );
+  else if (!isRecord(node.model))
+    c.report(
+      issue(
+        modelAt,
+        "wrong_type",
+        `The model is an object, not ${jsonTypeName(node.model)}. ${MODEL_HINT}`,
+      ),
+    );
+  else {
+    model = readModel(node.model);
+    if (model === undefined)
+      c.report(issue(modelAt, "invalid_value", MODEL_HINT));
+  }
+  if (model !== undefined) {
+    checkModelFitsHarness(model, harness, modelAt, c.report, "step");
+    // Whether the workspace can run it (the rule of the Implementer form, as a profile is held to it when saved) is what the service
+    // looked up for the document. A harness on a login has no catalog and no key of the workspace behind it: nothing to ask.
+    const reason =
+      harness === CLAUDE_CODE_HARNESS ? null : c.resolver.modelCheck?.(model);
+    if (typeof reason === "string")
+      c.report(
+        issue(
+          modelAt,
+          "model_not_allowed",
+          `This workspace cannot run that model (reason: ${shown(reason)}). GET /api/w/<workspace>/implementer/models lists the models it can.`,
+        ),
+      );
+  }
+
+  if (node.canPush === undefined)
+    c.report(
+      issue(
+        pointer(path, "canPush"),
+        "missing_field",
+        'The field "canPush" is required in a step with settings of its own: true if the step may push branches, false if not (a step that only reads, like a reviewer).',
+      ),
+    );
+  else if (typeof node.canPush !== "boolean")
+    c.report(
+      issue(
+        pointer(path, "canPush"),
+        "wrong_type",
+        `canPush is true or false, not ${jsonTypeName(node.canPush)}.`,
+      ),
+    );
+
+  if (node.instructions !== undefined) {
+    const at = pointer(path, "instructions");
+    if (node.instructions === "")
+      c.report(
+        issue(
+          at,
+          "invalid_value",
+          'The field "instructions" is the standing text of the agent. Write it, or leave the field out.',
+        ),
+      );
+    else checkInstructions(node.instructions, at, c.report);
+  }
+
+  checkHostedSettings(node, path, c);
+}
+
+/** The setup script and the network rule of a hosted environment, now settings of the step (ADR 0007, decision 11). */
+function checkHostedSettings(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const script = node.setupScript;
+  if (script !== undefined) {
+    const at = pointer(path, "setupScript");
+    if (typeof script !== "string")
+      c.report(
+        issue(
+          at,
+          "wrong_type",
+          `The setup script is a text, not ${jsonTypeName(script)}.`,
+        ),
+      );
+    else if (
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(
+        script,
+      ) ||
+      script.includes("\u0000")
+    )
+      c.report(
+        issue(
+          at,
+          "invalid_value",
+          "The setup script holds a NUL byte or a broken character; it is kept as written and must be text.",
+        ),
+      );
+    else if (new TextEncoder().encode(script).length > SETUP_SCRIPT_MAX_BYTES)
+      c.report(
+        issue(
+          at,
+          "limit_exceeded",
+          `The setup script may have ${SETUP_SCRIPT_MAX_BYTES} bytes at most.`,
+        ),
+      );
+  }
+  if (node.network !== undefined)
+    checkNetworkRule(node.network, pointer(path, "network"), c);
+  // A runner's setup and network are its owner's: the step cannot promise either there. What is not known (no such environment, a
+  // computed name) is reported elsewhere.
+  const known = environmentOf(node, c.resolver)?.info;
+  if (known?.kind !== "runner") return;
+  for (const key of ["setupScript", "network"] as const)
+    if (node[key] !== undefined)
+      c.report(
+        issue(
+          pointer(path, key),
+          "hosted_only_setting",
+          `${shown(key)} applies to a hosted environment. The environment ${shown(known.name)} runs on a runner, whose setup and network are its owner's. Take it out, or name a hosted environment.`,
+        ),
+      );
+}
+
+/**
+ * The network rule of a step (ADR 0007, decision 11), as the environment held it. The shape is the schema's (a mode of the three, `hosts`
+ * only with `list` and then one to 100); that a host entry is a host name the rule can hold (not an address, not a port) only the
+ * validator knows (`network_host_invalid`).
+ */
+function checkNetworkRule(value: unknown, at: string, c: Checker): void {
+  if (!isRecord(value)) {
+    c.report(
+      issue(
+        at,
+        "wrong_type",
+        `The network rule is {"mode": "off" | "list" | "open", "hosts": [...]}, not ${jsonTypeName(value)}.`,
+      ),
+    );
+    return;
+  }
+  keysOf(value, ["mode", "hosts"], at, c);
+  const mode = value.mode;
+  if (mode === undefined) missing(at, "mode", '"off", "list" or "open".', c);
+  else if (typeof mode !== "string" || !isNetworkMode(mode))
+    c.report(
+      issue(
+        pointer(at, "mode"),
+        typeof mode === "string" ? "invalid_value" : "wrong_type",
+        `The mode of a network rule is ${NETWORK_MODES.map((name) => shown(name)).join(", ")}.`,
+        NETWORK_MODES,
+      ),
+    );
+  const hosts = value.hosts;
+  const hostsAt = pointer(at, "hosts");
+  if (hosts === undefined) {
+    if (mode === "list")
+      missing(
+        at,
+        "hosts",
+        'the host names the agent may reach, because the mode is "list".',
+        c,
+      );
+    return;
+  }
+  if (!Array.isArray(hosts)) {
+    c.report(
+      issue(
+        hostsAt,
+        "wrong_type",
+        `'hosts' is a list of host names, not ${jsonTypeName(hosts)}.`,
+      ),
+    );
+    return;
+  }
+  if (isNetworkMode(mode) && mode !== "list" && hosts.length > 0)
+    c.report(
+      issue(
+        hostsAt,
+        "invalid_value",
+        `Host names belong to the mode "list"; the mode ${shown(mode)} takes none. Take 'hosts' out, or use "list".`,
+      ),
+    );
+  if (mode === "list" && hosts.length === 0)
+    c.report(
+      issue(
+        hostsAt,
+        "invalid_value",
+        'A network rule of mode "list" names at least one host.',
+      ),
+    );
+  if (hosts.length > NETWORK_HOSTS_MAX)
+    c.report(
+      issue(
+        hostsAt,
+        "limit_exceeded",
+        `A network rule names ${NETWORK_HOSTS_MAX} hosts at most; this one has ${hosts.length}.`,
+      ),
+    );
+  for (const [index, host] of hosts.slice(0, NETWORK_HOSTS_MAX + 1).entries()) {
+    const entryAt = pointer(hostsAt, index);
+    if (typeof host !== "string")
+      c.report(
+        issue(
+          entryAt,
+          "wrong_type",
+          `A host is a text, not ${jsonTypeName(host)}.`,
+        ),
+      );
+    else if (host === "")
+      c.report(issue(entryAt, "invalid_value", "A host is not empty."));
+    else if (host.length > NETWORK_HOST_MAX_LENGTH)
+      c.report(
+        issue(
+          entryAt,
+          "limit_exceeded",
+          `A host may have ${NETWORK_HOST_MAX_LENGTH} characters at most.`,
+        ),
+      );
+    else if (normalizeHostEntry(host) === null)
+      c.report(
+        issue(
+          entryAt,
+          "network_host_invalid",
+          `${shown(host)} is not a host name the rule can hold. Write an exact name ("registry.npmjs.org") or a suffix ("*.pythonhosted.org"), with no scheme, port, path or address.`,
+        ),
+      );
+  }
+}
+
+/** A step with settings of its own has no profile to say where it works: it names its environment (until the runner field of ADR 0007). */
+function checkInlineEnvironment(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  if (!isInlineStep(node) || node.environment !== undefined) return;
+  const names = c.resolver.environments().map((e) => e.name);
+  c.report(
+    issue(
+      pointer(path, "environment"),
+      "environment_required",
+      `A step with settings of its own names the environment it runs in. Environments: ${listNames(names)}.`,
+      names,
+    ),
+  );
+}
+
 function checkEnvironment(
   node: Record<string, unknown>,
   path: string,
@@ -567,6 +951,7 @@ function checkProfileEnvironment(
   path: string,
   c: Checker,
 ): void {
+  if (isInlineStep(node)) return;
   const facts = findProfile(node.profile, c.resolver)?.facts;
   // A profile nobody knows is reported where it is written; a version with no facts is not known, and nothing is refused on a guess.
   if (facts === undefined) return;
@@ -625,17 +1010,18 @@ function checkRunnerRules(
 ): void {
   const found = environmentOf(node, c.resolver);
   const known = found?.info;
-  const facts = findProfile(node.profile, c.resolver)?.facts;
+  const facts = factsOf(node, c.resolver);
   if (found === undefined || known === undefined || facts === undefined) return;
   const where = pointer(path, found.fromProfile ? "profile" : "environment");
-  const profile = shown(parseProfileRef(node.profile as string)?.name ?? "");
+  const subject = subjectOf(node);
+  const inline = isInlineStep(node);
   const onRunner = known.kind === "runner";
   if (onRunner && facts.managedModel === true)
     c.report(
       issue(
         where,
         "runner_needs_own_key",
-        `The environment ${shown(known.name)} runs on a runner, which works with the workspace's own key, but the profile ${profile} uses a managed model. Use a profile with a model of your own key, or a platform environment.`,
+        `The environment ${shown(known.name)} runs on a runner, which works with the workspace's own key, but ${subject} uses a managed model. ${inline ? "Use a model of your own key" : "Use a profile with a model of your own key"}, or a platform environment.`,
       ),
     );
   const harness = harnessOfProfile(facts);
@@ -655,7 +1041,7 @@ function checkRunnerRules(
       warning(
         where,
         "no_runner_announces",
-        `The environment ${shown(known.name)} runs on a runner, and the runners with its labels that are online do not announce what the profile ${profile} asks for (${describeDemand(demandOfProfile(facts))}). The workflow can still be saved; the turn waits until a runner announces it.`,
+        `The environment ${shown(known.name)} runs on a runner, and the runners with its labels that are online do not announce what ${subject} asks for (${describeDemand(demandOfProfile(facts))}). The workflow can still be saved; the turn waits until a runner announces it.`,
       ),
     );
   if (!onRunner && harnessNeedsRunner(harness))
@@ -663,7 +1049,7 @@ function checkRunnerRules(
       issue(
         where,
         "harness_needs_runner",
-        `The profile ${profile} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
+        `${inline ? "The step" : `The profile ${shown(parseProfileRef(String(node.profile))?.name ?? "")}`} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
       ),
     );
 }
@@ -863,6 +1249,29 @@ function checkSession(
           `${shown(target)} runs with the ${what} ${shown(b)}, this step with ${shown(a)}. A session can only go on with the same profile and the same environment.`,
         ),
       );
+  // #1105: a session also keeps the settings of a step that carries them itself (the turn goes on with those of the session's last turn),
+  // so a step that goes on in it repeats them: a `canPush` that differed would be the write token of a step that never asked for it.
+  const mineSettings = mine.settings;
+  const theirSettings = theirs.settings;
+  if ((mineSettings === undefined) !== (theirSettings === undefined)) {
+    if (mine.profile !== undefined || theirs.profile !== undefined)
+      c.report(
+        issue(
+          at,
+          "session_target_invalid",
+          `${shown(target)} and this step must take their settings the same way to share a session: one names a profile, the other carries the settings itself. Repeat the settings of ${shown(target)} here.`,
+        ),
+      );
+  } else if (mineSettings !== undefined && theirSettings !== undefined)
+    for (const what of ["harness", "model", "canPush", "instructions"] as const)
+      if (mineSettings[what] !== theirSettings[what])
+        c.report(
+          issue(
+            at,
+            "session_target_invalid",
+            `${shown(target)} and this step differ in the setting ${shown(what)}. A step that goes on in a session repeats the harness, model, canPush and instructions of the step whose session it continues; a session keeps the settings of its last turn.`,
+          ),
+        );
 }
 
 /**
@@ -1094,7 +1503,7 @@ function checkAgent(
 ): void {
   keysOf(node, AGENT_KEYS, path, c);
   descriptionField(node, path, c);
-  checkProfile(node, path, c);
+  checkSettingsForm(node, path, c);
   checkEnvironment(
     node,
     path,
@@ -1102,6 +1511,7 @@ function checkAgent(
     reachOf(env, pointer(path, "environment"), state),
   );
   checkProfileEnvironment(node, path, c);
+  checkInlineEnvironment(node, path, c);
   checkRunnerRules(node, path, c);
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);

@@ -11,6 +11,7 @@
 // Nothing is written before the last step, and a platform that cannot be asked ends the submit with 503.
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type { TurnProfile } from "../db/repositories/implementer-repository.ts";
+import { NETWORK_OFF, type NetworkRule } from "../network-rule/network.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -111,6 +112,17 @@ export type StartTaskOptions = {
   timeLimitMinutes?: number;
   /** #920: the request id may start with the prefix that is the engine's alone (`wf-`); a request body never gets this. */
   workflowStep?: boolean;
+  /**
+   * #1105 (ADR 0007): the settings of a lane step that carries them itself instead of naming a profile. The profile of the turn is this copy
+   * (the lane's name and version, no profile row behind it), and the body names no `profile`. Its `model` is the body's own and checked as
+   * any model is. A hosted environment contributes its size only: the step's script and network rule replace the environment's (none given
+   * is none). A request body never gets this.
+   */
+  inline?: {
+    profile: TurnProfile;
+    setupScript?: string;
+    network?: NetworkRule;
+  };
 };
 
 export type ImplementerServiceDependencies = FollowUpDependencies & {
@@ -149,6 +161,22 @@ function sameProfile(
   );
 }
 
+/** Whether the profile copy of an earlier turn is the one a step with settings of its own would write now (#1105). */
+function sameInlineProfile(
+  stored: TurnProfile | null,
+  asked: TurnProfile,
+): boolean {
+  return (
+    stored !== null &&
+    stored.id === asked.id &&
+    stored.name === asked.name &&
+    stored.version === asked.version &&
+    stored.canPush === asked.canPush &&
+    stored.instructions === asked.instructions &&
+    (stored.harness ?? "opencode") === (asked.harness ?? "opencode")
+  );
+}
+
 /**
  * Whether the repositories of a repeated body are those of the earlier task (#1092): one repository with the same base, or the same list
  * of repositories, where a base or a branch the body names is the stored one (left out is not compared: the default branch may have moved).
@@ -176,12 +204,19 @@ function sameRepos(
 function repeatOf(
   earlier: EnqueueImplementerTurnResult,
   task: StartInput,
+  inline?: StartTaskOptions["inline"],
 ): StartedTask {
   const { session, turn } = earlier;
   // With a profile the model is the version's, not the body's, and the cost limit is the operator's maximum: only the profile is compared.
+  // A step with settings of its own (#1105) is held to its model and its profile copy; its cost limit is the cap of the lane's budget,
+  // which moves with every earlier step, so it is not compared.
   const sameChoices =
     task.profile !== null ||
-    (turn.costLimitCents === task.costLimitCents &&
+    (inline === undefined &&
+      turn.costLimitCents === task.costLimitCents &&
+      task.model !== null &&
+      sameModel(turn.modelChoice, task.model)) ||
+    (inline !== undefined &&
       task.model !== null &&
       sameModel(turn.modelChoice, task.model));
   const same =
@@ -192,7 +227,9 @@ function repeatOf(
     turn.instruction === task.instruction &&
     (turn.environment?.id ?? turn.runnerEnvironment?.id ?? null) ===
       task.environmentId &&
-    sameProfile(turn.profile, task.profile) &&
+    (inline === undefined
+      ? sameProfile(turn.profile, task.profile)
+      : sameInlineProfile(turn.profile, inline.profile)) &&
     sameResult(turn.resultSchema, task.result) &&
     sameChoices;
   if (!same)
@@ -453,7 +490,7 @@ export function createImplementerService(
       const earlier = await deps.queue.findImplementerTurn(
         task.clientRequestId,
       );
-      if (earlier !== undefined) return repeatOf(earlier, task);
+      if (earlier !== undefined) return repeatOf(earlier, task, options.inline);
 
       // #1092: a step with `repos` is checked repository by repository; the profile is read first, because whether the repositories must be
       // writable depends on it (a profile that may not push gets read access only).
@@ -461,13 +498,14 @@ export function createImplementerService(
         task.repos !== undefined && task.profile !== null
           ? await copyProfile(deps.profiles, task.profile)
           : undefined;
+      const preProfile = preCopied?.profile ?? options.inline?.profile ?? null;
       let baseSha: string;
       let repoName: string;
       let sessionRepos: SessionRepo[] | undefined;
       if (task.repos !== undefined) {
         const resolved = await resolveRepos(
           task.repos,
-          (preCopied?.profile ?? null)?.canPush !== false,
+          preProfile?.canPush !== false,
         );
         baseSha = resolved.baseSha;
         sessionRepos = resolved.repos;
@@ -489,6 +527,11 @@ export function createImplementerService(
         // `validateStartInput` leaves the model out only when a profile is named.
         model = task.model as ModelChoice;
         costLimitCents = task.costLimitCents;
+        // #1105: a step with settings of its own: its profile is the copy the engine built, and no cost limit of its own (the cap below).
+        if (options.inline !== undefined) {
+          profile = options.inline.profile;
+          costLimitCents = null;
+        }
       } else {
         const copied =
           preCopied ?? (await copyProfile(deps.profiles, task.profile));
@@ -515,11 +558,21 @@ export function createImplementerService(
 
       // The environment is read now and copied into the turn: what it says at this moment is what the task runs with, whatever
       // is done to it afterwards. An id of another workspace, or of one that is gone, is the same refusal.
-      const { environment, runnerEnvironment } =
+      const copiedEnv =
         task.environmentId === null
           ? { environment: null, runnerEnvironment: null }
           : await copyEnvironment(deps.environments, task.environmentId, model);
+      const { runnerEnvironment } = copiedEnv;
       requireRunnerForHarness(profile, runnerEnvironment);
+      // #1105: the script and the network rule are the step's (ADR 0007, decision 11); the hosted environment keeps its size.
+      const environment =
+        options.inline === undefined || copiedEnv.environment === null
+          ? copiedEnv.environment
+          : {
+              ...copiedEnv.environment,
+              setupScript: options.inline.setupScript ?? "",
+              network: options.inline.network ?? NETWORK_OFF,
+            };
 
       if (costLimitCents !== null) {
         const maximumCents = await deps.operatorCostLimitCents();
@@ -589,7 +642,8 @@ export function createImplementerService(
           );
         throw error;
       }
-      if (result.status === "existing") return repeatOf(result, task);
+      if (result.status === "existing")
+        return repeatOf(result, task, options.inline);
       log(
         `[implementer] task ${result.status} job=${result.job.id} session=${result.session.id} repo=${repoName} by=${user.githubLogin}`,
       );
