@@ -2,15 +2,15 @@
 
 A **workflow** is a JSON document that says what the factory does when something happens: a trigger, and a list of steps that
 run in order. A GitHub issue gets a label, an agent implements it, another reviews, the first fixes what the review found, and a pull
-request is opened. Workflows are written by an AI through the API or edited in the [lane builder](#the-lane-builder), checked by a strict validator, and saved per
+request is opened. Workflows are written by an AI through the API (the [lane builder](#the-lane-builder) is superseded, ADR 0007), checked by a strict validator, and saved per
 workspace with versions.
 
-**Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
+**Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to (superseded, ADR 0007), the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
 workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger)), and one with a `ticket.statusChanged` trigger (#1036) starts when a ticket is moved into its status on the project's board ([The status trigger](#the-status-trigger));
-either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926) reads and edits a workflow and saves versions.
+either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926, superseded by ADR 0007) reads and edits a workflow and saves versions.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
-a deployment with the capability `implementer` (the factory); the routes below, the [lane builder](#the-lane-builder) and, for the runs, [pages](#the-run-page). Every member of a workspace may
+a deployment with the capability `implementer` (the factory); the routes below, the [lane builder](#the-lane-builder) (superseded, ADR 0007) and, for the runs, [pages](#the-run-page). Every member of a workspace may
 use them (the permission `start_implementer_task`).
 
 The format is described by two JSON Schemas, [`contracts/workflow.v1.json`](../contracts/workflow.v1.json) and
@@ -197,6 +197,8 @@ The bounds of an input the caller hands in are not known to the validator (an `i
 again when it runs**.
 
 ### The agent step (`"kind": "agent"`)
+
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step, and the step's `environment` is replaced by one named runner (a hosted runner of one sandbox type, which has a fixed size and states only its concurrency, or a self-hosted runner); see [ADR 0007](decisions/0007-ai-configured-factory.md), "Proposal" and "Migration path".
 
 A run of an agent step gets a **profile**, and the profile says who works **and where** (#919): its harness, model, rights and its environment. The step names no environment.
 
@@ -762,12 +764,14 @@ hint when the last full sync is **older than 3 days** and no delivery has writte
 
 ### Built-in lanes
 
+> **Superseded (ADR 0007, epic #1103).** The built-in lanes name the profiles `implementer@1` and `reviewer@1` and an environment; they get the settings and a runner inline with #1105 ([ADR 0007](decisions/0007-ai-configured-factory.md)).
+
 A new project may copy three lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Both need the profile versions `implementer@1` (may push) and `reviewer@1` (may not) and run in the first environment of the workspace by name.
 
 | Key | Lane | Starts | Does | Budget |
 |---|---|---|---|---|
 | `issue-to-pr` | Issue to PR | label `agent implement` on a ticket of the project's repository, or by hand with `input.ticket` | The first workflow below: implement, review, fix (3 rounds at most), open the pull request, otherwise comment on the ticket | 20 USD |
-| `issue-to-pr-status` | Issue to PR (status) | the ticket is moved on the project's board into the status `Ready for agent` (whoever moves it), or by hand with `input.ticket` | The same as `issue-to-pr`, and it reports on the board: `In progress` at the start, `In review` when the pull request is open, back to `Backlog` plus the comment when it stopped without one (`onFailure` does the same). The four status names are literals of the document: change them in the lane builder, whose picker offers the options of the project's board (a name the board does not have fails the step with `board_status_unknown`, which lists the options). A caller that copies the lane may pass its own names (`LaneStatuses` of `built-in-lanes.ts`). It is not ticked by default in the new project dialog | 20 USD |
+| `issue-to-pr-status` | Issue to PR (status) | the ticket is moved on the project's board into the status `Ready for agent` (whoever moves it), or by hand with `input.ticket` | The same as `issue-to-pr`, and it reports on the board: `In progress` at the start, `In review` when the pull request is open, back to `Backlog` plus the comment when it stopped without one (`onFailure` does the same). The four status names are literals of the document: change them by saving a new version through the API (the lane builder is superseded, ADR 0007), whose board options the validator lists offers the options of the project's board (a name the board does not have fails the step with `board_status_unknown`, which lists the options). A caller that copies the lane may pass its own names (`LaneStatuses` of `built-in-lanes.ts`). It is not ticked by default in the new project dialog | 20 USD |
 | `review-a-pull-request` | Review a pull request | by hand: `input.pullRequest` (the number); `input.repo` may be left out | The `reviewer` reads the pull request (`git fetch origin pull/<n>/head`) against its base and changes nothing; the findings (at most 20: `type` bug, risk or nit, `name`, `description`) are written as one comment on the pull request (`pullRequest.comment`) | 5 USD |
 
 **The repository of a lane of a project is the project's** (#937). The input of "Review a pull request" still declares `repo` (a manual trigger that declares an `input` must declare `ticket` or `repo`; one without `input` needs neither, #1106), but a start of a lane that belongs to a project and declares `repo` may **leave it out**: the run is given
@@ -1099,7 +1103,7 @@ When the last one is over, the run ends with the stored status and error code (`
   started are not written as skipped rows (only a step that was written and not claimed is); the page shows what ran. A discard has no such wait: the run is over at once, and only the agent's stop and push take that long. The run page has plain buttons, no confirmation.
 - **`onFailure` reads no step of the workflow.** After a failure any step may not have run, so the facts of the failure (`status`, `stepId`, `code`, `message`) and the trigger are all it has: it cannot name the branch the agent pushed or quote an earlier result. (A later extension could offer them with a `| default`.)
 - **`onFailure` is not shown apart on the run page and not in the run's JSON**: its steps are rows after the failed one, like any step; `workflow_runs.failure` is not returned by the routes yet.
-- **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
+- **Profiles are resolved per step** (superseded: profiles are removed, ADR 0007), at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
   with version 1.
 - **The sweep has a time budget** (40 seconds, 10 for the maintenance after a request), checked between two runs; a run is looked at as a whole.
 
@@ -1455,13 +1459,13 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 ## The run page
 
 *Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
-A member can edit a workflow in the [lane builder](#the-lane-builder), start one by hand and watch a run. The pages exist
+A member can edit a workflow in the [lane builder](#the-lane-builder) (superseded, ADR 0007: nobody edits a lane in the browser any more), start one by hand and watch a run. The pages exist
 only in a deployment with the capability `implementer`, are reached from the **Lanes** tab of a project (no sidebar place of their own since #925), and are open to every member (the permission
 `start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
 not exist.
 
 - **Workflows** (`/w/<slug>/workflows`): the workflows of the workspace that are not archived, with their version and the time of the last save.
-- **One workflow** (`/w/<slug>/workflows/<id>`): the [lane builder](#the-lane-builder) (its **Run now** opens the Start form) and the newest 50 runs.
+- **One workflow** (`/w/<slug>/workflows/<id>`): the [lane builder](#the-lane-builder) (to be replaced by name, description and versions, #1107; its **Run now** opens the Start form) and the newest 50 runs.
   - The form has one field for each field of the `input` of the manual trigger, the repository (`repo`) or the ticket first: a text (a ticket is a text like `github:owner/repo#128`), a whole number, a number, a
     choice (a text with a list of names), a checkbox, and a box for JSON for a list or an object. A trigger without `input` has a form without fields, only the button (#1106). A workflow with several manual triggers shows one form for each. It sends `{trigger, input, clientRequestId}` (`trigger` when the workflow has `triggers`) to
     `POST .../workflows/<id>/runs`. The `clientRequestId` is made when the form is sent and kept for the same input: sending it again after a lost
@@ -1551,6 +1555,8 @@ The lane block of a ticket (row and drawer) draws the [step track](#the-run-page
 The start dialog's Start button gets the focus back when it closes. The list's `lane` now also names a run that **waits** for an answer (`status: "waiting"`) and carries `workflowId`; before, only a running run was a lane. No new route and no migration.
 
 ## The lane builder
+
+> **Superseded (ADR 0007, epic #1103).** This page and its routes are removed: a lane is configured only as JSON through the API by an AI, and a lane page shows its name, description and versions, each from version 2 with a change description (#1107); see [ADR 0007](decisions/0007-ai-configured-factory.md), "Owner decisions".
 
 *#926 of epic #915; the code is [`app/src/workflow-pages/builder/`](../app/src/workflow-pages/README.md#the-lane-builder). It is the page of one workflow (`/w/<slug>/workflows/<id>`), reached from the Lanes tab of its project (#922).*
 

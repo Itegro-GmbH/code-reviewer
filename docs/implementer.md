@@ -1594,6 +1594,8 @@ first ran into it).
 
 ## Environments
 
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. A lane step will name one concrete runner (a hosted runner, one per sandbox type with a fixed size and its own concurrency, or a self-hosted runner) instead of an environment and labels, and the setup script and network rule move into the agent step; tasks started by hand are replaced by a one-off lane; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs" and decisions 11, 15 and 16.
+
 An environment is a start configuration for a task: a **name**, a **size**, a **setup script** and (step 7) a **network** setting. They are kept per workspace on
 the page `/w/<slug>/environments` (navigation entry "Environments", between Implementer and Runs; only in a deployment with the
 capability `implementer`, anywhere else the path is a 404 like an unknown one).
@@ -1666,6 +1668,8 @@ What does not depend on the size: the work volume is a directory of the VM's dis
 (8 GiB), `pids` of the Control container, the steps of the volume, and a VM lives `timeoutSeconds` plus the margin whatever its size.
 
 ## Profiles
+
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step of the lane; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Proposal" and "Migration path".
 
 A task can run with a **profile** (#843, [`docs/profiles.md`](profiles.md)): a workspace's own, versioned data with the model, standing
 instructions, cost limit and **push right** a turn runs with. The task is sent with `profile` in the body of the route behind the form (the form

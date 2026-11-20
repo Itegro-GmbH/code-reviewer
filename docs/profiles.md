@@ -1,5 +1,7 @@
 # Profiles: who works
 
+> **Superseded (ADR 0007, epic #1103).** This page describes the behaviour until #1105 and the release after it. Profiles are removed everywhere: harness, model, push right, cost limit and instructions move into the agent step of the lane; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Owner decisions" and "Migration path".
+
 A **profile** says **who works and where**: the harness, the model (with its key), the standing instructions, the rights (whether it may
 push branches) and the **environment** it runs in, and (optionally) what its result looks like when a step does not say. The
 [environment](implementer.md#environments) is an environment of the workspace: a hosted VM of the platform (setup script, size, network

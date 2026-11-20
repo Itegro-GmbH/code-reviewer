@@ -65,6 +65,8 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
 
 ### Environments of the kind `runner`
 
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. A lane step will name one concrete runner instead of an environment; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
+
 An environment is either `hosted` (a VM of the platform: a size, a setup script and a network rule, as before) or `runner`: **labels instead of all
 three**. A runner environment names at least one and at most twenty labels (lower case, `[a-z0-9][a-z0-9._:-]{0,39}`); a size, a script or a network
 rule in its body is refused with the field's name, not silently dropped. Size, script and network are the runner's own business (decision 8). Hosted
@@ -129,6 +131,8 @@ a stored row says). The database only matches the entries it is given. A row tha
 matches nothing and never fails the query for the other jobs.
 
 ### Routing
+
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105. Lane steps will not reach a runner by the labels it announced: a step names one concrete runner. A job reaches it by a reserved label `cr:runner:<id>` that only that runner's own credential carries (decided 2026-11-20); this amends ADR 0005 §1 and changes the claim and the doorbell; see [ADR 0007](decisions/0007-ai-configured-factory.md), decision 10.
 
 One rule routes every job to every dispatcher (Runner v2, #971, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)): **a job requires labels
 and a dispatcher takes it only when it has all of them.** There is no special case for hosted jobs or for runner turns; the two that existed
@@ -245,6 +249,8 @@ lease token (`/api/runners/v1/jobs/{id}/session`, `/resume-session`), their cont
   `implementer_snapshot`, which gets no channel.
 
 ### Validator rules
+
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105. The rules `runner_needs_own_key`, `harness_needs_runner` and `no_runner_announces` stay but are checked at the runner a step names, not at an environment or a profile; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
 
 The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment and, for each profile version it runs, whether
 its model is managed and which harness it runs with. Since #919 the environment is part of the profile, so the same two rules are checked when a **profile** is saved
