@@ -81,6 +81,8 @@ characters (an emoji is one), as the JSON Schema counts them.
 Everything else is configuration. The nodes talk to each other only through values; each one has an input and an output, and the validator
 holds one to the other.
 
+> **Superseded (ADR 0007, epic #1103).** A manual trigger will be allowed to have no `input`; its run then works on the project's repository (#1106, [ADR 0007](decisions/0007-ai-configured-factory.md)). The rule below (`repo_required`) holds until then.
+
 ### The triggers and their pre-steps
 
 A workflow has **several triggers** (`triggers`, 1 to 10). Each one starts the workflow its own way and has its own **pre-steps**; when it
@@ -195,6 +197,8 @@ is held to the rule of a literal: `default 0`, `default -3` or `default 21474836
 holds for the `number` in the default of an object input (`default {"number": -5}`).
 The bounds of an input the caller hands in are not known to the validator (an `integer` may be `0` or `-5`), so **the engine checks the number
 again when it runs**.
+
+> **Superseded (ADR 0007, epic #1103).** Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step of the lane. This section describes the behaviour until #1105 and the release after it; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Profiles are removed, everywhere" and "Migration path". The step's `environment` is replaced by a named runner: Lane steps will name one concrete runner (a hosted environment, which states only its concurrency, or a self-hosted runner) instead of an environment and labels; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
 
 ### The agent step (`"kind": "agent"`)
 
@@ -759,6 +763,8 @@ project is created, and the Status field is taken from them; the answer is `200 
 an unknown project is `404 PROJECT_NOT_FOUND`, boards GitHub cannot be asked for are `503 PROJECT_BOARDS_UNAVAILABLE`. A project that is switched off can be given a board too. **Changing the board does not touch the tickets that are mirrored already**: they keep the statuses of the old board until a full sync, so the page says "press Resync to read the new board" and puts the button forward; after a clear the old statuses stay the same way. A `ticket.setStatus` step **without a literal `board`** follows the board of the project **at the moment it runs**, so a run in flight uses the new board from its next step on, and after a clear it ends with `action_input_invalid` ("The project of this lane has no board"). A step with a literal `board` is not affected. The Setup tab of the project (`/w/<slug>/projects/<repositoryId>/setup`) shows the ticket source with this picker
 ("None" and the readable boards; a board without a Status field is out of reach), the **Resync** button of its tickets (`POST .../repositories/<id>/issues/sync` until it answers 200, with a visible count of the calls; one press stops after 30 calls and says to press again, what was read is kept) and a
 hint when the last full sync is **older than 3 days** and no delivery has written a row since (`sync.lastWriteAt` of the issue list is not after `sync.lastFullSyncAt`), or when no full sync has ended yet.
+
+> **Superseded (ADR 0007, epic #1103).** The built-in lanes name the profiles `implementer@1` and `reviewer@1` and an environment; they get the settings and a runner inline with #1105 ([ADR 0007](decisions/0007-ai-configured-factory.md)).
 
 ### Built-in lanes
 
@@ -1547,6 +1553,8 @@ The tiles count the issues of the list (open, with a lane, waiting for the perso
 The lane block of a ticket (row and drawer) draws the [step track](#the-run-page) of its active run (#1080).
 
 The start dialog's Start button gets the focus back when it closes. The list's `lane` now also names a run that **waits** for an answer (`status: "waiting"`) and carries `workflowId`; before, only a running run was a lane. No new route and no migration.
+
+> **Superseded (ADR 0007, epic #1103).** The lane builder is removed and a lane is configured only as JSON through the API by an AI; a lane page shows its name, description and versions with a change description each (#1107); see [ADR 0007](decisions/0007-ai-configured-factory.md).
 
 ## The lane builder
 

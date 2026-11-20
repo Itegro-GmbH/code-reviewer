@@ -63,6 +63,8 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
 - **Two doors.** The shared `RUNNER_TOKEN` (the Dispatcher's, and the poll mode's) and a runner credential are different secrets; a request that carries a
   `crc_` credential takes the runner's path and never the shared one, and the other way round.
 
+> **Superseded (ADR 0007, epic #1103).** Lane steps will name one concrete runner (a hosted environment, which states only its concurrency, or a self-hosted runner) instead of an environment and labels; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs". Jobs of lane steps then require a reserved label that names the runner, not the labels it announced; the one claim rule of ADR 0005 stays.
+
 ### Environments of the kind `runner`
 
 An environment is either `hosted` (a VM of the platform: a size, a setup script and a network rule, as before) or `runner`: **labels instead of all
