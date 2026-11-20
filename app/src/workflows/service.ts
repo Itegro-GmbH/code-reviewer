@@ -27,10 +27,11 @@ import {
   type WorkflowRequestIssue,
 } from "./errors.ts";
 import type { OnlineRunner } from "../runner-identity/announced.ts";
-import type { Issue } from "./issues.ts";
+import { issue, type Issue } from "./issues.ts";
 import {
   ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
   BUDGET_OPERATOR_MAX_USD,
+  CHANGE_DESCRIPTION_MAX_LENGTH,
   DOCUMENT_MAX_BYTES,
   STEPS_MAX,
   VERSIONS_PER_WORKFLOW_MAX,
@@ -39,7 +40,7 @@ import {
 } from "./limits.ts";
 import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
 import { inlineModelsIn } from "./agent-settings.ts";
-import { isRecord } from "./json.ts";
+import { isRecord, textLength } from "./json.ts";
 import { mcpServersNamedBy } from "./mcp.ts";
 import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
 import {
@@ -86,7 +87,17 @@ export type BuiltInLaneResult =
       errors: readonly Issue[];
     };
 
-export type WorkflowVersionInfo = { version: number; savedAt: string };
+export type WorkflowVersionInfo = {
+  version: number;
+  savedAt: string;
+  /** Who saved it: the id of the user. */
+  savedBy: string;
+  /**
+   * What it changed against the version before (#1107). Null for version 1, whose text is the lane's description, and for a version
+   * saved before change descriptions existed.
+   */
+  changeDescription: string | null;
+};
 
 export type WorkflowView = WorkflowSummaryView & {
   /** The version the `document` is: the current one unless an older was asked for. */
@@ -128,7 +139,11 @@ export type WorkflowService = {
     /** The provider of the project's ticket source (#1040): the lanes word their pull request for it. Left out: `github`. */
     provider?: string,
   ): Promise<BuiltInLaneResult[]>;
-  /** Saves `body` as the next version. `expectedVersion`: only if that is still the current one. */
+  /**
+   * Saves `body` as the next version. `expectedVersion`: only if that is still the current one. `body` is the document plus a root key
+   * `changeDescription` (#1107): 1 to 1,000 characters saying what this version changes against the one before, not only white space;
+   * without it the save is `WORKFLOW_CHANGE_DESCRIPTION_REQUIRED`. It is stored with the version, not in the document.
+   */
   update(
     user: { id: string },
     id: string,
@@ -360,6 +375,8 @@ export function createWorkflowService({
       versions: versions.map((v) => ({
         version: v.version,
         savedAt: v.createdAt,
+        savedBy: v.createdBy,
+        changeDescription: v.changeDescription,
       })),
     };
   }
@@ -414,6 +431,54 @@ export function createWorkflowService({
         );
       },
     };
+  }
+
+  /**
+   * A lane is created with a description of its own (#1107): it is what version 1 says. The schema leaves it optional (a lane saved
+   * before has none), so the rule is the save's, not the validator's.
+   */
+  function requireDescription(body: unknown): void {
+    const description = isRecord(body) ? body.description : undefined;
+    if (typeof description === "string" && description.trim() !== "") return;
+    throw new WorkflowError(
+      "WORKFLOW_INVALID",
+      "The workflow does not pass the validator.",
+      {
+        errors: [
+          issue(
+            "/description",
+            "missing_field",
+            "A new lane needs a 'description': what the lane does, in a sentence or two. It is what version 1 says.",
+          ),
+        ],
+        truncated: false,
+      },
+    );
+  }
+
+  const changeDescriptionRequired = (): WorkflowError =>
+    new WorkflowError(
+      "WORKFLOW_CHANGE_DESCRIPTION_REQUIRED",
+      `A new version needs 'changeDescription' next to the document: 1 to ${CHANGE_DESCRIPTION_MAX_LENGTH} characters saying what changed against the version before, not only white space.`,
+    );
+
+  /** Takes the root key `changeDescription` off the body of a save (#1107): the document is what the validator and the engine read. */
+  function splitChangeDescription(body: unknown): {
+    document: unknown;
+    changeDescription: string;
+  } {
+    if (!isRecord(body)) throw changeDescriptionRequired();
+    const { changeDescription, ...document } = body;
+    const text =
+      typeof changeDescription === "string" ? changeDescription.trim() : "";
+    // Postgres refuses NUL in a text column; refusing it here keeps the answer a 422 instead of a failed insert.
+    if (
+      text === "" ||
+      text.includes("\u0000") ||
+      textLength(text) > CHANGE_DESCRIPTION_MAX_LENGTH
+    )
+      throw changeDescriptionRequired();
+    return { document, changeDescription: text };
   }
 
   const notFound = (): WorkflowError =>
@@ -471,6 +536,7 @@ export function createWorkflowService({
         "The project is switched off and takes no new lane.",
       );
     const { name, text, mcpServerIds, refusedWithout } = await acceptable(body);
+    requireDescription(body);
     const created = await workflows.create(
       {
         name,
@@ -623,13 +689,15 @@ export function createWorkflowService({
 
     async update(user, id, body, expectedVersion) {
       checkId(id);
+      const { document, changeDescription } = splitChangeDescription(body);
       const { name, text, mcpServerIds, refusedWithout } =
-        await acceptable(body);
+        await acceptable(document);
       const saved = await workflows.saveVersion(
         id,
         {
           name,
           document: text,
+          changeDescription,
           createdBy: user.id,
           mcpServerIds,
           ...(expectedVersion === undefined ? {} : { expectedVersion }),

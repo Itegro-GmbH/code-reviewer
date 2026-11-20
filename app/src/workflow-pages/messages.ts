@@ -373,7 +373,7 @@ export const LANE_RUNS_COPY = {
   emptyFiltered: "No lane run matches this filter.",
   emptyInLane: "This lane has not run yet. Wait for its trigger.",
   emptyInLaneStartable:
-    "This lane has not run yet. Start it with Run now, or wait for its trigger.",
+    "This lane has not run yet. Start it with the form on this page, or wait for its trigger.",
   columnTrigger: "Trigger",
   invalidFilterTitle: "This filter is not valid",
   invalidFilterDescription:
@@ -393,6 +393,23 @@ export const PAGE_COPY = {
   columnVersion: "Version",
   of: "of",
   breadcrumbRoot: "Projects",
+  laneHeading: "The lane",
+  laneDescription: "Description",
+  laneNoDescription: "This lane has no description.",
+  laneProject: "Project",
+  laneTriggers: "Triggers",
+  laneNoTriggers: "none",
+  laneUnreadable: "The saved lane cannot be read.",
+  laneArchived: "Archived",
+  versionsHeading: "Versions",
+  versionCurrent: "current",
+  versionFirst: "The lane as first saved. Its description:",
+  versionSavedBy: "by",
+  versionUnknownAuthor: "a former member",
+  versionNoChangeDescription:
+    "No change description: this version was saved before every version had to say what it changes.",
+  versionsAskAi:
+    "A lane is changed by an AI through the API, never in this page. Every new version says what it changes.",
   allRuns: "All runs of this workflow",
   runTitle: "Run",
   runStartedAt: "Started",

@@ -101,85 +101,6 @@ describe("a workflow or run of another workspace", () => {
   });
 });
 
-describe("the status names a lane's page offers (#1036)", () => {
-  it("asks for the names of the board of the lane's project, and offers none for a lane without a project", async () => {
-    const app = await startEngineHarness();
-    const { workflow } = await startedRun(app);
-    const asked: string[] = [];
-    const own = {
-      ...servicesOf(app, app.workspaceId),
-      statuses: async (projectId: string) => {
-        asked.push(projectId);
-        return ["Todo", "In Progress"];
-      },
-    };
-
-    const page = await loadWorkflowPage(workflow.id, own);
-
-    if (page.kind !== "ready") throw new Error("not ready");
-    expect(page.statuses).toEqual(["Todo", "In Progress"]);
-    expect(asked).toEqual([app.project.id]);
-    // Left out, the builder offers none and the names are typed.
-    const plain = await loadWorkflowPage(
-      workflow.id,
-      servicesOf(app, app.workspaceId),
-    );
-    if (plain.kind !== "ready") throw new Error("not ready");
-    expect(plain.statuses).toEqual([]);
-  });
-});
-
-describe("the MCP servers a lane's page offers (#1052)", () => {
-  // #1052-T01
-  it("hands the builder the id, the name and whether the last test failed, never an address, a header name or a tool", async () => {
-    const app = await startEngineHarness();
-    const { workflow } = await startedRun(app);
-    const view = (id: string, name: string, status: "ok" | "failed") => ({
-      id,
-      name,
-      transport: "streamable-http",
-      url: "https://mcp.example.com/secret-path",
-      auth: "header",
-      headers: ["Authorization"],
-      revision: 1,
-      status,
-      testedAt: null,
-      testErrorCode: null,
-      tools: { tools: [{ name: "danger", description: "d" }] },
-      createdAt: "2026-11-17T08:00:00.000Z",
-      updatedAt: "2026-11-17T08:00:00.000Z",
-    });
-    const own = {
-      ...servicesOf(app, app.workspaceId),
-      mcp: {
-        list: async () =>
-          [
-            view("s-1", "GitHub", "ok"),
-            view("s-2", "Linear", "failed"),
-          ] as never,
-      },
-    };
-
-    const page = await loadWorkflowPage(workflow.id, own);
-
-    if (page.kind !== "ready") throw new Error("not ready");
-    expect(page.mcpServers).toEqual([
-      { id: "s-1", name: "GitHub", status: "ok" },
-      { id: "s-2", name: "Linear", status: "failed" },
-    ]);
-    expect(JSON.stringify(page.mcpServers)).not.toMatch(
-      /secret-path|Authorization|danger/,
-    );
-    // Left out, the builder offers none.
-    const plain = await loadWorkflowPage(
-      workflow.id,
-      servicesOf(app, app.workspaceId),
-    );
-    if (plain.kind !== "ready") throw new Error("not ready");
-    expect(plain.mcpServers).toEqual([]);
-  });
-});
-
 describe("the pages with real data", () => {
   // #873-T72
   it("shows the Start form and the runs of a workflow", async () => {
@@ -202,9 +123,7 @@ describe("the pages with real data", () => {
         .getAllByRole("link", { name: /Open the run/ })[0]
         ?.getAttribute("href"),
     ).toBe(`/w/acme/workflows/${workflow.id}/runs/${runId}`);
-    // The Start form is behind "Run now" (#926), in a modal dialog that hides the rest of the page from the accessibility tree, so
-    // the runs are checked first. The manual trigger of the test workflow asks for the repository and a topic.
-    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    // The Start form is on the page (#1107). The manual trigger of the test workflow asks for the repository and a topic.
     expect(screen.getByLabelText("Repository")).toBeTruthy();
     expect(screen.getByLabelText("topic")).toBeTruthy();
   });
@@ -228,7 +147,6 @@ describe("the pages with real data", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
     expect(screen.queryByLabelText("Repository")).toBeNull();
     expect(screen.getByText(/does not allow/)).toBeTruthy();
   });

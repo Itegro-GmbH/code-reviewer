@@ -6,7 +6,7 @@
 // `done` (then `pr`, else `stuck`), and `onFailure` with `report` and `release`.
 import { describe, expect, it } from "vitest";
 import type { StepView } from "../workflow-runs/service.ts";
-import { shippedLane } from "./builder/test-fixtures.ts";
+import { shippedLane } from "./flow/test-fixtures.ts";
 import {
   nodeStatesOf,
   selectionOf,

@@ -1,6 +1,6 @@
 # Workflow pages (#873, milestone 3c of epic #833)
 
-The pages of the agent workflows: the list of a workspace's workflows, one workflow with the **lane builder** (#926; its Run now opens the **Start form**) and its runs, and one run with its status, budget, cost
+The pages of the agent workflows: the list of a workspace's workflows, one workflow (its name, description, project, triggers and versions with their change descriptions, read only, #1107; below them the **Start form**) and its runs, and one run with its status, budget, cost
 basis, steps and results. What they show and how: [`docs/workflows.md`](../../../docs/workflows.md#the-run-page). The engine and the routes they read are
 [`workflow-runs/`](../workflow-runs/README.md) and [`workflows/`](../workflows/README.md).
 
@@ -14,7 +14,7 @@ belongs to a project, #922). They sit in `src/app/(app)/w/[workspace]/workflows/
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pages.tsx`                                           | The `load…` functions that gather a page's data from the services (an id of another workspace is `not_found`) and the `…Content` components that render it                                                                                                      |
 | `run-detail.tsx`                                      | One run (client, #1079): the header, the lane as a flow and the panel of the selected step (`?step=`); the plain list of steps when the lane cannot be drawn; polls while the run runs or waits for an answer                                                   |
-| `run-flow.tsx`, `run-node-states.ts`                  | The lane of a run drawn read-only on the layout of the builder's flow (`builder/flow-layout.tsx`), each node coloured by its state (#1079); the pure mapping of the step runs onto every node by `stepId`, latest round wins, and the default selection         |
+| `run-flow.tsx`, `run-node-states.ts`                  | The lane of a run drawn read-only on the layout of the lane flow (`flow/flow-layout.tsx`), each node coloured by its state (#1079); the pure mapping of the step runs onto every node by `stepId`, latest round wins, and the default selection                 |
 | `step-panel.tsx`, `step-parts.tsx`                    | The details of the selected step (facts, failure, question, result, rounds, the agent's run and its MCP calls); the small pieces shared with the plain list (times, cost with its basis, results)                                                               |
 | `lane-runs-*.tsx`                                     | The Lane runs tab of the Runs page (#1078, `?view=lanes\|agents`): every lane run of the workspace, active first, polled while one is active; filters in the address. The page of one lane reuses the list with `filter={{ lane }}` as its Runs section (#1080) |
 | `run-track.ts`, `run-track.tsx`                       | The compact step track (#1078): step rows laid onto the top-level nodes of the lane version (`trackOf`), its text alternative, the small component; the Issues tab and drawer (#1080) reuse it                                                                  |
@@ -28,21 +28,8 @@ belongs to a project, #922). They sit in `src/app/(app)/w/[workspace]/workflows/
 
 Everything a step returned (an agent's result, what a connector got from GitHub) is data from outside: rendered as text, never as markup.
 
-## The lane builder
+## The lane page and the flow
 
-`builder/` (#926) is the editor on the page of one workflow: what it does is in [`docs/workflows.md`](../../../docs/workflows.md#the-lane-builder). The document is the only state and is edited as plain JSON; the validator is asked through the validate route, never reimplemented; the values a field can reach come from the scope route (#927), which reads the validator's own scope.
+The page of one workflow shows the lane read only (#1107, ADR 0007): `lane-overview.tsx` renders the description, the project, the triggers and the versions with their change descriptions; `pages.tsx` loads them (the project's name from the project service, the authors' names from the members of the workspace, the text of version 1 from version 1's document). What it shows and why: [`docs/workflows.md`](../../../docs/workflows.md#the-lane-page). There is no editor; a lane is changed through the API.
 
-| File                                                            | Role                                                                                                                                                      |
-| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `document.ts`                                                   | The model: nodes found by JSON pointer (the validator's `path`), insert, remove, move, patch, new nodes, the old single `trigger` read as `triggers`      |
-| `problems.ts`                                                   | An error's `path` to the node it belongs to; which errors have a one-click fix (exactly one name in `available`, a text at `path`)                        |
-| `describe.ts`, `condition.ts`                                   | What a card says; conditions as a form                                                                                                                    |
-| `schema.ts`, `action-fields.ts`                                 | A result schema as a table of fields; the inputs of an action from the connectors' own specs (`workflows/connectors.ts`)                                  |
-| `builder.tsx`                                                   | The client component: state, the validation after each change, save with `expectedVersion`, JSON, Run now                                                 |
-| `flow.tsx`, `flow-layout.tsx`, `inspector.tsx`, `lane-card.tsx` | The flow with its "+" (the layout in `flow-layout.tsx` is shared with the run page, #1079), the fields of the selected node, the limits and versions      |
-| `mcp-picker.tsx`, `mcp-edit.ts`                                 | The pickers of MCP servers (#1052): lane card (the workspace's servers) and agent step (narrow to the lane's); the edits that keep a step within its lane |
-| `chips.ts`                                                      | A text as plain stretches and chips (`{{…}}` kept as written, so the stored text is never rewritten); insert at the cursor, remove one chip (#927)        |
-| `reference-control.tsx`, `reference-picker.tsx`                 | A text field with chips and a + (`ReferenceControl`, `ReferenceInput`), and the popup under it: search, categories, values with type and sample           |
-| `reach-context.tsx`                                             | The lookup the fields ask for the values they can reach; the builder binds it to its document and lane                                                    |
-| `controls.tsx`, `condition-editor.tsx`, `schema-table.tsx`      | The small controls                                                                                                                                        |
-| `api.ts`, `copy.ts`                                             | The calls to the validate, scope and save routes; the copy (the validator's own sentences are shown as they come, every other sentence is here)           |
+`flow/` holds what the run page needs to draw a lane: `document.ts` (the document read by JSON pointer, the old single `trigger` read as `triggers`), `describe.ts` (what a node says about itself), `flow-layout.tsx` and `copy.ts` (the layout and its headings). `lane-overview.tsx` has the lane page's own copy in `messages.ts` (`PAGE_COPY`).

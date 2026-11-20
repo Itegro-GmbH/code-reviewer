@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 "use client";
-// The lane of a run, drawn read-only (#1079): the layout of the builder's flow (`builder/flow-layout.tsx`: triggers with their pre-steps,
+// The lane of a run, drawn read-only (#1079): the layout of the lane flow (`flow/flow-layout.tsx`: triggers with their pre-steps,
 // the shared steps top down, loops as containers, `if` with then and else side by side, `onFailure` at the bottom) with every node
 // coloured by where the run stands on it. A node is one button: its kind, its name, its state (a symbol and a word as well as a hue), the
 // round of a loop, and how long it took and what it cost where that is known. The step that runs now is marked and scrolled into view when
@@ -21,10 +21,10 @@ import {
 import type { Icon } from "@phosphor-icons/react";
 import { useEffect, useRef } from "react";
 import { formatDuration } from "../runs/run-duration.ts";
-import { FlowLayout } from "./builder/flow-layout.tsx";
-import { BUILDER_COPY } from "./builder/copy.ts";
-import { brief, describeNode } from "./builder/describe.ts";
-import type { Doc, NodeKind } from "./builder/document.ts";
+import { FlowLayout } from "./flow/flow-layout.tsx";
+import { FLOW_LAYOUT_COPY } from "./flow/copy.ts";
+import { brief, describeNode } from "./flow/describe.ts";
+import type { Doc, NodeKind } from "./flow/document.ts";
 import { FLOW_COPY } from "./messages.ts";
 import type { NodeRun, NodeState, NodeStates } from "./run-node-states.ts";
 import { formatUsd, stepDurationMs } from "./view.ts";
@@ -223,7 +223,7 @@ export function RunFlow({
       <FlowLayout
         doc={doc}
         label={FLOW_COPY.flowLabel}
-        sharedHeading={BUILDER_COPY.sharedSteps}
+        sharedHeading={FLOW_LAYOUT_COPY.sharedSteps}
         loopFooter={() => null}
         renderCard={(_pointer, kind, node) => {
           const stepId = String(node.id ?? "");

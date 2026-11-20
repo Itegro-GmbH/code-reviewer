@@ -33,6 +33,8 @@ export const LABEL_MAX_LENGTH = 100;
 export const STATUS_NAME_MAX_LENGTH = 100;
 export const ID_MAX_LENGTH = 64;
 export const DESCRIPTION_MAX_LENGTH = 1000;
+/** The most characters a change description of a new version may have (#1107); at least one that is not white space. */
+export const CHANGE_DESCRIPTION_MAX_LENGTH = 1000;
 export const TEMPLATE_MAX_LENGTH = 20_000;
 export const CONDITION_DEPTH_MAX = 4;
 /** The most problems one answer lists; a document with more is `truncated`. */
