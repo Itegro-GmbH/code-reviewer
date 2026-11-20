@@ -3,7 +3,8 @@
 // GET, PUT and DELETE /api/w/:workspace/workflows/:workflowId (#833): read a workflow with its current version (`?version=n` for an
 // older one) and its list of versions, save the body as its next version (validated first; `?expectedVersion=n` saves only if that
 // is still the current version), or archive it (hidden from the list, no new version, never started, versions kept). A version is
-// never changed. Every member may do all three (`start_implementer_task`). Only in a deployment
+// never changed. Every member may read (`start_implementer_task`); saving a version and archiving are for Owners and Admins
+// (`manage_workflows`, ADR 0007 decision 12: the settings a step carries were an admin's before). Only in a deployment
 // with the capability `implementer`. The logic is in src/workflows/.
 import { connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
@@ -33,7 +34,7 @@ export async function PUT(
   await connection();
   requireImplementerCapability();
   const { workspace, workflowId } = await context.params;
-  return withWorkspace(workspace, "start_implementer_task", (access) =>
+  return withWorkspace(workspace, "manage_workflows", (access) =>
     createWorkflowRouteHandlers({
       requireUser: () => Promise.resolve(access.user),
       service: workflowServiceFor(access.workspace.id),
@@ -48,7 +49,7 @@ export async function DELETE(
   await connection();
   requireImplementerCapability();
   const { workspace, workflowId } = await context.params;
-  return withWorkspace(workspace, "start_implementer_task", (access) =>
+  return withWorkspace(workspace, "manage_workflows", (access) =>
     createWorkflowRouteHandlers({
       requireUser: () => Promise.resolve(access.user),
       service: workflowServiceFor(access.workspace.id),

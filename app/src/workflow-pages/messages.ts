@@ -123,6 +123,8 @@ const STEP_FAILURE_TEXT: Record<
   template_too_large: "The text of the step is too long.",
   profile_not_found:
     "The profile of the step no longer exists, is archived, or has no such version.",
+  agent_settings_invalid:
+    "The settings written in the step (model, canPush, harness, instructions, setup script or network rule) cannot be used.",
   environment_not_found: "The environment of the step does not exist.",
   environment_mismatch:
     "The step names another environment than its profile runs in.",

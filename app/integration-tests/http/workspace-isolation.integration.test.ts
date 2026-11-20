@@ -592,7 +592,7 @@ const ENTRIES: Entry[] = [
     name: "POST workflows",
     route: "/api/w/[workspace]/workflows",
     method: "POST",
-    minRole: MINIMUM_ROLE.start_implementer_task,
+    minRole: MINIMUM_ROLE.manage_workflows,
     path: (ids) => `/workflows?projectId=${ids.projectId}`,
     body: () => ({
       version: 1,
@@ -659,7 +659,7 @@ const ENTRIES: Entry[] = [
     name: "PUT workflows/[workflowId]",
     route: "/api/w/[workspace]/workflows/[workflowId]",
     method: "PUT",
-    minRole: MINIMUM_ROLE.start_implementer_task,
+    minRole: MINIMUM_ROLE.manage_workflows,
     path: (ids) => `/workflows/${ids.workflowId}`,
     body: () => ({
       version: 1,
@@ -691,11 +691,11 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
-    // #833-M1-T359: every member archives a workflow of their own workspace; the other workspace's is not reachable.
+    // #833-M1-T359: an Owner or Admin (`manage_workflows`, #1105) archives a workflow of their own workspace; the other workspace's is not reachable.
     name: "DELETE workflows/[workflowId]",
     route: "/api/w/[workspace]/workflows/[workflowId]",
     method: "DELETE",
-    minRole: MINIMUM_ROLE.start_implementer_task,
+    minRole: MINIMUM_ROLE.manage_workflows,
     path: (ids) => `/workflows/${ids.workflowId}`,
     params: (ids) => ({ workflowId: ids.workflowId }),
     file: "workflows/[workflowId]/route.ts",

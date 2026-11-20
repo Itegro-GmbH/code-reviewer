@@ -109,6 +109,8 @@ export const STEP_FAILURE_CODES = [
   "template_too_large",
   /** The profile is gone, archived or has no such version. */
   "profile_not_found",
+  /** #1105: a step with settings of its own does not read (a document the validator never saved), so no turn starts. */
+  "agent_settings_invalid",
   /** The environment is not one of the workspace. */
   "environment_not_found",
   /** The step names another environment than the version of its profile runs in (#919). */

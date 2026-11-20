@@ -15,6 +15,11 @@ import type { AllowList } from "./graph.ts";
 // proxy) and with it the edges `mcp -> …` the MCP module had before: it reaches the sign-in limit, the repositories and the guarded fetch, which
 // reach the runner API. Wiring the runtime into every route file of the runner API instead is the same cut as for the workflow engine (#715).
 
+// #1105 added the edge `workflows -> implementer`: the wiring of the workflow service (`workflows/shared.ts`) hands it the Implementer's rule
+// for a model (`implementerModelsFor`), so the model of an agent step with settings of its own is held to what a profile's model is held to.
+// The service itself imports nothing of the Implementer (it takes the rule as a dependency); taking the wiring out of the module means passing
+// it in at every route that builds the workflow service, a cut of its own (#715). Release B removes the profiles and with them the cycle.
+
 export const ALLOWED_IMPORT_CYCLES: AllowList = {
   fileGroups: [
     ["auth/auth.ts", "auth/session-user.ts"],
@@ -345,6 +350,7 @@ export const ALLOWED_IMPORT_CYCLES: AllowList = {
     "workflows -> auth",
     "workflows -> db",
     "workflows -> http",
+    "workflows -> implementer",
     "workflows -> webhooks",
     "workspace-billing -> workspaces",
     "workspaces -> auth",

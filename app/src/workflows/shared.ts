@@ -11,6 +11,7 @@ import { createProjectsRepository } from "../db/repositories/projects-repository
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { implementerModelsFor } from "../implementer/shared.ts";
 import { onlineRunnersFrom } from "../runner-identity/online.ts";
 import {
   createWorkflowService,
@@ -27,11 +28,18 @@ export function workflowServiceFor(
   options: Pick<WorkflowServiceDependencies, "samples"> = {},
 ): WorkflowService {
   const db = getDatabase();
+  let checker: ReturnType<typeof implementerModelsFor> | undefined;
   return createWorkflowService({
     workflows: createWorkflowsRepository(db, workspaceId),
     projects: createProjectsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
+    // Built when a document names a model of its own, not for every request (it reads the workspace's keys, which a validation without one
+    // never needs), and then once: the entitlements it reads are held by the one checker for every model of the save.
+    models: {
+      check: (model) =>
+        (checker ??= implementerModelsFor(workspaceId)).check(model),
+    },
     mcpServers: createMcpServersRepository(db, workspaceId),
     mcpOAuth: createMcpOAuthRepository(db, workspaceId),
     onlineRunners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),

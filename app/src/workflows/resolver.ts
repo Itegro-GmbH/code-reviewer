@@ -9,6 +9,7 @@
 // exist; it is never accepted unseen, because the push facts and the version cannot be checked for a profile nobody knows.
 import { BUILT_IN_CONNECTORS, type ConnectorSpec } from "./connectors.ts";
 import type { OnlineRunner } from "../runner-identity/announced.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type { ResultSchema } from "./result-schema.ts";
 
 /** What a run with one version of a profile is, as far as the validator is concerned. */
@@ -75,6 +76,13 @@ export type WorkflowResolver = {
    * combination is refused for lacking one. See `no_runner_announces`.
    */
   onlineRunners?(): readonly OnlineRunner[];
+  /**
+   * #1105: why the workspace cannot run a model a step names itself (an agent step with settings of its own), or null when it can: the
+   * rule of the Implementer form (`ImplementerModels.check`), the same a profile is held to when it is saved. The service asks it for
+   * the models the document names before the validator runs (it is async, the validator is not). Left out, or `undefined` for a model
+   * it did not look at: not refused on a guess.
+   */
+  modelCheck?(model: ModelChoice): string | null | undefined;
 };
 
 /** The resolver of the running server: the workspace's profiles and environments, and the built-in connectors. */
@@ -84,12 +92,16 @@ export function createResolver(options: {
   environments: readonly EnvironmentInfo[];
   onlineRunners?: readonly OnlineRunner[];
   mcpServers?: readonly McpServerInfo[];
+  modelCheck?: (model: ModelChoice) => string | null | undefined;
 }): WorkflowResolver {
   const runners = options.onlineRunners;
   const servers = options.mcpServers;
   return {
     ...(servers === undefined ? {} : { mcpServers: () => servers }),
     ...(runners === undefined ? {} : { onlineRunners: () => runners }),
+    ...(options.modelCheck === undefined
+      ? {}
+      : { modelCheck: options.modelCheck }),
     profiles: () => options.profiles,
     archivedProfiles: () => options.archivedProfiles ?? [],
     environments: () => options.environments,

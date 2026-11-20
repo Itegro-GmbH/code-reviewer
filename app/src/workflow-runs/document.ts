@@ -43,6 +43,8 @@ export type RunTrigger = {
 };
 
 export type RunDocument = {
+  /** The name of the lane as the document says it (#1105): the name a step with settings of its own runs under. */
+  name: string;
   triggers: RunTrigger[];
   budgetUsd: number;
   /** How long one agent turn of the run may run, in minutes (#918); the default when the document names none. */
@@ -130,6 +132,7 @@ export function readRunDocument(text: string): RunDocument | undefined {
   )
     return undefined;
   return {
+    name: typeof parsed.name === "string" ? parsed.name : "",
     triggers,
     budgetUsd: budget ?? BUDGET_DEFAULT_USD,
     turnTimeLimitMinutes: turnLimit ?? TURN_TIME_LIMIT_MINUTES_DEFAULT,

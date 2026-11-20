@@ -2,6 +2,7 @@
 
 // What a node of the flow says about itself (#926): its kind, a title and one line. Taken from the document as it stands, so a half
 // written step still shows what there is of it. All text from the document is data of whoever wrote it, shown as text.
+import { isInlineStep, readModel } from "../../workflows/agent-settings.ts";
 import { isRecord } from "../../workflows/json.ts";
 import type { Doc, NodeKind } from "./document.ts";
 
@@ -120,6 +121,28 @@ function describeSession(session: unknown): string {
   return "new session";
 }
 
+/** An agent step with its settings written in it (#1105): the harness, the model and whether it may push, as `opencode · provider/model · may push`. */
+function describeInlineSettings(node: Doc): string {
+  const harness =
+    typeof node.harness === "string" && node.harness !== ""
+      ? node.harness
+      : "opencode";
+  const model = readModel(node.model);
+  const modelText =
+    model === undefined
+      ? "no model yet"
+      : "entryId" in model
+        ? model.entryId
+        : `${model.provider}/${model.model}`;
+  const push =
+    node.canPush === true
+      ? "may push"
+      : node.canPush === false
+        ? "read only"
+        : "";
+  return [harness, brief(modelText, 60), push].filter(Boolean).join(" · ");
+}
+
 export function describeNode(node: Doc, kind: NodeKind): NodeDescription {
   const note = typeof node.description === "string" ? node.description : "";
   const kindLabel = KIND_LABEL[kind];
@@ -132,6 +155,13 @@ export function describeNode(node: Doc, kind: NodeKind): NodeDescription {
     };
   }
   if (kind === "agent") {
+    if (isInlineStep(node)) {
+      return {
+        kindLabel,
+        title: note === "" ? "Agent step" : brief(note, 80),
+        summary: `${describeInlineSettings(node)} · ${describeSession(node.session)}`,
+      };
+    }
     const profile = typeof node.profile === "string" ? node.profile : "";
     return {
       kindLabel,

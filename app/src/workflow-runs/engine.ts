@@ -30,7 +30,21 @@ import type { WorkflowsRepository } from "../db/repositories/workflows-repositor
 import type { WorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
 import { ImplementerError } from "../implementer/errors.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
-import type { ImplementerService } from "../implementer/service.ts";
+import type {
+  ImplementerService,
+  StartTaskOptions,
+} from "../implementer/service.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
+import { checkNetwork, type NetworkRule } from "../network-rule/network.ts";
+import {
+  OPENCODE_HARNESS,
+  isProfileHarness,
+} from "../runner-identity/harness.ts";
+import {
+  inlineProfileName,
+  isInlineStep,
+  readModel,
+} from "../workflows/agent-settings.ts";
 import {
   BRANCH_NAME_MAX_LENGTH,
   checkBranchName,
@@ -976,7 +990,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           profile: profile ?? null,
           capMicroUsd: move.capMicroUsd,
         });
-        if (move.kind === "agent" && profile === undefined) {
+        // A step with settings of its own (#1105) has no profile to resolve: its step run records none, and the turn gets its copy from the step.
+        if (
+          move.kind === "agent" &&
+          profile === undefined &&
+          !isInlineStep(node)
+        ) {
           await lock.finishStep(
             stepRun.id,
             failed(
@@ -1200,6 +1219,64 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
   /** What starting an agent step came to: a turn (its job), an instruction that waits behind a running turn, or the end of the step. */
   type Begun = { runId: string } | { queued: true } | { outcome: StepOutcome };
 
+  /**
+   * #1105: what a step with settings of its own runs with, read from the node as the validator held it at save: the model, the profile
+   * copy of the turn (the lane's name and version stand where a profile's would; the id says it is no profile) and the hosted settings.
+   * A node that does not read (a document the validator never saved) ends the step before anything starts.
+   */
+  async function inlineSettingsOf(
+    run: StoredWorkflowRun,
+    node: RunDocument["steps"][number],
+  ): Promise<
+    | { model: ModelChoice; options: NonNullable<StartTaskOptions["inline"]> }
+    | { outcome: StepOutcome }
+  > {
+    const unreadable = (what: string) => ({
+      outcome: failed(
+        "agent_settings_invalid",
+        `The settings of this step cannot be used (${what}).`,
+      ),
+    });
+    const model = readModel(node.model);
+    if (model === undefined) return unreadable("model");
+    if (typeof node.canPush !== "boolean") return unreadable("canPush");
+    const harness =
+      node.harness === undefined ? OPENCODE_HARNESS : node.harness;
+    if (typeof harness !== "string" || !isProfileHarness(harness))
+      return unreadable("harness");
+    if (
+      node.instructions !== undefined &&
+      typeof node.instructions !== "string"
+    )
+      return unreadable("instructions");
+    if (node.setupScript !== undefined && typeof node.setupScript !== "string")
+      return unreadable("setupScript");
+    let network: NetworkRule | undefined;
+    if (node.network !== undefined) {
+      const checked = checkNetwork(node.network);
+      if (!checked.ok) return unreadable("network");
+      network = checked.rule;
+    }
+    const document = await documentOf(run);
+    return {
+      model,
+      options: {
+        profile: {
+          id: `workflow:${run.workflowId}`,
+          name: inlineProfileName(document?.name),
+          version: run.workflowVersion,
+          instructions: node.instructions ?? "",
+          canPush: node.canPush,
+          harness,
+        },
+        ...(node.setupScript === undefined
+          ? {}
+          : { setupScript: node.setupScript }),
+        ...(network === undefined ? {} : { network }),
+      },
+    };
+  }
+
   /** A turn in a session of its own: the profile, the environment and the instruction of the step, on a branch the platform names. */
   async function beginSession(
     run: StoredWorkflowRun,
@@ -1207,15 +1284,22 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     node: RunDocument["steps"][number],
     values: RunValues,
     context: RoundContext,
-    profile: { name: string; version: number },
+    profile: { name: string; version: number } | null,
     timeLimitMinutes: number,
   ): Promise<Begun> {
+    // #1105 (ADR 0007): a step with settings of its own carries what a profile held, so no profile is read: the turn gets the copy built
+    // from the step, under the name and version of the lane. The environment is the step's own (there is no profile to say where it works).
+    const inline =
+      profile === null ? await inlineSettingsOf(run, node) : undefined;
+    if (inline !== undefined && "outcome" in inline) return inline;
     // #919: a profile says where it works. The environment is the profile version's; only a version saved before profiles had one
     // (and so every document written before) runs where its step says. A step that names another environment than its profile
     // version's is not overridden: the lane was saved against an older version, and the version it runs now has moved.
-    const ownId = (
-      await deps.profiles.findByName(profile.name, profile.version)
-    )?.version.content.environmentId;
+    const ownId =
+      profile === null
+        ? undefined
+        : (await deps.profiles.findByName(profile.name, profile.version))
+            ?.version.content.environmentId;
     const environmentName =
       typeof node.environment === "string" ? node.environment : "";
     const environment = (await deps.environments.listSummaries()).find(
@@ -1234,6 +1318,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         ),
       };
     if (
+      profile !== null &&
       typeof ownId === "string" &&
       environmentName !== "" &&
       environment.name.toLowerCase() !== environmentName.toLowerCase()
@@ -1304,7 +1389,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           branch: sessionBranchOf(run, step),
           instruction,
           environmentId: environment.id,
-          profile: `${profile.name}@${profile.version}`,
+          ...(inline === undefined
+            ? { profile: `${profile?.name}@${profile?.version}` }
+            : { model: inline.model }),
           ...(node.result === undefined ? {} : { result: node.result }),
           clientRequestId: requestIdOf(run, step),
         },
@@ -1312,6 +1399,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           costCapCents: capCents(step.capMicroUsd),
           timeLimitMinutes,
           workflowStep: true,
+          ...(inline === undefined ? {} : { inline: inline.options }),
         },
       );
       return { runId: started.runId };
@@ -1460,7 +1548,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     byId: ReadonlyMap<string, RunDocument["steps"][number]>,
     timeLimitMinutes: number,
   ): Promise<StepOutcome | undefined> {
-    if (step.profile === null)
+    if (step.profile === null && !isInlineStep(node))
       return failed("profile_not_found", "The step has no profile version.");
     const target = continuedStep(node, steps, step.position);
     const begun =

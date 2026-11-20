@@ -120,7 +120,7 @@
     "AgentStep": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "profile", "instruction"],
+      "required": ["id", "kind", "instruction"],
       "properties": {
         "id": {
           "$ref": "#/$defs/StepId"
@@ -132,12 +132,80 @@
           "const": "agent"
         },
         "profile": {
-          "description": "A profile, `name` for the newest version or `name@version` to pin one.",
+          "description": "A profile, `name` for the newest version or `name@version` to pin one. Deprecated (ADR 0007, #1105): a step either names a profile or carries its settings itself (`harness`, `model`, `canPush`, `instructions`, `setupScript`, `network`), never both (`profile_with_inline_settings`) and never neither (`agent_settings_required`; both are the validator's, the schema allows either).",
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?:@[1-9][0-9]{0,5})?$"
         },
+        "harness": {
+          "description": "#1105 (ADR 0007), settings of the step itself, instead of `profile`: the harness the agent runs with. `opencode` when left out; `claude-code` exists only on a runner (`harness_needs_runner`) and takes `model` `{\"provider\": \"claude-code\", \"model\": \"<name>\"}`.",
+          "enum": ["opencode", "claude-code"]
+        },
+        "model": {
+          "description": "#1105, settings of the step itself: the model, as a profile held it. `{\"entryId\"}` is a released catalog entry (the platform's key; not on a runner, `runner_needs_own_key`), `{\"provider\", \"model\"}` a model of the workspace's own key (what a runner works with). Required with the other settings; whether the workspace can run it is the validator's (`model_not_allowed`).",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["entryId"],
+              "properties": {
+                "entryId": { "$ref": "#/$defs/ModelField" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["provider", "model"],
+              "properties": {
+                "provider": { "$ref": "#/$defs/ModelField" },
+                "model": { "$ref": "#/$defs/ModelField" }
+              }
+            }
+          ]
+        },
+        "canPush": {
+          "description": "#1105, settings of the step itself: whether the step may push branches. Required with the other settings: decide it. It decides whether the step yields `branch`, `commits`, `headCommit` and `pushed`, and whether its token can write.",
+          "type": "boolean"
+        },
+        "instructions": {
+          "description": "#1105, settings of the step itself: the standing system-level text of the agent (1 to 20,000 characters), appended last and unchanged, so the prompt cache hits across turns. Not `instruction`, which is the task of this round.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000,
+          "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]*$"
+        },
+        "setupScript": {
+          "description": "#1105 (ADR 0007, decision 11), settings of the step itself: the script a hosted environment runs once before the agent starts (at most 64 KB of UTF-8, kept as written). Only for a step in a hosted environment; a runner's setup is its owner's (`hosted_only_setting`). Not with `profile` (the environment of the profile holds its own).",
+          "type": "string",
+          "maxLength": 65536,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "network": {
+          "description": "#1105 (ADR 0007, decision 11), settings of the step itself: the rule for the agent's network in a hosted environment, as the environment held it: `off` (the default), `list` (the exact or `*.suffix` host names in `hosts`, at least one) or `open`; `hosts` only with `list`. Only for a step in a hosted environment (`hosted_only_setting`). Not with `profile`.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": { "enum": ["off", "list", "open"] },
+            "hosts": {
+              "type": "array",
+              "maxItems": 100,
+              "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+            }
+          },
+          "if": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "list" } }
+          },
+          "then": {
+            "required": ["hosts"],
+            "properties": { "hosts": { "minItems": 1 } }
+          },
+          "else": {
+            "properties": { "hosts": { "maxItems": 0 } }
+          }
+        },
         "environment": {
-          "description": "Deprecated (#919): leave it out, the step runs in the environment of its profile. The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator). When the profile names an environment, this must be that one (`environment_mismatch`); a profile version saved before #919 names none and needs it (`environment_required`).",
+          "description": "Deprecated (#919): leave it out, the step runs in the environment of its profile. A step with settings of its own (no `profile`) names its environment here (`environment_required`) until the runner field of ADR 0007 replaces it. The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator). When the profile names an environment, this must be that one (`environment_mismatch`); a profile version saved before #919 names none and needs it (`environment_required`).",
           "type": "string",
           "maxLength": 20000
         },
@@ -206,6 +274,25 @@
       },
       "allOf": [
         {
+          "description": "#1105: a step that names no `profile` but has any of the settings of its own needs `model` and `canPush`. (Neither a profile nor any setting, or both, is the validator's: `agent_settings_required`, `profile_with_inline_settings`.)",
+          "if": {
+            "not": {
+              "required": ["profile"]
+            },
+            "anyOf": [
+              { "required": ["harness"] },
+              { "required": ["model"] },
+              { "required": ["canPush"] },
+              { "required": ["instructions"] },
+              { "required": ["setupScript"] },
+              { "required": ["network"] }
+            ]
+          },
+          "then": {
+            "required": ["model", "canPush"]
+          }
+        },
+        {
           "description": "#1091: `repos` and the single start `branch` exclude each other.",
           "if": {
             "required": ["repos"]
@@ -233,6 +320,13 @@
           }
         }
       ]
+    },
+    "ModelField": {
+      "description": "#1105: the id of a catalog entry, a provider slug or a model name in the settings of an agent step: one line, not only white space, 200 characters at most.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000-\\u001f\\u007f]*$"
     },
     "AgentStepRepo": {
       "description": "#1091 (epic #1090): one repository of an agent step. All three fields decide what the agent works on and where its commits go, so they are targets: `repo` is a literal `owner/name` or exactly one reference to `{{trigger.ticket.repo.fullName}}`, `{{trigger.repo.fullName}}` or an input of a manual trigger; `base` is a literal branch name or exactly one reference to `{{trigger.ticket.repo.defaultBranch}}`, `{{trigger.repo.defaultBranch}}` or an input of a manual trigger; `branch` is a literal or a text whose references are only values the platform or the caller vouches for (`{{trigger.ticket.key}}`, `{{trigger.ticket.number}}`, `{{trigger.input.<name>}}`), so `feature/{{trigger.ticket.key}}` is valid. Nothing an agent or an issue's title, body or labels wrote (`target_from_untrusted_value`). A reference that gives something that is not a repository or a branch name fails the step before the agent starts (`repo_invalid`, `branch_invalid`).",

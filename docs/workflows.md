@@ -11,7 +11,7 @@ workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) sta
 either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane page](#the-lane-page) (#1107) shows a workflow, its versions and their change descriptions.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); the routes below, the [lane page](#the-lane-page) and, for the runs, [pages](#the-run-page). Every member of a workspace may
-use them (the permission `start_implementer_task`).
+read, validate, start and watch them (the permission `start_implementer_task`); **saving a lane** (create, a new version, archive) is for Owners and Admins (`manage_workflows`, ADR 0007 decision 12, #1105).
 
 The format is described by two JSON Schemas, [`contracts/workflow.v1.json`](../contracts/workflow.v1.json) and
 [`contracts/result-schema.v1.json`](../contracts/result-schema.v1.json). The validator
@@ -199,14 +199,40 @@ again when it runs**.
 
 ### The agent step (`"kind": "agent"`)
 
-> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step, and the step's `environment` is replaced by one named runner (a hosted runner of one sandbox type, which has a fixed size and states only its concurrency, or a self-hosted runner); see [ADR 0007](decisions/0007-ai-configured-factory.md), "Proposal" and "Migration path".
+> **Superseded in part (ADR 0007, epic #1103; #1105, release A, step 1).** An agent step now has **two forms**: the settings **written in the step** (below,
+> "Settings in the step") and the old one that names a **profile**. The profile form keeps working exactly as before and is removed in release B after
+> every lane has been rewritten into the new form; the step's `environment` is replaced later by one named runner (a hosted runner of one sandbox type,
+> which has a fixed size and states only its concurrency, or a self-hosted runner), see [ADR 0007](decisions/0007-ai-configured-factory.md), "Migration path".
+> Not done yet: the runner field, the hosted runner types, the data migration of existing lanes, and the removal of the profile routes and pages.
 
-A run of an agent step gets a **profile**, and the profile says who works **and where** (#919): its harness, model, rights and its environment. The step names no environment.
+A step gets its settings from **one of two places**: a **profile** (the old form: the profile says who works **and where**, #919: its harness, model, rights and its environment) or the step itself (the new form).
+**Exactly one**: both is `profile_with_inline_settings`, neither is `agent_settings_required`. The document stays version 1: the new keys are optional properties of the schema, and
+the validator, not the schema, requires one of the two.
+
+### Settings in the step (#1105)
+
+Instead of `profile` the step carries what a profile held. The server stays the only guard: the validator holds these settings to the same rules a profile gets when it is saved, against what the workspace allows.
 
 | Field | Needed | What |
 | --- | --- | --- |
+| `model` | yes | The model, in the shape of a profile's model: `{"entryId": "<id>"}` (a released catalog entry, on the platform's key) or `{"provider": "<slug>", "model": "<id>"}` (a model of the workspace's own key, or `{"provider": "claude-code", "model": "<name>"}` with the harness `claude-code`). `GET /api/w/<slug>/implementer/models` lists what the workspace can run; a model it cannot is `model_not_allowed` (with the harness `claude-code` nothing is asked: its login is the runner's). |
+| `canPush` | yes | `true` or `false`: decide it. Whether the step may push branches, which decides whether it yields `branch`, `commits`, `headCommit` and `pushed` (`false`: none of them, and `reference_fact_unavailable` for a reference to one) and whether its token can write. |
+| `harness` | no | `opencode` (the default) or `claude-code`, which exists only on a runner (`harness_needs_runner` in an environment that is not a runner's) and takes the model above. |
+| `instructions` | no | The standing system-level text of the agent, 1 to 20,000 characters, appended last and unchanged, so the prompt cache hits across the turns of one step. **Not** `instruction`, which is the task of this round. |
+| `setupScript` | no | The script a hosted environment runs once before the agent starts (at most 64 KB of UTF-8, kept as written). Moved here from the hosted environment (ADR 0007, decision 11). Only for a step whose environment is hosted: in a runner environment it is `hosted_only_setting` (a runner's setup is its owner's). |
+| `network` | no | The rule for the agent's network, as the hosted environment held it: `{"mode": "off" \| "list" \| "open", "hosts": [...]}`, where `hosts` (exact names or `*.suffix`, one to 100) belong to `list` only. `off` is the default. Only for a hosted environment (`hosted_only_setting`). |
+| `environment` | yes, for now | The name of an environment of the workspace, a literal (see below); a step with settings of its own has no profile to say where it works, so it names one (`environment_required`). The environment gives a hosted step its **size**; its own setup script and network rule are **not read** for such a step: the step's `setupScript` and `network` apply, and none given is none (`off`). A runner environment (labels) works as before. |
+
+A step in this form has the same rules as one with a profile for the rest: a managed model in a runner environment is `runner_needs_own_key`; a runner that is online
+with the environment's labels and announces nothing that fits is the warning `no_runner_announces`. A step that **continues a session** (`session.continue`) of a step in this form
+**repeats the same `harness`, `model`, `canPush` and `instructions`** (a session keeps the settings of its last turn, and a `canPush` that differed would be the write token of a step that never asked for it):
+a difference is `session_target_invalid`, the message names the setting. The cost limit is not a setting of the step yet (the budget of the lane caps each turn).
+
+The run of such a step builds the same internal profile copy the engine used for a profile, with the **name and version of the lane** where a profile's would be (the name as a slug, because the job's `ImplementerProfile.name` takes `^[a-z0-9][a-z0-9_-]{0,63}$`: "Issue to PR" is sent as `issue-to-pr`, a name with nothing usable as `lane`; it is for the run's log line only), and the turn is written with it; the step's run
+records **no profile** (`profile_name`, `profile_version` stay empty), so the run page shows none. The wire contract of the job (`ImplementerProfile`) is unchanged.
+
 | `id` | yes | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops. |
-| `profile` | yes | `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`; `profile_archived` for one that was archived) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema. |
+| `profile` | one of the two | **The old form, removed in release B.** `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. A step takes this or [the settings written in the step](#settings-in-the-step-1105) (`model`, `canPush`, `harness`, `instructions`, `setupScript`, `network`), never both. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`; `profile_archived` for one that was archived) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema. |
 | `environment` | no, deprecated (#919) | The name of an environment of the workspace (case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). **Leave it out**: the engine runs the step in the environment of its profile version ([`profiles.md`](profiles.md#where-profiles-meet-workflows)). When it is written next to a profile that names one it must be that one (`environment_mismatch`). Only a profile version saved before #919, which names no environment, needs it here (`environment_required` without it). Documents that name it keep validating and running. |
 | `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
 | `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
@@ -699,7 +725,7 @@ the run (the step, its code and a short message, defused), and `release` takes `
 
 ## The API
 
-All routes are under `/api/w/<slug>/workflows`, need a signed in member of the workspace, and answer `Cache-Control: no-store`. A lane belongs to a project (#922): the list and the creation name it with the query value `projectId` (the workspace has no list of all its workflows any more); the routes of one workflow are by its id as before. The API keeps these routes with the `projectId` filter for one release, then the project-scoped routes take over. The body of a
+All routes are under `/api/w/<slug>/workflows`, need a signed in member of the workspace (the writes `POST /workflows`, `PUT /workflows/<id>` and `DELETE /workflows/<id>` need an **Owner or Admin**: a Member gets `403` `{"error": "forbidden"}` and nothing is read or saved; `validate`, `scope` and the reads stay open to every member), and answer `Cache-Control: no-store`. A lane belongs to a project (#922): the list and the creation name it with the query value `projectId` (the workspace has no list of all its workflows any more); the routes of one workflow are by its id as before. The API keeps these routes with the `projectId` filter for one release, then the project-scoped routes take over. The body of a
 write is the document itself (`Content-Type: application/json`, 256 KB at most). A refusal is `{"error": <code>, "message": ...}` with a stable
 code from the table below.
 
@@ -722,8 +748,8 @@ under it. A workflow that reaches its 500 versions is archived and written again
 `WORKFLOW_ARCHIVED`), is never started (the engine reads `archivedAt`), does not count against the 100, and **gives its name back**: a new
 workflow may use it. Its versions stay readable by id. There is no way back yet. The archive is bounded so that archiving and creating again
 cannot grow the rows for ever: with 1000 archived workflows in a workspace one more **cannot be archived** (`409`
-`WORKFLOW_ARCHIVE_LIMIT_REACHED`, with `maximum`); creating, saving and reading go on. Every member may do everything in a workspace (no role is checked), so
-the count, not a role, is the bound; there is no way to remove archived workflows yet (a follow-up).
+`WORKFLOW_ARCHIVE_LIMIT_REACHED`, with `maximum`); creating, saving and reading go on. Archiving needs an Owner or Admin like every write, so
+the count is the bound against a runaway script; there is no way to remove archived workflows yet (a follow-up).
 
 ### Lanes belong to a project
 
@@ -1105,7 +1131,7 @@ When the last one is over, the run ends with the stored status and error code (`
 - **`onFailure` reads no step of the workflow.** After a failure any step may not have run, so the facts of the failure (`status`, `stepId`, `code`, `message`) and the trigger are all it has: it cannot name the branch the agent pushed or quote an earlier result. (A later extension could offer them with a `| default`.)
 - **`onFailure` is not shown apart on the run page and not in the run's JSON**: its steps are rows after the failed one, like any step; `workflow_runs.failure` is not returned by the routes yet.
 - **Profiles are resolved per step** (superseded: profiles are removed, ADR 0007), at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
-  with version 1.
+  with version 1. A step with settings of its own (#1105) is what it says: nothing under it changes.
 - **The sweep has a time budget** (40 seconds, 10 for the maintenance after a request), checked between two runs; a run is looked at as a whole.
 
 ### Actions
@@ -1394,6 +1420,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `template_invalid` | step | A reference holds an object, or the text is not a template. |
 | `template_too_large` | step | The text does not fit where it goes. |
 | `profile_not_found` | step | The profile is gone, archived or has no such version. |
+| `agent_settings_invalid` | step | #1105: a step that carries its settings itself ([the agent step](#the-agent-step-kind-agent)) holds a value that cannot be used (a model, `canPush`, harness, instructions, setup script or network rule that does not read). The validator refuses such a document at save, so this means a version that was not saved by it. Nothing starts, free of charge. |
 | `environment_not_found` | step | The environment (the profile's, or the step's for a profile version without one) is not one of the workspace. |
 | `environment_mismatch` | step | The step names another environment than the profile version it runs ([`profiles.md`](profiles.md#where-profiles-meet-workflows)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step. |
 | `repo_duplicate` | step | Two entries of `repos` are one repository without regard to case once their references are filled in (#1092). Nothing starts, free of charge. |
@@ -1462,7 +1489,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 *Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
 A member can read a workflow on its [lane page](#the-lane-page) (nobody edits a lane in the browser, ADR 0007), start one by hand and watch a run. The pages exist
 only in a deployment with the capability `implementer`, are reached from the **Lanes** tab of a project (no sidebar place of their own since #925), and are open to every member (the permission
-`start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
+`start_implementer_task`; only saving a lane is for Owners and Admins, `manage_workflows`). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
 not exist.
 
 - **Workflows** (`/w/<slug>/workflows`): the workflows of the workspace that are not archived, with their version and the time of the last save.
@@ -1614,17 +1641,22 @@ Beyond the form:
 | `condition_operand_type` | An operand of the wrong type, or two that cannot be compared. | Compare like with like; `empty` takes a list or a text. |
 | `condition_value_not_in_enum` | A text compared with a choice of names that can never hold it. | Use one of `available`. |
 | `instruction_next_outside_loop` | `instruction.next` in a step that is not in a loop. | Use a plain text, or put the step in a loop. |
-| `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or the step itself where it is not a direct step of a loop body; or a step with both `session.continue` and `branch`. | Use one of `available`, with the same profile and environment; or drop `branch` (a session that goes on keeps its branch). |
+| `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or (steps with settings of their own, #1105) one that differs in `harness`, `model`, `canPush` or `instructions` or takes its settings the other way (a profile against settings), or the step itself where it is not a direct step of a loop body; or a step with both `session.continue` and `branch`. | Use one of `available`, with the same profile and environment; or drop `branch` (a session that goes on keeps its branch). |
 | `repos_with_branch` | An agent step has `repos` and the `branch` of a session of its own (#1092). Reported at `repos`. | Take one of them out: with `repos` the branches are named in each entry. |
 | `repos_with_session_continue` | An agent step has `repos` and a `session` that is not `"new"` (`{"continue": …}`, or an object without `continue`, #1092). Reported at `repos`. | Leave `repos` out: a session that goes on keeps the repositories of the session it continues. |
 | `repo_duplicate` | Two entries of `repos` are one repository without regard to case (`Acme/App` and `acme/app`, #1092). Reported at the `repo` of the second. The engine reports the same for the filled-in references, as a failure of the step. | Name each repository once. |
 | `repo_name_clash` | Every entry of `repos` is a literal and two of them mount under one name without regard to case after the derivation (`acme/app`, `x/app` and `acme/acme__app` all give `acme__app`, #1092). Reported at the `repo` of the later one. The engine reports it for references, as a failure of the step. | Leave one of them out. |
+| `profile_with_inline_settings` | An agent step names a `profile` and also has settings of its own (`harness`, `model`, `canPush`, `instructions`, `setupScript`, `network`, #1105). Reported at `profile`; `available` lists the keys of the settings. | Take the profile out and keep the settings, or take the settings out. |
+| `agent_settings_required` | An agent step names no `profile` and has none of the settings above (#1105). Reported at the step. | Name a `profile`, or write `model` and `canPush` (and `environment`) in the step. |
+| `model_not_allowed` | The workspace cannot run the `model` of a step's own settings (#1105): the reason is named, the same rule a profile's model gets when it is saved (a catalog entry that is not released or not allowed, a provider without a key). Not asked for the harness `claude-code`. | Take a model from `GET /api/w/<slug>/implementer/models`. |
+| `hosted_only_setting` | `setupScript` or `network` in a step whose environment runs on a runner (#1105, ADR 0007, decision 11): a runner's setup and network are its owner's. Reported at the field. | Take it out, or name a hosted environment. |
+| `network_host_invalid` | A host in the `network` rule of a step's own settings is no host name the rule can hold: an address, a port, a scheme or a path (#1105). The shape of the rule (mode, `hosts` only with `list`, one to 100 hosts) is the schema's. | Write an exact name (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`). |
 | `profile_unknown` | No such profile. | Use one of `available`. |
 | `profile_archived` | The profile exists but is archived: no step may run it. | Use one of `available`. |
 | `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |
 | `environment_unknown` | No such environment in the workspace; or, at the step's `/profile`, the environment of the profile version was removed. | Use one of `available`, or create it on the Environments page; for a removed one save a new version of the profile. |
 | `environment_mismatch` | The step names an `environment` other than the one of its profile (#919). `available` is the profile's. | Leave `environment` out of the step. |
-| `environment_required` | The step names no `environment` and its profile version names none (saved before #919). `available` lists the environments. | Name one in the step, or save a new version of the profile with an `environment`. |
+| `environment_required` | The step names no `environment` and its profile version names none (saved before #919), or it carries its settings itself (#1105) and so has no profile to say where it works. `available` lists the environments. | Name one in the step, or save a new version of the profile with an `environment`. |
 | `runner_needs_own_key` | An agent step runs a profile with a managed model (an entry of the platform's catalog, on the platform's key) in an environment that runs on a runner. A runner works with the workspace's own key. | Use a profile with a model of your own key, or an environment that runs on a platform VM. |
 | `harness_needs_runner` | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM. Such a harness exists only on a runner. | Use an environment that runs on a runner. |
 | `no_runner_announces` | An agent step runs a profile in an environment that runs on a runner, a runner with the environment's labels is online, and none of those announces the harness, the auth and the model the profile asks for (#973): for example `claude-code` on a subscription with the model `opus` when the online runners announce only `sonnet`. The runners announce `harnesses` entries (`docs/runner.md`, "Routing"). It is a **warning** (`severity: "warning"`, listed in `warnings`, never in `errors`; the workflow is `valid` and saves): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. Nothing is said while no runner with the labels is online: the turn waits for one. | Use a model or a harness the runner announces, or start a runner that does; or save anyway, the turn waits. |
