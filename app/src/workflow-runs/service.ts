@@ -677,6 +677,12 @@ export function createWorkflowRunService(
           "WORKFLOW_RUN_PROJECT_REQUIRED",
           "The trigger takes no input, so its run works on the repository of the project of the lane, and this lane has no project.",
         );
+      // A switched-off project is never worked on, and a trigger without input has no other source of the repository (#1106).
+      if (noInput && project !== undefined && !project.active)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_PROJECT_INACTIVE",
+          "The project of this lane is switched off, so its run would work on a repository nobody reviews. Switch the project on first.",
+        );
       const given = noInput
         ? input
         : await withProjectRepository(input, schema, project);
@@ -708,23 +714,39 @@ export function createWorkflowRunService(
             ? "A lane without a project takes GitHub issues only."
             : `The tickets of the project of this lane are ${sourceProvider === "jira" ? "Jira issues" : "GitHub issues"}: name one as ${sourceProvider}:owner/repo#key.`,
         );
+      // The repository of a trigger without input is the project's: when it cannot be had, the message names it, never `input.repo`.
+      const projectRepository =
+        noInput && ref === undefined && project !== undefined
+          ? await deps.repositoryName(project.ticketSource.repositoryId)
+          : undefined;
+      const unavailable = (): WorkflowRunError =>
+        new WorkflowRunError(
+          "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
+          projectRepository === undefined
+            ? "The repository of the project of this lane is not available: it is switched off, its installation is gone, or it was removed."
+            : `The repository of the project of this lane, ${projectRepository}, is not available: it is switched off or its installation is gone.`,
+        );
       const repoName =
         ref !== undefined
           ? ref.ref.repo
-          : noInput && project !== undefined
-            ? await deps.repositoryName(project.ticketSource.repositoryId)
+          : noInput
+            ? projectRepository
             : given.repo;
       if (typeof repoName !== "string" || !REPO_NAME.test(repoName))
-        throw new WorkflowRunError(
-          "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
-          "input.repo must be a repository of the workspace, as owner/name.",
-        );
+        throw noInput && ref === undefined
+          ? unavailable()
+          : new WorkflowRunError(
+              "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
+              "input.repo must be a repository of the workspace, as owner/name.",
+            );
       const repository = await deps.resolveRepository(repoName);
       if (repository === undefined)
-        throw new WorkflowRunError(
-          "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
-          "There is no such repository in this workspace.",
-        );
+        throw noInput && ref === undefined
+          ? unavailable()
+          : new WorkflowRunError(
+              "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
+              "There is no such repository in this workspace.",
+            );
       // #922: a lane works within the ticket source of its project; checked before the platform is asked about the ticket.
       if (
         project !== undefined &&

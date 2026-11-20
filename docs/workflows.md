@@ -160,7 +160,7 @@ Other triggers (Jira) come later. Who may set the label is decided by GitHub, no
 
 ### One repository per run, and targets
 
-**A run works on one repository** in version 1: the one of the ticket (`trigger.ticket.repo` of a label trigger and of a trigger with a `ticket` input), or the input `repo` of a manual one. A manual or api trigger **without `input`** (#1106) has neither: its run works on the repository of the project of the lane, on that repository's default branch (a lane without a project cannot be started that way: `422 WORKFLOW_RUN_PROJECT_REQUIRED`). No agent step and
+**A run works on one repository** in version 1: the one of the ticket (`trigger.ticket.repo` of a label trigger and of a trigger with a `ticket` input), or the input `repo` of a manual one. A manual or api trigger **without `input`** (#1106) has neither: its run works on the repository of the project of the lane, on that repository's default branch (a lane without a project cannot be started that way: `422 WORKFLOW_RUN_PROJECT_REQUIRED`, nor one whose project is switched off: `409 WORKFLOW_RUN_PROJECT_INACTIVE`). No agent step and
 no action names a repository (a `repo` field is `unknown_field`); they all work on the run's. **The one exception is the `repos` of an agent step**
 (#1090, [ADR 0006](decisions/0006-multi-repo-agent-steps.md)): a step that names its repositories works on those, whatever the run's is, and the pull request step
 opens a pull request in each ([Several repositories in one step](#several-repositories-in-one-step)).
@@ -803,7 +803,7 @@ run is started by hand (`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step na
 `POST /api/w/<slug>/workflows/<id>/runs` with `{"trigger": "manual", "input": {...}, "clientRequestId": "..."}`, for every member (the permission to start an Implementer
 task, `start_implementer_task`: a run starts tasks). `trigger` is the `id` of one of the workflow's [triggers](#the-triggers-and-their-pre-steps) of the kind `manual` or `api`; it may be left out
 when the workflow has exactly one of them (a workflow written with the single `trigger` has one). `input` must fit the `input` schema of that trigger (checked again here with the same rules as a
-result: a start knows the values). A trigger **without `input`** (#1106) takes no fields: `input` is left out (or `{}`), any field is `422 WORKFLOW_RUN_INPUT_INVALID`, and the run works on the repository of the lane's project and its default branch; a lane without a project is refused with `422 WORKFLOW_RUN_PROJECT_REQUIRED`. The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`, which a lane of a project may leave out: it is then the project's repository, [Built-in lanes](#built-in-lanes)); either is a repository of the workspace and, for a lane of a project, the project's own ([Lanes belong to a project](#lanes-belong-to-a-project)). The answer is
+result: a start knows the values). A trigger **without `input`** (#1106) takes no fields: `input` is left out (or `{}`), any field is `422 WORKFLOW_RUN_INPUT_INVALID`, and the run works on the repository of the lane's project and its default branch; a lane without a project is refused with `422 WORKFLOW_RUN_PROJECT_REQUIRED`, and a lane whose project is switched off with `409 WORKFLOW_RUN_PROJECT_INACTIVE` (a trigger with an `input` is not held to the second); when the project's repository is not available (switched off, installation gone), `404 WORKFLOW_RUN_REPOSITORY_NOT_FOUND` names that repository. The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`, which a lane of a project may leave out: it is then the project's repository, [Built-in lanes](#built-in-lanes)); either is a repository of the workspace and, for a lane of a project, the project's own ([Lanes belong to a project](#lanes-belong-to-a-project)). The answer is
 `201 {"run": {...}}`, with the run and its steps; the pre-steps of the trigger and then the shared steps start right after the answer.
 
 ```jsonc
@@ -1431,7 +1431,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_CROSS_SITE_REQUEST` | 403 | The request comes from another site. |
 | `WORKFLOW_RUN_WORKFLOW_NOT_FOUND` | 404 | No such workflow in this workspace. |
 | `WORKFLOW_RUN_NOT_FOUND` | 404 | No such run of this workflow in this workspace. |
-| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND` | 404 | `input.repo`, or the repository of the `ticket`, is none of the workspace's repositories (or not `owner/name`). |
+| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND` | 404 | `input.repo`, or the repository of the `ticket`, is none of the workspace's repositories (or not `owner/name`). For a trigger without `input` (#1106) it is the project's own repository that is not available (switched off, its installation gone, or removed); the message names it. |
 | `WORKFLOW_RUN_TRIGGER_UNKNOWN` | 404 | The workflow has no trigger with the id the body names as `trigger`. |
 | `WORKFLOW_RUN_TICKET_NOT_FOUND` | 404 | The repository has no issue of the number the `ticket` names (a pull request is none). |
 | `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
@@ -1444,6 +1444,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT` | 422 | The `ticket` is not an issue of the repository the lane's project takes its tickets from (`issues[].available` names it). |
 | `WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED` | 422 | The `ticket` names a provider the engine cannot read tickets of yet (`jira:…` parses, #1035, but a run starts from a GitHub issue only until #1039/#1040). |
 | `WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT` | 422 | `input.repo` is not that repository. |
+| `WORKFLOW_RUN_PROJECT_INACTIVE` | 409 | The trigger declares no `input` and the lane's project is switched off (#1106). Triggers with an `input` are not held to this. Switch the project on, then start again. |
 | `WORKFLOW_RUN_PROJECT_REQUIRED` | 422 | The trigger declares no `input` (its run works on the repository of the lane's project), and the lane has no project (#1106). |
 | `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |

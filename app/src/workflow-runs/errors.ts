@@ -13,6 +13,8 @@ export const WORKFLOW_RUN_ERROR_STATUS = {
   WORKFLOW_RUN_TRIGGER_UNKNOWN: 404,
   WORKFLOW_RUN_TICKET_NOT_FOUND: 404,
   WORKFLOW_RUN_WORKFLOW_ARCHIVED: 409,
+  /** #1106: the trigger declares no input, so the run works on the repository of the project, and the project is switched off. */
+  WORKFLOW_RUN_PROJECT_INACTIVE: 409,
   /** #920: the run does not wait for an answer (never did, was answered before, or was asked to stop). */
   WORKFLOW_RUN_NOT_WAITING: 409,
   /** #920: the answer was written for another question than the one that waits (it was answered, and the step asked again). */

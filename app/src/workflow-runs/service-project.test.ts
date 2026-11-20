@@ -119,6 +119,7 @@ function harness(
     repositoryId: "repo-widgets",
     board: null,
   },
+  options: { active?: boolean; unresolvable?: string[] } = {},
 ) {
   const created: NewWorkflowRun[] = [];
   const readTicket = vi.fn(async (_repositoryId: string, key: string) =>
@@ -156,6 +157,7 @@ function harness(
       async getById() {
         return {
           id: "project-1",
+          active: options.active ?? true,
           ticketSource: source,
         };
       },
@@ -167,7 +169,7 @@ function harness(
     },
     async resolveRepository(fullName: string) {
       const id = REPOSITORIES[fullName];
-      return id === undefined
+      return id === undefined || options.unresolvable?.includes(fullName)
         ? undefined
         : { id, fullName, defaultBranch: "main" };
     },
@@ -458,5 +460,168 @@ describe("a manual start of a trigger without input (#1106)", () => {
 
     expect(failure.code).toBe("WORKFLOW_RUN_PROJECT_REQUIRED");
     expect(created).toEqual([]);
+  });
+
+  // #1106-T04
+  it("starts an api trigger without input the same way", async () => {
+    const { service, created } = harness({
+      ...NO_INPUT,
+      triggers: [{ id: "hook", kind: "api" }],
+    });
+
+    const started = await service.start(USER, "wf-1", {
+      clientRequestId: "r-1",
+    });
+
+    expect(started.created).toBe(true);
+    expect(created[0]).toMatchObject({
+      repositoryId: "repo-widgets",
+      baseBranch: "main",
+      triggerKind: "api",
+      triggerId: "hook",
+    });
+  });
+
+  // #1106-T05
+  it("works on the code repository of a Jira-source project", async () => {
+    const { service, created, readTicket } = harness(
+      NO_INPUT,
+      "project-1",
+      undefined,
+      JIRA_SOURCE,
+    );
+
+    const started = await service.start(USER, "wf-1", {
+      clientRequestId: "r-1",
+    });
+
+    expect(started.created).toBe(true);
+    expect(created[0]).toMatchObject({
+      repositoryId: "repo-widgets",
+      baseBranch: "main",
+    });
+    expect(readTicket).not.toHaveBeenCalled();
+  });
+
+  // #1106-T06
+  it("answers a replay of the same request id with the run it made, and refuses a replay that adds a field", async () => {
+    const earlier = {
+      id: "run-1",
+      workflowId: "wf-1",
+      triggerId: "manual",
+      triggerInput: "{}",
+    } as unknown as StoredWorkflowRun;
+    const { service, created } = harness(NO_INPUT, "project-1", earlier);
+
+    const again = await service.start(USER, "wf-1", {
+      clientRequestId: "r-1",
+    });
+    const same = await service.start(USER, "wf-1", {
+      input: {},
+      clientRequestId: "r-1",
+    });
+    const other = await refusal(
+      service.start(USER, "wf-1", {
+        input: { repo: "acme/widgets" },
+        clientRequestId: "r-1",
+      }),
+    );
+
+    expect(again.created).toBe(false);
+    expect(same.created).toBe(false);
+    expect(other.code).toBe("WORKFLOW_RUN_REQUEST_REUSED");
+    expect(created).toEqual([]);
+  });
+
+  // #1106-T07
+  it("names the repository of the project, not input.repo, when it is not available", async () => {
+    const { service, created } = harness(
+      NO_INPUT,
+      "project-1",
+      undefined,
+      undefined,
+      { unresolvable: ["acme/widgets"] },
+    );
+
+    const failure = await refusal(
+      service.start(USER, "wf-1", { clientRequestId: "r-1" }),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_RUN_REPOSITORY_NOT_FOUND");
+    expect(failure.message).toContain("acme/widgets");
+    expect(failure.message).not.toContain("input.repo");
+    expect(created).toEqual([]);
+  });
+
+  // #1106-T08
+  it("tells the project's repository is not available when its name cannot be found at all", async () => {
+    const { service, created } = harness(NO_INPUT, "project-1", undefined, {
+      provider: "github",
+      repositoryId: "repo-gone",
+      board: null,
+    });
+
+    const failure = await refusal(
+      service.start(USER, "wf-1", { clientRequestId: "r-1" }),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_RUN_REPOSITORY_NOT_FOUND");
+    expect(failure.message).toContain("project of this lane");
+    expect(failure.message).not.toContain("input.repo");
+    expect(created).toEqual([]);
+  });
+
+  // #1106-T09
+  it("refuses a lane whose project is switched off, and writes no run, while a trigger with input is not held to it", async () => {
+    const off = harness(NO_INPUT, "project-1", undefined, undefined, {
+      active: false,
+    });
+    const withInput = harness(BY_REPO, "project-1", undefined, undefined, {
+      active: false,
+    });
+
+    const failure = await refusal(
+      off.service.start(USER, "wf-1", { clientRequestId: "r-1" }),
+    );
+    const started = await withInput.service.start(USER, "wf-1", {
+      input: {},
+      clientRequestId: "r-2",
+    });
+
+    expect(failure.code).toBe("WORKFLOW_RUN_PROJECT_INACTIVE");
+    expect(off.created).toEqual([]);
+    expect(started.created).toBe(true);
+  });
+
+  // #1106-T10
+  it("starts the manual trigger of a lane that also has a label trigger, on the project's repository", async () => {
+    const { service, created } = harness({
+      ...NO_INPUT,
+      triggers: [
+        { id: "labeled", kind: "ticket.labeled", label: "go" },
+        { id: "manual", kind: "manual" },
+      ],
+      steps: [
+        {
+          id: "say",
+          kind: "action",
+          connector: "ticket.comment",
+          ticket: 7,
+          body: "hi",
+        },
+      ],
+    });
+
+    const started = await service.start(USER, "wf-1", {
+      trigger: "manual",
+      clientRequestId: "r-1",
+    });
+
+    expect(started.created).toBe(true);
+    expect(created[0]).toMatchObject({
+      repositoryId: "repo-widgets",
+      triggerKind: "manual",
+      triggerId: "manual",
+    });
   });
 });

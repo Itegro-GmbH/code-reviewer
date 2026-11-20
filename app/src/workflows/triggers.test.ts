@@ -580,6 +580,72 @@ describe("the input of a manual or api trigger", () => {
     ).toEqual([["/triggers/0/input", "repo_required"]]);
   });
 
+  // #1106
+  it("refuses a reference to trigger.input or trigger.ticket in a lane whose manual or api trigger has no input", () => {
+    for (const kind of ["manual", "api"] as const) {
+      const at = (body: string, ticket: string | number = 7) =>
+        codes(workflow([{ id: "m", kind }], [comment("say", ticket, body)]));
+      expect(at("{{trigger.input.topic}}")).toEqual([
+        ["/steps/0/body", "reference_unknown_field"],
+      ]);
+      expect(at("{{trigger.input.repo}}")).toEqual([
+        ["/steps/0/body", "reference_unknown_field"],
+      ]);
+      expect(at("{{trigger.input}}")).toEqual([
+        ["/steps/0/body", "reference_type_mismatch"],
+      ]);
+      expect(at("{{trigger.ticket.title}}")).toEqual([
+        ["/steps/0/body", "reference_unknown_field"],
+      ]);
+      expect(at("hi", "{{trigger.ticket}}")).toEqual([
+        ["/steps/0/ticket", "reference_unknown_field"],
+      ]);
+    }
+  });
+
+  // #1106
+  it("refuses the same references in a pre-step of a trigger without input", () => {
+    expect(
+      codes(
+        workflow(
+          [
+            {
+              id: "m",
+              kind: "manual",
+              steps: [comment("pre", 7, "{{trigger.input.topic}}")],
+            },
+          ],
+          [comment("say", 7)],
+        ),
+      ),
+    ).toEqual([["/triggers/0/steps/0/body", "reference_unknown_field"]]);
+    expect(
+      codes(
+        workflow(
+          [
+            {
+              id: "m",
+              kind: "manual",
+              steps: [comment("pre", "{{trigger.ticket}}")],
+            },
+          ],
+          [comment("say", 7)],
+        ),
+      ),
+    ).toEqual([["/triggers/0/steps/0/ticket", "reference_unknown_field"]]);
+  });
+
+  // #1106
+  it("refuses a shared step that reads trigger.ticket when a label trigger is joined by a manual trigger without input", () => {
+    const result = check(
+      workflow([LABELED, { id: "m", kind: "manual" }], [comment("say")]),
+    );
+
+    expect(result.errors.map((e) => [e.path, e.code])).toEqual([
+      ["/steps/0/ticket", "reference_not_in_scope"],
+    ]);
+  });
+
   // #916-T41
   it("takes a ticket only as the field `ticket` of the input itself", () => {
     const input = (properties: Json) => ({
