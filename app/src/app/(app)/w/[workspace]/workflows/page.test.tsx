@@ -33,21 +33,13 @@ vi.mock("@/workflows/shared", () => ({
 vi.mock("@/workflow-runs/shared", () => ({
   workflowRunServiceFor: services.workflowRunServiceFor,
 }));
-// The builder of a workflow (#926) lists the workspace's profiles for its agent steps.
-vi.mock("@/profiles/shared", () => ({
-  profileServiceFor: vi.fn(() => ({
-    list: async () => ({ profiles: [] }),
-  })),
+// The lane page (#1107) names the lane's project from the projects of the workspace and the authors of its versions from the members.
+vi.mock("@/projects/shared", () => ({
+  projectServiceFor: vi.fn(() => ({ listProjects: async () => [] })),
 }));
-
-// #1052: and its MCP servers for the pickers of the lane card and of an agent step.
-vi.mock("@/mcp/shared", () => ({
-  mcpServiceFor: vi.fn(() => ({ list: async () => [] })),
-}));
-
-// #1036: and the status names of its project's board for a status trigger (#1038: or of its Jira project; one wiring for both).
-vi.mock("@/jira/source-shared", () => ({
-  statusNamesFor: vi.fn(() => async () => []),
+vi.mock("@/db/startup", () => ({ getDatabase: vi.fn(() => ({})) }));
+vi.mock("@/db/repositories/workspace-members-repository", () => ({
+  createWorkspaceMembersRepository: vi.fn(() => ({ list: async () => [] })),
 }));
 
 import { WorkflowError } from "@/workflows/errors";

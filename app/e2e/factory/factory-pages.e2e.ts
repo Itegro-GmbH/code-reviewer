@@ -236,6 +236,7 @@ test.describe("the pages of the factory", () => {
   test("@smoke the lane page is read only and lists the versions with their change descriptions", async ({
     page,
   }) => {
+    await openProject(page, "lanes");
     // A new version through the API: it needs a change description, and the page shows it (#1107).
     const refused = await page.request.put(
       `/api/w/default/workflows/${laneId}`,
@@ -255,8 +256,6 @@ test.describe("the pages of the factory", () => {
       },
     });
     expect(saved.status()).toBe(200);
-
-    await openProject(page, "lanes");
     await page
       .getByRole("table", { name: "Lanes" })
       .getByRole("link", { name: LANE_DOCUMENT.name })

@@ -597,6 +597,7 @@ const ENTRIES: Entry[] = [
     body: () => ({
       version: 1,
       name: "Created by the matrix",
+      description: "A new lane needs a description (#1107).",
       // Both workspaces have an environment of this name, so the document is valid whichever workspace the request is for.
       trigger: {
         kind: "manual",
@@ -663,6 +664,9 @@ const ENTRIES: Entry[] = [
     body: () => ({
       version: 1,
       name: "Changed by the matrix",
+      description: "Saved as the next version by the matrix.",
+      // A new version says what it changes (#1107).
+      changeDescription: "Changed by the matrix.",
       // Both workspaces have an environment of this name, so the document is valid whichever workspace the request is for.
       trigger: {
         kind: "manual",
