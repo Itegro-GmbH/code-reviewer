@@ -96,9 +96,10 @@ describe("one repository per run", () => {
     const properties = (document: Json): Json =>
       input(document).properties as Json;
 
+    // #1106: a trigger may declare no input at all; its run works on the repository of the project of the lane.
     expect(
       codes(change(tiny(), (d) => delete (d.trigger as Json).input)),
-    ).toEqual([["/trigger", "repo_required"]]);
+    ).toEqual([]);
     expect(
       codes(
         change(tiny(), (d) => {

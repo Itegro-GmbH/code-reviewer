@@ -27,6 +27,8 @@ export type StartFormSpec =
   | { kind: "forms"; forms: (StartFormFields & { trigger: string })[] };
 
 function fieldsOf(input: unknown): StartField[] | undefined {
+  // #1106: a trigger without `input` takes no fields: the form is only the button.
+  if (input === undefined) return [];
   const schema = validateResultSchema(input, "", { allowTicket: true }).schema;
   if (schema === undefined) return undefined;
   const required = new Set(schema.required ?? []);

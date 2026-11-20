@@ -426,6 +426,20 @@ describe("the form that starts a run", () => {
     });
   });
 
+  // #1106
+  it("makes a form without fields for a manual trigger that declares no input", () => {
+    expect(startFormOf(document({ kind: "manual" }))).toEqual({
+      kind: "form",
+      fields: [],
+    });
+    expect(
+      startFormOf({
+        version: 1,
+        triggers: [{ id: "go", kind: "manual" }],
+      }),
+    ).toEqual({ kind: "form", fields: [], trigger: "go" });
+  });
+
   // #916-T110
   it("makes one form for the only manual trigger of a list of triggers, the ticket first, and sends the id of the trigger", () => {
     const spec = startFormOf({
