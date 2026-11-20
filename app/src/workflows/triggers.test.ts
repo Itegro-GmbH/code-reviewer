@@ -521,10 +521,7 @@ describe("triggers with pre-steps", () => {
 
 describe("the input of a manual or api trigger", () => {
   // #916-T40
-  it("needs the ticket, or the repository, so that the run has one", () => {
-    expect(
-      codes(workflow([{ id: "m", kind: "manual" }], [comment("say", 7)])),
-    ).toEqual([["/triggers/0", "repo_required"]]);
+  it("needs the ticket, or the repository, so that the run has one, once it declares an input", () => {
     expect(
       codes(
         workflow([
@@ -555,6 +552,32 @@ describe("the input of a manual or api trigger", () => {
     expect(
       check(workflow([{ id: "m", kind: "api", input: TICKET_INPUT }])).errors,
     ).toEqual([]);
+  });
+
+  // #1106
+  it("may be left out: the run works on the repository of the project of the lane, and the trigger yields no input fields", () => {
+    for (const kind of ["manual", "api"] as const)
+      expect(codes(workflow([{ id: "m", kind }], [comment("say", 7)]))).toEqual(
+        [],
+      );
+    // An input that is declared is still held to a repository.
+    expect(
+      codes(
+        workflow(
+          [
+            {
+              id: "m",
+              kind: "manual",
+              input: {
+                type: "object",
+                properties: { topic: { type: "string" } },
+              },
+            },
+          ],
+          [comment("say", 7)],
+        ),
+      ),
+    ).toEqual([["/triggers/0/input", "repo_required"]]);
   });
 
   // #916-T41

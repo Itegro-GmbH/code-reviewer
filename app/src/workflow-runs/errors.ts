@@ -25,6 +25,8 @@ export const WORKFLOW_RUN_ERROR_STATUS = {
   /** #1038: the ticket names a provider the engine cannot read tickets of yet (Jira: #1039, #1040). */
   WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED: 422,
   WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT: 422,
+  /** #1106: the trigger declares no input, so the run works on the repository of the project, and the lane has no project. */
+  WORKFLOW_RUN_PROJECT_REQUIRED: 422,
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED: 422,
   WORKFLOW_RUN_INPUT_INVALID: 422,
   /** #920: the answer is empty, too long, or names an option the question does not have. */

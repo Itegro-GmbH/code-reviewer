@@ -166,6 +166,21 @@ describe("what is sent", () => {
     );
   });
 
+  // #1106
+  it("starts a lane whose trigger has no input with no field filled in: an empty input goes to the start", async () => {
+    const user = userEvent.setup();
+    const api = apiAnswering(ok(run({ id: "run-10" })));
+    renderForm(api, []);
+
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(api.start).toHaveBeenCalledWith("wf-1", {
+      input: {},
+      clientRequestId: expect.stringMatching(/^[\x21-\x7e]{1,200}$/),
+    });
+  });
+
   // #873-T52
   it("does not send a form with a required field empty, and says which one", async () => {
     const user = userEvent.setup();

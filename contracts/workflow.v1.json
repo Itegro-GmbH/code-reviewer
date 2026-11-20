@@ -758,7 +758,7 @@
       }
     },
     "ManualTriggerEntry": {
-      "description": "Started by hand (`manual`) or through the API (`api`; the start form offers `manual` only). `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. A run works on one repository: the input declares either `ticket` (type `ticket`, required: a reference like `github:owner/repo#128`; the run works in the repository of the ticket and steps read it as `{{trigger.ticket.number|title|body|labels|type|assignees|url|repo|repo.defaultBranch}}`) or `repo`, a required text (owner/name). The schema cannot say it (`repo_required`).",
+      "description": "Started by hand (`manual`) or through the API (`api`; the start form offers `manual` only). `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. Without `input` the trigger takes no fields and its run works on the repository of the lane's project (the lane must belong to a project). A run works on one repository: an input that is declared declares either `ticket` (type `ticket`, required: a reference like `github:owner/repo#128`; the run works in the repository of the ticket and steps read it as `{{trigger.ticket.number|title|body|labels|type|assignees|url|repo|repo.defaultBranch}}`) or `repo`, a required text (owner/name). The schema cannot say it (`repo_required`).",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "kind"],
@@ -872,7 +872,7 @@
       }
     },
     "ManualTrigger": {
-      "description": "Started by hand (`manual`) or through the API (`api`; the start form offers `manual` only). `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. A run works on one repository: the input declares either `ticket` (type `ticket`, required: a reference like `github:owner/repo#128`; the run works in the repository of the ticket and steps read it as `{{trigger.ticket.number|title|body|labels|type|assignees|url|repo|repo.defaultBranch}}`) or `repo`, a required text (owner/name). The schema cannot say it (`repo_required`).",
+      "description": "Started by hand (`manual`) or through the API (`api`; the start form offers `manual` only). `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. Without `input` the trigger takes no fields and its run works on the repository of the lane's project (the lane must belong to a project). A run works on one repository: an input that is declared declares either `ticket` (type `ticket`, required: a reference like `github:owner/repo#128`; the run works in the repository of the ticket and steps read it as `{{trigger.ticket.number|title|body|labels|type|assignees|url|repo|repo.defaultBranch}}`) or `repo`, a required text (owner/name). The schema cannot say it (`repo_required`).",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind"],

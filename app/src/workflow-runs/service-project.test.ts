@@ -70,6 +70,21 @@ const BY_REPO = {
   ],
 };
 
+const NO_INPUT = {
+  version: 1,
+  name: "No input",
+  triggers: [{ id: "manual", kind: "manual" }],
+  steps: [
+    {
+      id: "say",
+      kind: "action",
+      connector: "ticket.comment",
+      ticket: 7,
+      body: "hi",
+    },
+  ],
+};
+
 /** The repositories of the workspace by name; the project of the lane takes its tickets from `acme/widgets`. */
 const REPOSITORIES: Record<string, string> = {
   "acme/widgets": "repo-widgets",
@@ -394,6 +409,54 @@ describe("a manual start within the project of the lane (#922)", () => {
 
     expect(failure.code).toBe("WORKFLOW_RUN_REQUEST_REUSED");
     expect(same.created).toBe(false);
+    expect(created).toEqual([]);
+  });
+});
+
+describe("a manual start of a trigger without input (#1106)", () => {
+  // #1106-T01
+  it("works on the repository of the project and its default branch, with no input at all", async () => {
+    const { service, created } = harness(NO_INPUT);
+
+    const started = await service.start(USER, "wf-1", {
+      clientRequestId: "r-1",
+    });
+
+    expect(started.created).toBe(true);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      repositoryId: "repo-widgets",
+      baseBranch: "main",
+      triggerKind: "manual",
+      triggerId: "manual",
+    });
+    expect(JSON.parse(created[0]?.triggerInput ?? "{}")).toEqual({});
+  });
+
+  // #1106-T02
+  it("refuses a field the trigger does not declare, and writes no run", async () => {
+    const { service, created } = harness(NO_INPUT);
+
+    const failure = await refusal(
+      service.start(USER, "wf-1", {
+        input: { repo: "acme/other" },
+        clientRequestId: "r-1",
+      }),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_RUN_INPUT_INVALID");
+    expect(created).toEqual([]);
+  });
+
+  // #1106-T03
+  it("refuses a lane without a project with its own code: there is no repository to work on", async () => {
+    const { service, created } = harness(NO_INPUT, null);
+
+    const failure = await refusal(
+      service.start(USER, "wf-1", { clientRequestId: "r-1" }),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_RUN_PROJECT_REQUIRED");
     expect(created).toEqual([]);
   });
 });

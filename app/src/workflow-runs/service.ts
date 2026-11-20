@@ -305,6 +305,9 @@ export type WorkflowRunServiceDependencies = {
   maxBudgetUsd?: number;
 };
 
+/** The input of a manual or api trigger that declares none (#1106): no field at all. */
+const NO_INPUT_SCHEMA: ResultSchema = { type: "object", properties: {} };
+
 const REPO_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 
 const notFound = (): WorkflowRunError =>
@@ -653,9 +656,11 @@ export function createWorkflowRunService(
           { step: { id: unsupported.id, kind: unsupported.kind } },
         );
 
-      const schema = validateResultSchema(trigger.input, "", {
-        allowTicket: true,
-      }).schema;
+      // #1106: a trigger without `input` takes no fields; its run works on the repository of the lane's project.
+      const noInput = trigger.input === undefined;
+      const schema = noInput
+        ? NO_INPUT_SCHEMA
+        : validateResultSchema(trigger.input, "", { allowTicket: true }).schema;
       if (schema === undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_DOCUMENT_UNUSABLE",
@@ -667,7 +672,14 @@ export function createWorkflowRunService(
         found.workflow.projectId === null
           ? undefined
           : await deps.projects.getById(found.workflow.projectId);
-      const given = await withProjectRepository(input, schema, project);
+      if (noInput && project === undefined)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_PROJECT_REQUIRED",
+          "The trigger takes no input, so its run works on the repository of the project of the lane, and this lane has no project.",
+        );
+      const given = noInput
+        ? input
+        : await withProjectRepository(input, schema, project);
       const problems = checkResultValue(schema, given);
       if (problems.length > 0)
         throw new WorkflowRunError(
@@ -696,7 +708,12 @@ export function createWorkflowRunService(
             ? "A lane without a project takes GitHub issues only."
             : `The tickets of the project of this lane are ${sourceProvider === "jira" ? "Jira issues" : "GitHub issues"}: name one as ${sourceProvider}:owner/repo#key.`,
         );
-      const repoName = ref === undefined ? given.repo : ref.ref.repo;
+      const repoName =
+        ref !== undefined
+          ? ref.ref.repo
+          : noInput && project !== undefined
+            ? await deps.repositoryName(project.ticketSource.repositoryId)
+            : given.repo;
       if (typeof repoName !== "string" || !REPO_NAME.test(repoName))
         throw new WorkflowRunError(
           "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
