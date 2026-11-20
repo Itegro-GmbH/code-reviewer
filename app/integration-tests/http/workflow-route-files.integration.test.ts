@@ -4,7 +4,7 @@
 // database opened at start and the workspace access. Only the session lookup and `connection()` are replaced (they need Next.js's
 // request scope). The handlers' own behaviour is in src/workflows/http.test.ts and the service's in service.integration.test.ts;
 // this file proves the pieces are connected: validate answers without storing, a save runs the validator and makes a version,
-// every member may use the routes, the workspace is the one in the address, and a deployment without the capability has no such path.
+// Owners and Admins save lanes and every member reads and validates them (`manage_workflows`, #1105), the workspace is the one in the address, and a deployment without the capability has no such path.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionLookup } from "../../src/auth/session-user.ts";
 import { closeDatabase, getDatabase } from "../../src/db/startup.ts";
@@ -114,7 +114,7 @@ async function startRoutes(
   session.currentLookup.mockResolvedValue(
     await signedInMember(db, {
       workspaceId,
-      role: options.role ?? "member",
+      role: options.role ?? "admin",
       githubLogin: "octocat",
     }),
   );
@@ -265,7 +265,7 @@ describe("the workflow route files", () => {
   });
 
   // #833-M1-T221
-  it("let a Member save a workflow and a new version of it, and read both back", async () => {
+  it("let an Admin save a workflow and a new version of it, and read both back", async () => {
     const {
       create,
       update,
@@ -275,7 +275,7 @@ describe("the workflow route files", () => {
       versions,
       addEnvironment,
       workspaceId,
-    } = await startRoutes({ role: "member" });
+    } = await startRoutes({ role: "admin" });
     await addEnvironment("node");
 
     const created = await create(tiny());
@@ -307,6 +307,26 @@ describe("the workflow route files", () => {
       workflow: { documentVersion: 1, version: 2 },
     });
     expect((await get(workflow.id, "?version=9")).status).toBe(404);
+  });
+
+  // #1105-T21
+  it("refuse a Member who saves or archives a lane with 403 forbidden and store nothing, while they still list and validate", async () => {
+    const { create, update, archive, list, validate, rows, addEnvironment } =
+      await startRoutes({ role: "member" });
+    await addEnvironment("node");
+
+    for (const call of [
+      () => create(tiny()),
+      () => update("x", tiny()),
+      () => archive("x"),
+    ]) {
+      const refused = await call();
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toEqual({ error: "forbidden" });
+    }
+    expect(await rows()).toEqual([]);
+    expect((await list()).status).toBe(200);
+    expect((await validate(tiny())).status).toBe(200);
   });
 
   // #833-M1-T222
@@ -548,7 +568,7 @@ function change(
 
 describe("archiving through the route file", () => {
   // #833-M1-T359
-  it("lets a Member archive a workflow: gone from the list, readable with its versions, no new version, name free again", async () => {
+  it("lets an Admin archive a workflow: gone from the list, readable with its versions, no new version, name free again", async () => {
     const {
       create,
       update,
@@ -558,7 +578,7 @@ describe("archiving through the route file", () => {
       rows,
       versions,
       addEnvironment,
-    } = await startRoutes({ role: "member" });
+    } = await startRoutes({ role: "admin" });
     await addEnvironment("node");
     const created = await create(tiny());
     const { workflow } = (await created.json()) as { workflow: { id: string } };
