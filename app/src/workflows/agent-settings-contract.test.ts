@@ -143,6 +143,10 @@ const CASES: [name: string, step: Json][] = [
     },
   ],
   [
+    "a host of white space among others (the engine skips it)",
+    { ...INLINE, network: { mode: "list", hosts: ["  ", "a.example.com"] } },
+  ],
+  [
     "a host that is an address (only the validator knows)",
     { ...INLINE, network: { mode: "list", hosts: ["10.0.0.1"] } },
   ],
@@ -159,6 +163,17 @@ describe("the schema and the validator agree on a step with settings of its own"
     expect(schemaValid).toBe(formIssues.length === 0);
     // And a document the schema accepts has only issues that need more than the schema.
     if (!schemaValid) expect(issues.length).toBeGreaterThan(0);
+  });
+
+  // The one documented gap: the schema's pattern is an ECMAScript regular expression and cannot see a lone surrogate half, which the
+  // validator refuses (`invalid_value`). The gap is pinned here so it is closed on purpose, not by accident.
+  it("pins the gap: a lone surrogate passes the schema and is refused by the validator", () => {
+    const document = lane({ ...INLINE, instructions: "a\ud800b" });
+
+    expect(contract.check("Workflow", document).valid).toBe(true);
+    expect(
+      validateWorkflow(document, resolver).errors.map((e) => [e.path, e.code]),
+    ).toEqual([["/steps/0/instructions", "invalid_value"]]);
   });
 
   it("has cases on both sides", () => {

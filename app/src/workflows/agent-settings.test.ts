@@ -333,6 +333,27 @@ describe("an agent step with settings of its own (#1105)", () => {
         ["/steps/0/network/hosts/1", "wrong_type"],
         ["/steps/0/network/hosts/2", "invalid_value"],
       ]);
+      // The engine's reading (`checkNetwork`): blank entries are nothing, so a list of blanks names no host; duplicates count once.
+      expect(
+        codes(lane(step({ network: { mode: "list", hosts: ["  ", "\t"] } }))),
+      ).toEqual([["/steps/0/network/hosts", "invalid_value"]]);
+      expect(
+        codes(
+          lane(
+            step({
+              network: {
+                mode: "list",
+                hosts: [
+                  "  ",
+                  "a.example.com",
+                  " A.Example.com ",
+                  "a.example.com",
+                ],
+              },
+            }),
+          ),
+        ),
+      ).toEqual([]);
       expect(
         codes(
           lane(step({ network: { mode: "open", hosts: ["a.example.com"] } })),
@@ -453,6 +474,29 @@ describe("inlineModelsIn", () => {
     ]);
     expect(inlineModelsIn(document, 1)).toEqual([OWN]);
     expect(inlineModelsIn(null, 5)).toEqual([]);
+  });
+
+  // #1105-T26
+  it("reads only the places steps live: an agent-shaped object in a description, an input or an unknown key is no step", () => {
+    const document = {
+      ...lane(step({ id: "a" })),
+      description: { kind: "agent", model: MANAGED },
+      extra: { kind: "agent", model: { entryId: "fake" } },
+      onFailure: [step({ id: "f", model: { entryId: "cleanup" } })],
+      triggers: [
+        {
+          kind: "github.issueLabeled",
+          label: "x",
+          steps: [step({ id: "pre", model: { entryId: "pre" } })],
+        },
+      ],
+    };
+
+    expect(inlineModelsIn(document, 50)).toEqual([
+      { entryId: "pre" },
+      OWN,
+      { entryId: "cleanup" },
+    ]);
   });
 });
 

@@ -841,15 +841,8 @@ function checkNetworkRule(value: unknown, at: string, c: Checker): void {
         `Host names belong to the mode "list"; the mode ${shown(mode)} takes none. Take 'hosts' out, or use "list".`,
       ),
     );
-  if (mode === "list" && hosts.length === 0)
-    c.report(
-      issue(
-        hostsAt,
-        "invalid_value",
-        'A network rule of mode "list" names at least one host.',
-      ),
-    );
-  if (hosts.length > NETWORK_HOSTS_MAX)
+  // The schema's bound is on the entries as written (`maxItems` 100). Past that the entries are not walked.
+  if (hosts.length > NETWORK_HOSTS_MAX) {
     c.report(
       issue(
         hostsAt,
@@ -857,9 +850,14 @@ function checkNetworkRule(value: unknown, at: string, c: Checker): void {
         `A network rule names ${NETWORK_HOSTS_MAX} hosts at most; this one has ${hosts.length}.`,
       ),
     );
-  for (const [index, host] of hosts.slice(0, NETWORK_HOSTS_MAX + 1).entries()) {
+    return;
+  }
+  // The engine's own reading (`checkNetwork`): an entry of white space between others is nothing, and the entries are normalised and
+  // made unique, so a list of them names a host exactly when the engine finds one. (An empty text is still refused: the schema does.)
+  const effective = new Set<string>();
+  for (const [index, host] of hosts.entries()) {
     const entryAt = pointer(hostsAt, index);
-    if (typeof host !== "string")
+    if (typeof host !== "string") {
       c.report(
         issue(
           entryAt,
@@ -867,9 +865,14 @@ function checkNetworkRule(value: unknown, at: string, c: Checker): void {
           `A host is a text, not ${jsonTypeName(host)}.`,
         ),
       );
-    else if (host === "")
+      continue;
+    }
+    if (host === "") {
       c.report(issue(entryAt, "invalid_value", "A host is not empty."));
-    else if (host.length > NETWORK_HOST_MAX_LENGTH)
+      continue;
+    }
+    if (host.trim() === "") continue;
+    if (host.length > NETWORK_HOST_MAX_LENGTH) {
       c.report(
         issue(
           entryAt,
@@ -877,7 +880,10 @@ function checkNetworkRule(value: unknown, at: string, c: Checker): void {
           `A host may have ${NETWORK_HOST_MAX_LENGTH} characters at most.`,
         ),
       );
-    else if (normalizeHostEntry(host) === null)
+      continue;
+    }
+    const form = normalizeHostEntry(host);
+    if (form === null) {
       c.report(
         issue(
           entryAt,
@@ -885,7 +891,24 @@ function checkNetworkRule(value: unknown, at: string, c: Checker): void {
           `${shown(host)} is not a host name the rule can hold. Write an exact name ("registry.npmjs.org") or a suffix ("*.pythonhosted.org"), with no scheme, port, path or address.`,
         ),
       );
+      continue;
+    }
+    effective.add(form);
   }
+  if (mode !== "list") return;
+  if (
+    effective.size === 0 &&
+    hosts.every(
+      (host) => typeof host === "string" && host !== "" && host.trim() === "",
+    )
+  )
+    c.report(
+      issue(
+        hostsAt,
+        "invalid_value",
+        'A network rule of mode "list" names at least one host.',
+      ),
+    );
 }
 
 /** A step with settings of its own has no profile to say where it works: it names its environment (until the runner field of ADR 0007). */

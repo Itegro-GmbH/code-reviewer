@@ -40,7 +40,11 @@ import {
   OPENCODE_HARNESS,
   isProfileHarness,
 } from "../runner-identity/harness.ts";
-import { isInlineStep, readModel } from "../workflows/agent-settings.ts";
+import {
+  inlineProfileName,
+  isInlineStep,
+  readModel,
+} from "../workflows/agent-settings.ts";
 import {
   BRANCH_NAME_MAX_LENGTH,
   checkBranchName,
@@ -1259,7 +1263,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       options: {
         profile: {
           id: `workflow:${run.workflowId}`,
-          name: document?.name ?? "",
+          name: inlineProfileName(document?.name),
           version: run.workflowVersion,
           instructions: node.instructions ?? "",
           canPush: node.canPush,

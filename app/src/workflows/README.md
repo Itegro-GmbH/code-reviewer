@@ -8,7 +8,7 @@ Schemas are [`contracts/workflow.v1.json`](../../../contracts/workflow.v1.json) 
 `integration-tests/compatibility/workflow-contract.integration.test.ts`.
 
 The workflows exist only in a deployment with the capability `implementer`: the routes are classified `implementer` in `src/capabilities/routes.ts` and
-ask again in the route file. Every member may use them (`start_implementer_task`; the owner decided that everyone may do everything).
+ask again in the route file. Every member may read, validate, start and watch them (`start_implementer_task`); saving a lane (create, a new version, archive) is for Owners and Admins (`manage_workflows`, ADR 0007 decision 12).
 
 ## The core is pure
 

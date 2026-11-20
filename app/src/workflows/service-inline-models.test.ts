@@ -69,4 +69,47 @@ describe("the model of a step with settings of its own, in the service", () => {
     ).toBe(true);
     expect((await serviceWith().validate(document(MANAGED))).valid).toBe(true);
   });
+
+  // #1105-T52
+  it("does not look up what is no step: an agent-shaped object outside the places steps live costs no lookup", async () => {
+    const check = vi.fn(async () => null);
+    const fake = Array.from({ length: 30 }, (_, i) => ({
+      kind: "agent",
+      model: { entryId: `fake-${i}` },
+    }));
+
+    await serviceWith(check).validate({
+      ...document(OWN),
+      description: fake,
+      extra: fake,
+    });
+
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  // #1105-T53
+  it("looks nothing up for a document with more models than it may have steps, and still refuses it for its steps", async () => {
+    const check = vi.fn(async () => null);
+    const models = Array.from({ length: 60 }, (_, i) => ({
+      entryId: `entry-${i}`,
+    }));
+
+    const checked = await serviceWith(check).validate(document(...models));
+
+    expect(check).not.toHaveBeenCalled();
+    expect(checked.valid).toBe(false);
+    expect(checked.errors.map((e) => e.code)).toContain("too_many_steps");
+  });
+
+  // #1105-T54
+  it("asks every distinct model of a document at its limit, none dropped", async () => {
+    const check = vi.fn(async () => null);
+    const models = Array.from({ length: 50 }, (_, i) => ({
+      entryId: `entry-${i}`,
+    }));
+
+    await serviceWith(check).validate(document(...models));
+
+    expect(check).toHaveBeenCalledTimes(50);
+  });
 });

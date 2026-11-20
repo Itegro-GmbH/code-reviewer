@@ -11,7 +11,7 @@ workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) sta
 either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane page](#the-lane-page) (#1107) shows a workflow, its versions and their change descriptions.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); the routes below, the [lane page](#the-lane-page) and, for the runs, [pages](#the-run-page). Every member of a workspace may
-use them (the permission `start_implementer_task`).
+read, validate, start and watch them (the permission `start_implementer_task`); **saving a lane** (create, a new version, archive) is for Owners and Admins (`manage_workflows`, ADR 0007 decision 12, #1105).
 
 The format is described by two JSON Schemas, [`contracts/workflow.v1.json`](../contracts/workflow.v1.json) and
 [`contracts/result-schema.v1.json`](../contracts/result-schema.v1.json). The validator
@@ -228,7 +228,7 @@ with the environment's labels and announces nothing that fits is the warning `no
 **repeats the same `harness`, `model`, `canPush` and `instructions`** (a session keeps the settings of its last turn, and a `canPush` that differed would be the write token of a step that never asked for it):
 a difference is `session_target_invalid`, the message names the setting. The cost limit is not a setting of the step yet (the budget of the lane caps each turn).
 
-The run of such a step builds the same internal profile copy the engine used for a profile, with the **name and version of the lane** where a profile's would be, and the turn is written with it; the step's run
+The run of such a step builds the same internal profile copy the engine used for a profile, with the **name and version of the lane** where a profile's would be (the name as a slug, because the job's `ImplementerProfile.name` takes `^[a-z0-9][a-z0-9_-]{0,63}$`: "Issue to PR" is sent as `issue-to-pr`, a name with nothing usable as `lane`; it is for the run's log line only), and the turn is written with it; the step's run
 records **no profile** (`profile_name`, `profile_version` stay empty), so the run page shows none. The wire contract of the job (`ImplementerProfile`) is unchanged.
 
 | `id` | yes | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops. |
@@ -725,7 +725,7 @@ the run (the step, its code and a short message, defused), and `release` takes `
 
 ## The API
 
-All routes are under `/api/w/<slug>/workflows`, need a signed in member of the workspace, and answer `Cache-Control: no-store`. A lane belongs to a project (#922): the list and the creation name it with the query value `projectId` (the workspace has no list of all its workflows any more); the routes of one workflow are by its id as before. The API keeps these routes with the `projectId` filter for one release, then the project-scoped routes take over. The body of a
+All routes are under `/api/w/<slug>/workflows`, need a signed in member of the workspace (the writes `POST /workflows`, `PUT /workflows/<id>` and `DELETE /workflows/<id>` need an **Owner or Admin**: a Member gets `403` `{"error": "forbidden"}` and nothing is read or saved; `validate`, `scope` and the reads stay open to every member), and answer `Cache-Control: no-store`. A lane belongs to a project (#922): the list and the creation name it with the query value `projectId` (the workspace has no list of all its workflows any more); the routes of one workflow are by its id as before. The API keeps these routes with the `projectId` filter for one release, then the project-scoped routes take over. The body of a
 write is the document itself (`Content-Type: application/json`, 256 KB at most). A refusal is `{"error": <code>, "message": ...}` with a stable
 code from the table below.
 
@@ -748,8 +748,8 @@ under it. A workflow that reaches its 500 versions is archived and written again
 `WORKFLOW_ARCHIVED`), is never started (the engine reads `archivedAt`), does not count against the 100, and **gives its name back**: a new
 workflow may use it. Its versions stay readable by id. There is no way back yet. The archive is bounded so that archiving and creating again
 cannot grow the rows for ever: with 1000 archived workflows in a workspace one more **cannot be archived** (`409`
-`WORKFLOW_ARCHIVE_LIMIT_REACHED`, with `maximum`); creating, saving and reading go on. Every member may do everything in a workspace (no role is checked), so
-the count, not a role, is the bound; there is no way to remove archived workflows yet (a follow-up).
+`WORKFLOW_ARCHIVE_LIMIT_REACHED`, with `maximum`); creating, saving and reading go on. Archiving needs an Owner or Admin like every write, so
+the count is the bound against a runaway script; there is no way to remove archived workflows yet (a follow-up).
 
 ### Lanes belong to a project
 
@@ -1489,7 +1489,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 *Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
 A member can read a workflow on its [lane page](#the-lane-page) (nobody edits a lane in the browser, ADR 0007), start one by hand and watch a run. The pages exist
 only in a deployment with the capability `implementer`, are reached from the **Lanes** tab of a project (no sidebar place of their own since #925), and are open to every member (the permission
-`start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
+`start_implementer_task`; only saving a lane is for Owners and Admins, `manage_workflows`). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
 not exist.
 
 - **Workflows** (`/w/<slug>/workflows`): the workflows of the workspace that are not archived, with their version and the time of the last save.

@@ -87,3 +87,9 @@ export const INSTRUCTIONS_MAX_LENGTH = 20_000;
 export const MODEL_FIELD_MAX_LENGTH = 200;
 /** The setup script of a hosted environment is literal text, at most 64 KB of UTF-8. */
 export const SETUP_SCRIPT_MAX_BYTES = 64 * 1024;
+
+/**
+ * The shape of a profile name, as the wire contract takes it (`ImplementerProfile.name` of `contracts/runner-api.v1.json`): lower case
+ * letters, digits, `_` and `-`, starting with a letter or digit, 64 characters at most.
+ */
+export const PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;

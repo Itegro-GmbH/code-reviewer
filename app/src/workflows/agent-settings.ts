@@ -14,7 +14,11 @@ import {
   type ProfileHarness,
 } from "../runner-identity/harness.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
-import { INSTRUCTIONS_MAX_LENGTH, MODEL_FIELD_MAX_LENGTH } from "./limits.ts";
+import {
+  INSTRUCTIONS_MAX_LENGTH,
+  MODEL_FIELD_MAX_LENGTH,
+  PROFILE_NAME_PATTERN,
+} from "./limits.ts";
 import { issue, shown, type Issue } from "./issues.ts";
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
 
@@ -179,19 +183,25 @@ export function checkModelFitsHarness(
 
 /**
  * The distinct models the agent steps of a document name themselves (#1105), so the service can ask the workspace's rule about each
- * before the validator runs. The document is untrusted: the walk is iterative (no depth to overflow), takes only `model` of an object
- * whose `kind` is `agent` and that names no profile, and stops at `limit` models (the validator then does not know the rest, and so
- * does not refuse them on a guess).
+ * before the validator runs. The document is untrusted: the walk is iterative (no depth to overflow), starts only at the places steps
+ * live (`steps`, `onFailure` and the pre-steps of `triggers`, so an agent-shaped object in a description or an input default is not a
+ * step), takes only `model` of an object whose `kind` is `agent` and that names no profile, and stops once it holds `limit` models.
+ * The caller passes one more than the most steps a document may have: a document with more models than that has more steps than the
+ * validator accepts and is refused for it, so a result of more than `STEPS_MAX` models needs no lookup at all.
  */
 export function inlineModelsIn(
   document: unknown,
   limit: number,
 ): ModelChoice[] {
   const found = new Map<string, ModelChoice>();
-  const pending: unknown[] = [document];
-  while (pending.length > 0) {
+  // Children go on the stack reversed, so the models come in the order the document names them and the bound keeps the first ones.
+  const pending: unknown[] = isRecord(document)
+    ? [document.triggers, document.steps, document.onFailure]
+        .filter((place) => place !== undefined)
+        .toReversed()
+    : [];
+  while (pending.length > 0 && found.size < limit) {
     const value = pending.pop();
-    // Children go on the stack reversed, so the models come in the order the document names them and the bound keeps the first ones.
     if (Array.isArray(value)) {
       pending.push(...(value as unknown[]).toReversed());
       continue;
@@ -199,13 +209,31 @@ export function inlineModelsIn(
     if (!isRecord(value)) continue;
     if (value.kind === "agent" && value.profile === undefined) {
       const model = readModel(value.model);
-      if (model !== undefined && found.size < limit)
-        found.set(JSON.stringify(model), model);
+      if (model !== undefined) found.set(JSON.stringify(model), model);
     }
     for (const child of Object.values(value).toReversed())
       if (typeof child === "object" && child !== null) pending.push(child);
   }
   return [...found.values()];
+}
+
+/** The name an inline step's profile copy carries when the lane has none that fits (an empty or all-symbol name). */
+export const INLINE_PROFILE_FALLBACK_NAME = "lane";
+
+/**
+ * The profile name of the copy a turn gets for an inline step: the lane's name as a slug. The wire contract (`ImplementerProfile.name`,
+ * `PROFILE_NAME_PATTERN`) takes lower case letters, digits, `_` and `-`, starting with a letter or digit, 64 characters at most, while a
+ * lane name is any text of 1 to 100 characters ("Issue to PR"), so the name is lower-cased, every other run of characters becomes one
+ * `-`, the ends are trimmed and the result cut to 64. A name with nothing left is `lane`. The name is for the run's log line only.
+ */
+export function inlineProfileName(laneName: string | undefined): string {
+  const slug = (laneName ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[-_]+/, "")
+    .slice(0, 64)
+    .replace(/[-_]+$/, "");
+  return PROFILE_NAME_PATTERN.test(slug) ? slug : INLINE_PROFILE_FALLBACK_NAME;
 }
 
 /** The keys of an agent step that are its own settings instead of a profile's (#1105, ADR 0007). */

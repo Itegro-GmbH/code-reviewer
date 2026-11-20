@@ -248,11 +248,16 @@ export function createWorkflowService({
     }));
     const { wanted, build } = profileInfosOf(live, profileRefsIn(body));
     const facts = await profiles.versionFacts(wanted);
-    // #1105: the models the steps name themselves, asked once each; a model not looked at (past the bound) is not refused on a guess.
+    // #1105: the models the steps name themselves, each asked once in this one pass (the checker behind `models` is built once per
+    // service). More than `STEPS_MAX` distinct models means more steps than a document may have: the validator refuses it for that, so
+    // nothing is looked up and nothing is accepted that should not be.
     const verdicts = new Map<string, string | null>();
-    if (models !== undefined)
-      for (const model of inlineModelsIn(body, STEPS_MAX))
-        verdicts.set(JSON.stringify(model), await models.check(model));
+    if (models !== undefined) {
+      const named = inlineModelsIn(body, STEPS_MAX + 1);
+      if (named.length <= STEPS_MAX)
+        for (const model of named)
+          verdicts.set(JSON.stringify(model), await models.check(model));
+    }
     return createResolver({
       ...(models === undefined
         ? {}

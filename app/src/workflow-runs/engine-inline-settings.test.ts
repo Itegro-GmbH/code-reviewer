@@ -3,7 +3,10 @@
 // #1105 (ADR 0007, release A step 1): an agent step that carries its settings itself instead of a `profile`. The engine builds the profile
 // copy of the turn from the step (the lane's name and version stand where a profile's would), the step's run records no profile, the
 // hosted settings go to the Implementer, and a step in `profile` form is untouched.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { PROFILE_NAME_PATTERN } from "../profiles/limits.ts";
 import type {
   StoredStepRun,
   StoredWorkflowRun,
@@ -37,9 +40,9 @@ const inlineStep = (fields: Json = {}): Json => ({
   ...fields,
 });
 
-const documentOf = (step: Json) => ({
+const documentOf = (step: Json, name = "Issue to PR") => ({
   version: 1,
-  name: "Issue to PR",
+  name,
   trigger: { kind: "github.issueLabeled", label: "agent" },
   steps: [step],
 });
@@ -48,7 +51,11 @@ const documentOf = (step: Json) => ({
  * A run with one agent step. `claimed`: the step run exists and was claimed, so the engine starts its turn; otherwise the run has no step
  * row yet and the engine decides to add one (`addStep`).
  */
-function harness(options: { step: Json; claimed?: boolean }) {
+function harness(options: {
+  step: Json;
+  claimed?: boolean;
+  laneName?: string;
+}) {
   const run: StoredWorkflowRun = {
     id: RUN_ID,
     workspaceId: "w-1",
@@ -140,7 +147,7 @@ function harness(options: { step: Json; claimed?: boolean }) {
     workflows: {
       getVersion: async () =>
         ({
-          document: JSON.stringify(documentOf(options.step)),
+          document: JSON.stringify(documentOf(options.step, options.laneName)),
           createdBy: "owner-1",
         }) as never,
     },
@@ -194,7 +201,8 @@ describe("an agent step with settings of its own, in the engine (#1105)", () => 
       inline: {
         profile: {
           id: "workflow:wf-1",
-          name: "Issue to PR",
+          // The lane's name as a slug: the wire contract takes lower case, digits, `_` and `-` only.
+          name: "issue-to-pr",
           version: 4,
           instructions: "Standing text.",
           canPush: true,
@@ -203,6 +211,52 @@ describe("an agent step with settings of its own, in the engine (#1105)", () => 
       },
     });
     expect(app.findByName).not.toHaveBeenCalled();
+  });
+
+  // #1105-T40
+  it("sends a profile name the wire contract accepts, whatever the lane is called", async () => {
+    // The pattern the app checks is the one the contract (and the Worker) enforce.
+    const contract = JSON.parse(
+      readFileSync(
+        join(import.meta.dirname, "../../../contracts/runner-api.v1.json"),
+        "utf8",
+      ),
+    ) as {
+      $defs: {
+        ImplementerProfile: { properties: { name: { pattern: string } } };
+      };
+    };
+    const wire = new RegExp(
+      contract.$defs.ImplementerProfile.properties.name.pattern,
+    );
+    expect(wire.source).toBe(PROFILE_NAME_PATTERN.source);
+
+    const names = [
+      "Issue to PR",
+      "  Ünïcode & Symbols!  ",
+      "!!! ???",
+      "",
+      "x".repeat(100),
+      "A".repeat(63) + " b-c",
+      "_-Lead",
+    ];
+    const sent: unknown[] = [];
+    for (const laneName of names) {
+      const app = harness({ step: inlineStep(), laneName });
+      await app.engine.advance(RUN_ID);
+      const [, , options] = app.startTask.mock.calls[0] ?? [];
+      sent.push(options?.inline?.profile.name);
+    }
+
+    expect(sent).toHaveLength(names.length);
+    for (const name of sent) expect(name).toMatch(wire);
+    expect(sent.slice(0, 5)).toEqual([
+      "issue-to-pr",
+      "n-code-symbols",
+      "lane",
+      "lane",
+      "x".repeat(64),
+    ]);
   });
 
   // #1105-T31

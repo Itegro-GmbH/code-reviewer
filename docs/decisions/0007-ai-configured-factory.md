@@ -360,7 +360,7 @@ Runs are never rewritten. **Release B ships only when the list of release A is e
    step records no profile; its copy of the harness, the push right and the instructions is the same columns, filled from the step, so
    the claim and the runner read one shape.
 6. **The wire contract is not changed in this epic.** The job's `profile` object (`ImplementerProfile`, `implementer_profile`) stays: the
-   app fills it from the step, with the lane's name and version as `name` and `version`. Renaming it would need a runner release and
+   app fills it from the step, with the lane's name (as a slug, because `name` takes `^[a-z0-9][a-z0-9_-]{0,63}$`; a name with nothing usable is `lane`) and version as `name` and `version`. Renaming it would need a runner release and
    gains nothing for the person; it can follow later.
 
 **The schema version.** `contracts/workflow.v1.json` has `profile` in `required` (`:123`). The author's detail (not a decision of the owner): **the document stays version 1**.

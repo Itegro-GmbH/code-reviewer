@@ -28,14 +28,17 @@ export function workflowServiceFor(
   options: Pick<WorkflowServiceDependencies, "samples"> = {},
 ): WorkflowService {
   const db = getDatabase();
+  let checker: ReturnType<typeof implementerModelsFor> | undefined;
   return createWorkflowService({
     workflows: createWorkflowsRepository(db, workspaceId),
     projects: createProjectsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
-    // Built when a document names a model of its own, not for every request: it reads the workspace's keys, which a validation without one never needs.
+    // Built when a document names a model of its own, not for every request (it reads the workspace's keys, which a validation without one
+    // never needs), and then once: the entitlements it reads are held by the one checker for every model of the save.
     models: {
-      check: (model) => implementerModelsFor(workspaceId).check(model),
+      check: (model) =>
+        (checker ??= implementerModelsFor(workspaceId)).check(model),
     },
     mcpServers: createMcpServersRepository(db, workspaceId),
     mcpOAuth: createMcpOAuthRepository(db, workspaceId),
