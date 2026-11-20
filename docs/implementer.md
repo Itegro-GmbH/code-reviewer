@@ -1592,9 +1592,9 @@ space left on device" and the mirror on the reserve disk was whole; a stop durin
 install` without an `apt-get update` first exited 100 and ended the turn the same way (the "script that tried to undo the rules" of the table
 first ran into it).
 
-> **Superseded (ADR 0007, epic #1103).** Lane steps will name one concrete runner (a hosted environment, which states only its concurrency, or a self-hosted runner) instead of an environment and labels; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
-
 ## Environments
+
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. A lane step will name one concrete runner (a hosted environment, which states only its concurrency, or a self-hosted runner) instead of an environment and labels, and the setup script and network rule move into the agent step; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs" and the proposals awaiting the owner.
 
 An environment is a start configuration for a task: a **name**, a **size**, a **setup script** and (step 7) a **network** setting. They are kept per workspace on
 the page `/w/<slug>/environments` (navigation entry "Environments", between Implementer and Runs; only in a deployment with the
@@ -1667,9 +1667,9 @@ and from nothing else, and the **script** from the job the Worker fetches:
 What does not depend on the size: the work volume is a directory of the VM's disk (64 GB on the Pro plan, whatever the vCPUs), the reserve disk
 (8 GiB), `pids` of the Control container, the steps of the volume, and a VM lives `timeoutSeconds` plus the margin whatever its size.
 
-> **Superseded (ADR 0007, epic #1103).** Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step of the lane. This section describes the behaviour until #1105 and the release after it; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Profiles are removed, everywhere" and "Migration path".
-
 ## Profiles
+
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step of the lane; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Proposal" and "Migration path".
 
 A task can run with a **profile** (#843, [`docs/profiles.md`](profiles.md)): a workspace's own, versioned data with the model, standing
 instructions, cost limit and **push right** a turn runs with. The task is sent with `profile` in the body of the route behind the form (the form

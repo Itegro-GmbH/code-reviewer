@@ -1,15 +1,17 @@
 # 0007: An AI-configured factory
 
-- **Status:** Accepted
+- **Status:** Proposed. The **owner decisions** below are binding (epic #1103). The **proposal** is the author's and is not decided: the
+  five points under "Proposal / awaiting owner" were put to the owner on 2026-11-20 and the answers are pending. This record becomes
+  Accepted when the owner has answered and the answers are written in.
 - **Date:** 2026-11-20
-- **Deciders:** the owner (target picture and decisions of 2026-11-20, epic #1103)
+- **Deciders:** the owner for "Owner decisions" (target picture and decisions of 2026-11-20, epic #1103); the rest is open.
 - **Implements:** epic #1103. This record and the documentation are #1104; the agent step settings inline and the removal of
   profiles are #1105, the manual trigger without input #1106, the lane versions with a change description and the read-only lane pages
   #1107, Setup and the control panel #1108.
-- **Supersedes:** the **profile** parts of `docs/profiles.md` and of the agent step in `docs/workflows.md`, the **environment** of a
-  lane step (`docs/implementer.md`, "Environments"), and, for the jobs of lane steps, the **routing by labels** of
-  [ADR 0005](0005-runner-v2-one-dispatcher-contract.md) (a job requires the concrete runner its step names instead of labels). The
-  rest of ADR 0005 (one claim contract for every Dispatcher, the reserved namespace `cr:`) stays.
+- **Supersedes** (the owner decisions): the **profile** parts of `docs/profiles.md` and of the agent step in `docs/workflows.md`, the
+  **environment** of a lane step (`docs/implementer.md`, "Environments"), and the **labels** as the way a lane step reaches a runner.
+- **Amends** (only if proposal 1 is accepted): [ADR 0005](0005-runner-v2-one-dispatcher-contract.md) §1, "Labels": today only the platform
+  identity may carry a label in `cr:`. See "Proposal / awaiting owner", point 1, for what changes. The rest of ADR 0005 stays.
 
 ## Context
 
@@ -39,183 +41,303 @@ The forces:
 - **A person must still understand what changed.** Without an editor nobody reads a diff of two JSON documents; somebody has to say, in
   words, what a version changed and why.
 - **Existing lanes and runs must survive.** Lanes name profiles and environments today; runs have copied what they ran with.
-- **Profiles are only part of a lane's meaning.** A step that names `reviewer` says nothing about the model or the push right, and the
-  version it resolves to can change underneath it (`docs/workflows.md`, "Known limits": "Profiles are resolved per step").
+- **A profile is only part of a step's meaning, and it can change underneath it.** A step that names `reviewer` says nothing about the
+  model or the push right: those live in the profile, and the version the step resolves to can change after the lane was saved
+  (`docs/workflows.md`, "Known limits": "Profiles are resolved per step").
 
-## Decision
+## Owner decisions (2026-11-20, epic #1103)
 
-### Two areas for the person
+These, and only these, are decided. Everything else in this record is a proposal.
 
-- **Setup** only links **integrations**: GitHub, Jira, MCP servers, **runners** (hosted and self-hosted, below) and LLM API keys. Each is
-  something that exists outside the factory and that a person has to authorise, install or pay for. Setup has no page that says how a lane
-  behaves.
-- **The control panel** is for **running** the factory: watch runs, start a lane (with its inputs, if it has any), answer an agent's
-  question (`docs/workflows.md`, "A question: `done` or `ask`"), cancel and discard runs, pause.
-- A lane is **configured only as JSON through the API**, by an AI: validate, fix, save (`POST /workflows/validate`, `POST /workflows`,
-  `PUT /workflows/<id>`). **Later** (not in epic #1103) an MCP server of the factory wraps the same routes; until then the lead agent
-  calls them.
-- **The server is the only guard.** The validator and the integrations bound what an AI can configure: a runner, a key, a model, a
-  repository or an MCP server that the workspace has not linked is a validation error, with the names that exist in `available`.
+1. **Profiles are removed completely, everywhere.** Harness, model, may-push, cost limit and extra instructions move into the agent step
+   of the lane document.
+2. **No lane editor and no diff view.** A lane shows its name, its description and its versions. Every version from 2 on carries a
+   description of what changed against the previous one, written by whoever saves it (the AI).
+3. **Lanes always belong to a project.**
+4. **A manual trigger may have no input;** its run works on the project's repository.
+5. **A hosted environment says only how many runners it can run at the same time** (its concurrency); nothing else is configured there.
+6. **Each agent step names one concrete runner** (a hosted environment or a self-hosted runner such as the DevBox). A lane does not ask for
+   a runner by label, and there is no label matching for lane steps.
+7. **Setup** only links integrations: GitHub, Jira, MCP servers, runners, LLM API keys. The **control panel** is for watching runs and
+   starting lanes (start with inputs, answer an agent's questions, cancel).
+8. **A lane is configured only as JSON through the API;** later an MCP server of the factory wraps the API. Until then the lead agent
+   writes the lanes.
+9. **The server stays the only guard:** the validator and the integrations (which runners, keys, repositories exist) bound what an AI can
+   configure.
 
-### Profiles are removed, everywhere
+Sub-issues, in order: #1104 (this record and the docs), #1105, #1106, #1107, #1108. The MCP server is not part of the epic.
 
-A profile is not replaced by something else that is shared. **What a profile held moves into the agent step of the lane document**:
-harness, model, whether the step may push, a cost limit for the turn, and the standing instructions. The step is then the whole truth about
-who works: a reader (a person looking at one version, or an AI) sees it without a second lookup, and nothing changes underneath a saved
-version.
+## Proposal
+
+Everything from here to "Out of scope" is the author's proposal for how to carry out the decisions above. It is not decided. Where the
+decisions leave a question open, the question is a numbered point under "Awaiting owner".
+
+### Proposal / awaiting owner
+
+Five points, put to the owner on 2026-11-20. Until they are answered, #1105 must not build on them.
+
+**1. Routing to a concrete self-hosted runner with a reserved platform label `cr:runner:<id>`.** The decisions say a step names one
+concrete runner; they do not say how a job reaches it. The proposal keeps ADR 0005's one rule (a job requires labels, a dispatcher takes it
+when it has all of them) and gives each self-hosted runner a label that only its own credential carries. This **amends ADR 0005 §1** and
+**changes the code**; it is not "nothing changes". What changes:
+
+- `callerLabels` in `app/src/db/repositories/jobs-claim.ts` (`:129-132`, `:136-150`): today a customer runner's labels are filtered with
+  `!isReservedLabel(label)`, so it can never carry a `cr:` label. The claim of a runner credential would add `cr:runner:<the runner's id>`,
+  derived from the credential row, **never from an announcement**. Registration keeps refusing a runner that announces a `cr:` label
+  (`RUNNER_LABEL_RESERVED`); the exception for a `cr:` label derived from the credential is new and goes into ADR 0005's text.
+- The **doorbell matcher** (ADR 0005: "workspace, every label, a ready harness") must know the label too, or the runner is not rung.
+- `requiredLabelsOfTurn` (`app/src/runner-identity/labels.ts:90`) is built from a runner environment's labels or a hosted environment's
+  size; neither exists for a step any more. It takes the runner the step names.
+- The **exclusion of runner turns from the platform branch**: the claim of the platform identity excludes runner turns by
+  `implementer_turns.environment_kind = 'runner'`. A turn with no environment needs another exclusion; the label rule already does it
+  (a job requiring `cr:runner:<id>` is not contained in the platform's labels), but the legacy fallback of the query for jobs written before
+  `required_labels` must keep working for turns that still have the old form.
+- The Dispatcher itself (`dispatcher/src`) forwards labels and is **not expected to change**; #1105 confirms that.
+
+The alternative, a column on the job for the named runner, changes the claim query, the doorbell and `requiredLabelsOfTurn` as well. It is
+no cheaper; the label keeps the one rule of ADR 0005 and needs no new Dispatcher field. If the owner prefers the column, this point
+changes, not the owner decisions.
+
+**2. The hosted environment's setup script and network rule move into the agent step of the lane JSON.** Today a hosted environment
+holds a size, a setup script and a network rule (`docs/implementer.md`, "Environments"); the decision leaves the hosted runner with
+concurrency only. The proposal: the step carries `setup` (the script text) and `network` (the rule) as optional settings, valid only
+when the step's runner is hosted (the validator refuses them for a self-hosted runner: that machine's setup is its owner's). A hosted
+turn runs on the platform's standard size. The field names and limits are #1105's. The migration copies a hosted environment's script and
+rule into the converted steps (see Migration), so nothing a lane relied on is dropped silently. A non-standard **size** has no home and
+is a reason not to convert (see Migration, A3).
+
+**3. Saving lanes through the API: workspace Admins and Owners.** Every member may save a lane today. With the settings inline, whoever
+saves decides a step's model (and so its cost), push right and instructions, which a profile page used to gate by being a separate
+object. The proposal: `POST /workflows`, `PUT /workflows/<id>` and archive are for roles `owner` and `admin`; `validate` stays open to
+members; starting a lane stays open to members as today.
+
+**4. A job waiting only because its runner is at its concurrency.** Today a turn of a runner environment is cancelled with
+`no_runner_available` after `RUNNER_WAIT_DEADLINE_MINUTES` (30 minutes by default, `app/src/db/job-limits.ts:54`). That is right for a
+runner nobody has and wrong for one that is online and busy. The proposal: a job that waits **only** because its runner is at its
+concurrency keeps waiting until the lane's own limits end the run (its budget, its time limits, a cancel); the 30-minute
+`no_runner_available` deadline applies only when the runner is **not reachable at all** (offline beyond the usual window, or revoked).
+Whether a run-level time limit exists to end a long wait is for #1105 to confirm; if not, the cancel by a person is the limit.
+
+**5. Runners may be renamed; a lane stores the runner id and displays the name.** The step holds the runner's **id** (`runner`), the
+validator resolves it and its `available` lists id and name, and the pages show the current name, so a rename never breaks a lane. If the
+owner answers no, the step holds the **name** instead, and the name is resolved to the id when a turn is enqueued, among **non-revoked**
+runners only; a name then cannot change once a lane uses it. In both cases a runner that was revoked and registered again (the normal
+flow for a DevBox) is a **new id**: a step that names the old id or name is `runner_unknown` at the next save and `runner_not_found` for
+a run, until a new version names the new runner.
+
+### Proposal / details the author added (not put to the owner yet)
+
+These follow from the decisions or from the code; they are not decisions of the owner and are for review with #1105.
+
+**Settings of the agent step.** What a profile held moves into the step:
 
 | What | Where it is after | Notes |
 | --- | --- | --- |
 | `harness` | the step | `opencode` when left out, `claude-code` as today (a runner only) |
 | `model` | the step | the two shapes of today: `{"entryId"}` (a catalog entry) or `{"provider","model"}` (the workspace's own key) |
-| `canPush` | the step | required on purpose, as in the profile: decide it. It decides whether the step yields `branch`, `commits`, `headCommit` and `pushed`, and whether the token can write |
-| cost limit | the step (`costLimitCents`, optional) | lowers the cap of one turn below what is left of the lane's budget; the profile's value was deprecated and not read (#918), so it is **not** carried over (see Migration) |
-| `instructions` | the step | the standing system-level text, appended last and unchanged, so the prompt cache hits across turns of one step as it did for a profile version |
+| `canPush` | the step | required, as in the profile: decide it. It decides whether the step yields `branch`, `commits`, `headCommit` and `pushed`, and whether the token can write |
+| cost limit | the step (`costLimitCents`, optional) | lowers the cap of one turn below what is left of the lane's budget. The profile's value is deprecated and not read (#918), so it is **not** carried over by the migration |
+| `instructions` | the step | the standing system-level text, appended last and unchanged, so the prompt cache hits across turns of one step as it does for a profile version |
 | `defaultResult` | the step's `result` | a step that relied on its profile's default gets that schema written out |
 | `description` (note of the profile) | the step's `description` | when the step has none |
 | `environment` | the step's **runner** | see "Where an agent runs" |
 
-The exact names of the fields, which are required, and the limits are the schema of #1105 (`contracts/workflow.v1.json`). One thing to
-settle there: the step already has `instruction` (the task) and the profile had `instructions` (the standing text); the new field must
-not read as a typo of the other.
+The exact names, which fields are required, and the limits are the schema of #1105. The step already has `instruction` (the task) and the
+profile had `instructions` (the standing text); the new field must not read as a typo of the other.
 
-**Everywhere** means: the profile routes, the profiles page and its navigation entry, the `profile` field of the Implementer's start and
-follow-up bodies and the profile select of the Implementer form, the profile references of the validator, the engine and the built-in
-lanes, and the tables. Sessions that used to go on only with the same profile name (`session.continue`) go on with the same **harness
-and runner**: the session holds that setup's files and conversation. The model, the instructions and the result schema of a continuing
-turn are those of the session's last turn, as they are today.
+**Where the profile goes away.** The profile routes, the profiles page and its navigation entry, the `profile` field of the Implementer's
+start and follow-up bodies and the profile select of the Implementer form, the profile references of the validator, the engine and the
+built-in lanes, and the tables.
 
-### Where an agent runs: one concrete runner per step
+**A task started by hand (the Implementer start and follow-up).** The epic specifies lane steps only. Today a body names either a profile
+or (without one) a `model`, an optional `costLimitCents` and an `environmentId`. The proposal is **one shape for both**: the body takes the
+inline settings of a step (`harness`, `model`, `canPush`, `costLimitCents`, `instructions`) and a `runner` in place of `profile` and
+`environmentId`, and the Implementer form shows those fields instead of the two selects. **Open question for the owner:** does a task
+started by hand stay at all (beyond a lane's manual trigger, which the control panel starts)? Until answered, the `implementer_environments`
+table, the `profile` field of the bodies and their follow-up path stay (see Release B); #1105 cannot drop them while this is open.
 
-A **runner** is whatever runs an agent turn. There are two kinds, and both are **integrations** that Setup links:
+**`session.continue`.** A step that continues another's session today gets the profile name and the environment as the identity of the
+session (`check-steps.ts`, "A session belongs to one profile in one environment"), and the continuing **turn keeps** the model, the
+environment, the profile and the result schema of the session's last turn (`engine.ts` `continueSessionOf`; `docs/workflows.md`,
+"`session.continue`"). With inline settings a continuing step would carry a `model`, `instructions` or `canPush` that the turn then
+ignores; a `canPush` that differs is security relevant (the write token). So the validator holds the continuing step to the session:
+**it must repeat the same harness, model, `canPush`, `instructions` and runner as the step whose session it continues** (the cost limit
+may differ; the turn takes the lower of it and what is left of the budget, as today). A difference is `session_target_invalid`, the code
+the same check uses today, with the message naming the setting. A step that does not repeat them is refused, not inherited, so a
+document says what it does.
 
-- **A hosted environment** is an integration that states **only how many turns it can run at the same time** (its *concurrency*). It has
-  no size, no setup script and no network rule to configure: the platform runs it on its standard size (the operator's configuration of
-  the Dispatcher for the kind), and nothing else is a setting of the workspace. A workspace has at least one (the platform's hosted
-  runner); it is named like any other runner.
-- **A self-hosted runner** is a machine the customer registered (`docs/runner.md`). It announces its name, its
-  harness entries and its limits, among them `parallelRuns`, which is its concurrency.
+**The change description.** `changeDescription` is required on `PUT /workflows/<id>`: 1 to 1,000 characters, not only white space, stored
+with the version (a new nullable column `change_description` of `workflow_versions`, immutable like the version) and shown in the list of
+versions with its author and time. A save without it is refused (`WORKFLOW_CHANGE_DESCRIPTION_REQUIRED`). Version 1 needs none; the
+lane's description serves. It is **text for people**: never read by the validator or the engine, and `docs/workflows.md` says so to an AI.
 
-**A lane does not ask for a runner by label.** Each agent step names **exactly one concrete runner**: a hosted environment or a
-self-hosted runner, by name. There is no set of labels to match, no environment of the workspace between the step and the machine, and no
-"first environment by name". The name is unique in the workspace, whichever kind it is, compared without regard to case (a registration
-that takes a name already used is refused; see Migration for the runners that exist). The validator checks that the runner exists, is not
-revoked, and can run what the step asks for (the harness, the model and the key: the rules of `runner_needs_own_key`,
-`harness_needs_runner` and `no_runner_announces` stay, now at the step's runner), so an AI that writes a name nobody linked gets
-`runner_unknown` with the names that exist.
+**No lane editor.** The lane builder (`app/src/workflow-pages/builder/`) is removed. A lane's page shows its name, description and
+versions. The page of a run keeps its flow view, which is a picture of what ran and not an editor.
 
-How the job reaches the runner stays the one rule of ADR 0005, **a job requires labels and a dispatcher takes it only when it has all of
-them**, so the claim query, the doorbell and the Dispatcher contract do not change:
+**Lanes always belong to a project.** The service never creates one without a project. The schema: `workflows.project_id` stays
+**nullable**, because an archived lane that no project could take has a null project **by design** (`app/src/db/schema.ts`, comment on
+`WorkflowsTable.project_id`; the migration `20261107190000_project_ticket_source`). Release B adds a check constraint
+`archived_at is not null or project_id is not null`: a lane that is not archived has a project. `SET NOT NULL` is not used. The paths for
+"a lane without a project" in the routes, the run start and the documentation go.
 
-- A job of a step on a self-hosted runner requires one **reserved label that names that runner** (`cr:runner:<id>`). The label is in the
-  namespace `cr:`, so only the claim of that runner's own credential carries it and nothing a runner announces or a lane writes can
-  forge it; the labels a runner announces (`linux`, `gpu`) are no longer used for routing of lane steps.
-- A job of a step on a hosted environment requires `cr:managed` and the platform's size label, as a hosted turn does today.
-- **Concurrency** is held by the app: it counts the running jobs of a runner and answers `204` at or above the number, so the next job
-  waits in the queue. For a self-hosted runner the number is the one it announced (`parallelRuns`, held within the operator's maximum); for a
-  hosted environment it is the number Setup stores. The app counts per runner, in the claim, as it already does for `maxRunning`
-  (`contracts/runner-api.ts`, "the pool cap").
+**A manual trigger without `input`.** A manual trigger may declare no `input`. Its run starts with nothing and **works on the project's
+repository**: the run reads **`project.ticketSource.repositoryId`**, as `withProjectRepository` does today (`workflow-runs/service.ts`),
+not `projects.repository_id` (ADR 0006 notes that the tie is planned to go; nothing new is built on it). For such a run `trigger.input` is
+the empty object, so a step cannot reference `trigger.input.repo` (the validator refuses it as an unknown field); the repository is
+reached through `trigger.repo`, as for any run. A trigger that does declare an input keeps all rules of today. **The `api` trigger** is not
+decided by the owner: `validate.ts` applies `repo_required` to manual **and api** triggers, and this record leaves the `api` trigger as
+it is. Open question: should an `api` trigger without input work the same way?
 
-### The lane document, the versions, and what the person sees
+**Names of runners.** Among **non-revoked** runners of a workspace a name is unique without regard to case: a partial unique index on
+`runners (workspace_id, lower(name)) where revoked_at is null`, so that registering a DevBox again after revoking it keeps its name. A
+revoked runner's name is free. Existing duplicates are made unique by the migration (a suffix with a short id) and listed.
 
-- **There is no lane editor and no diff view.** The lane builder (`app/src/workflow-pages/builder/`) is removed. A lane's page shows its
-  **name**, its **description** (`description` of the document) and its **versions**. The page of a run keeps its flow view, which is a
-  picture of what ran and not an editor.
-- **Every version from 2 on carries a description of what changed against the previous one**, written by whoever saves it (the AI). It is
-  required on `PUT /workflows/<id>`: `changeDescription`, 1 to 1,000 characters, not only white space, stored with the version (a new column
-  of `workflow_versions`, immutable like the version) and shown in the list of versions with its author and time. A save without it is
-  refused (`WORKFLOW_CHANGE_DESCRIPTION_REQUIRED`). Version 1 needs none; its description is the lane's. The description is **text for
-  people**: it is never read by the validator or the engine, and an AI is told so in `docs/workflows.md`.
-- **Lanes always belong to a project.** The service already never creates one without a project; what remains is the schema (`project_id`
-  becomes not null once none is left) and the paths for "a lane without a project" in the routes, the run start and the documentation.
-- **A manual trigger may have no `input`.** A lane with such a trigger starts with nothing and its run **works on the project's
-  repository** (the repository of the project the lane belongs to). Today a manual trigger must declare `ticket` or `repo`
-  (`repo_required`, `app/src/workflows/validate.ts`), and since #937 a start may leave `repo` out for a lane of a project; the run is then given
-  `input.repo`. After this record the declaration itself is optional. A trigger that does declare an input keeps all rules of today.
-  Nothing new may be built on `projects.repository_id` more than this already does (ADR 0006 notes that the tie is planned to go).
+### Where an agent runs
+
+A **runner** is whatever runs an agent turn. Two kinds, both integrations that Setup links:
+
+- **A hosted environment** states **only how many turns it can run at the same time** (owner decision 5). Proposal: the turn runs on the
+  platform's standard size (the operator's configuration of the Dispatcher for the kind), and the setup script and network rule of the
+  step apply (point 2).
+- **A self-hosted runner** is a machine the customer registered (`docs/runner.md`). It announces its name, its harness entries and its
+  limits, among them `parallelRuns`.
+
+**Where the hosted runner lives (proposal).** Nothing holds a hosted runner's name and concurrency today: a hosted environment is a row of
+`implementer_environments` (name, size, script, network), a self-hosted runner a row of `runners`. The proposal keeps **`implementer_environments`
+with `kind = 'hosted'` reduced to `name` and `concurrency`** (the other columns are no longer read and are dropped in a later release), and
+`runners` for the self-hosted ones. No new table. A workspace has at least one hosted runner, created by the migration for each workspace.
+**Uniqueness of the name across both tables** cannot be a database constraint without a third table; each table gets its own partial unique
+index (non-revoked runners; non-archived environments) and the service that creates or renames either takes one lock per workspace and checks
+both. The validator reports `runner_unknown` with every runner's id and name in `available`.
+
+**Concurrency is new claim-side logic (proposal).** It is **not** what the app does today. `maxRunning` is sent by the **caller**: the
+Dispatcher's own configuration (`DISPATCHER_MAX_RUNNING`, `DISPATCHER_APPS[].maxRunning`, `dispatcher/src/config.ts`) and counted per
+`X-Runner-Id`, i.e. per pool (`runningInPool`, `runner-jobs-repository.ts`). `parallelRuns` is only stored in `runners.limits`
+(`runner-identity/announcement.ts:43`); nothing on the server reads it for the claim. All hosted jobs of **all workspaces** go to one
+Dispatcher pool, and two hosted environments of one workspace require the same labels today. So a count **per named runner** does not exist and
+is built: the job records the runner it was enqueued for (with point 1 that is the label `cr:runner:<id>` of its `required_labels`; for a
+hosted runner the same record, which the platform identity takes because the runner is hosted: how the query says so is #1105's), the claim
+counts the running jobs of that runner and answers `204` at or above its concurrency (`parallelRuns`, held within the operator's
+maximum, for a self-hosted runner; the stored `concurrency` for a hosted one), and the job waits (point 4). The Dispatcher's `maxRunning`
+stays as the **pool-wide** safety cap above all workspaces; a hosted runner's concurrency is a workspace's share within it.
+
+**What the validator checks.** The step's runner exists and is not revoked and can run what the step asks for: the rules
+`runner_needs_own_key`, `harness_needs_runner` and `no_runner_announces` stay, at the step's runner (`no_runner_announces` over the
+runner's own announcement instead of the labels of an environment).
 
 ## Alternatives considered
 
 - **Keep profiles as the shared, versioned way to reuse a setup.** Rejected by the owner: a second place to read, a version that changes
   beneath a lane, and a UI to manage it. An AI writes a step in full as easily as a name.
 - **Lane-level defaults for the agent settings (one block, steps override).** Fewer repeated lines, but two places again, and the question
-  of which wins. Not now; a document that repeats a model in five steps is acceptable and visible. It can come later as a convenience of
-  the format.
+  of which wins. Not now; a document that repeats a model in five steps is acceptable and visible.
 - **Keep the lane builder, but read-only, with a diff view.** The page and its state are the cost this decision removes; a description
   written by the author is what a person needs.
-- **Keep matching runners by label and let a step name the labels.** An AI cannot know what labels mean on a machine (`gpu` may be a
-  different machine tomorrow); a step that names a runner fails clearly when it is gone. One concrete name is also what the owner wants
-  to read in a lane.
-- **Route a named runner by a new column instead of a reserved label.** Works, but it would change the claim query and the contract of
-  every Dispatcher for something the reserved namespace already expresses.
-- **Hosted environments with size, script and network rule remain settings.** Rejected by the owner: a hosted environment is capacity,
-  nothing more.
+- **Keep matching runners by label and let a step name the labels.** Rejected by the owner. An AI cannot know what labels mean on a machine
+  (`gpu` may be a different machine tomorrow); a step that names a runner fails clearly when it is gone.
+- **Route a named runner by a new column instead of a reserved label** (proposal 1). Changes the same parts of the claim as the label does
+  and adds a field; see proposal 1.
+- **A schema version 2 of the lane document** instead of making `profile` optional. See "The schema version" below.
 
 ## Consequences
 
 - **Easier:** one place to read a lane, with no second lookup. No profile or builder pages to build, translate and test. A change of a
   lane is one new version with a sentence. An MCP server later is a thin wrapper over routes that already are the interface.
 - **Harder:** a lane is longer (each step carries its settings), and changing a model that many steps use means editing many steps; the
-  author (an AI) must do it and say so in the change description. The person can no longer fix a lane in the browser: they ask the AI.
-  Whoever may save a lane through the API can now also decide a step's model, push right and instructions, which a profile page used to
-  gate by being a separate object (see Open points).
+  author (an AI) does it and says so in the change description. The person can no longer fix a lane in the browser: they ask the AI.
+  If proposal 3 is declined, every member who may save a lane can decide a step's model, push right and instructions.
 - **No version changes by itself any more.** An unpinned `"profile": "implementer"` followed the newest version; an inline step is what
   it says. The migration pins to the version that exists when it runs.
 - **A runner that goes away breaks a lane visibly.** A step on a revoked runner is `runner_unknown` at save and, for a saved version, a
   failed step (`runner_not_found`) instead of a turn that waits for labels nobody has.
-- **Hosted capacity is a number.** A workspace cannot have a big and a small hosted VM, and a hosted turn has no setup script or network
-  rule of the workspace's own: see Open points. Self-hosted runners keep their own size and setup, which are the machine's business.
+- **A fleet of runners sharing a label no longer spreads load by itself.** Today a step that asks for `linux` runs on any of N machines;
+  with a named runner it runs on one. Spreading load becomes the author's choice of runner per step.
+- **Hosted capacity is a number** (owner decision 5). A workspace cannot have a big and a small hosted VM.
 - **Cost and security are unchanged in kind:** the lane's budget, the turn time limit, the operator's maximum, the managed-model rules and
   the token rules (a step that may not push gets a read-only token) all stay, and the server enforces them at save and at run time.
 
 ## Migration path
 
-Two releases, expand first and contract one release later (the project's rule for the database: expand-only migrations, ADR 0001). Runs
-are never rewritten.
+Proposal. Two releases, expand first and contract one release later (the project's rule for the database: expand-only migrations, ADR 0001).
+Runs are never rewritten. **Release B ships only when the list of release A is empty** (below), so no lane breaks silently.
 
 **Release A: expand, and write the new form.**
 
 1. The schema and the validator accept the **inline settings and `runner`** next to the old `profile` and `environment`. A step with
-   both a `profile` and inline settings is refused (`profile_with_inline_settings`). The routes of the profiles stay, read-only in the
-   next step of the owner's choosing; the pages and navigation entries for profiles, environments and the builder go with their sub-issues.
-   `workflow_versions` gets the nullable `change_description` column in the same release (so the migration below can write one).
-2. **A data migration gives every lane that is not archived a new version with the profile values inline**, and only the **current**
-   version. For each agent step: the profile reference (`name`, or `name@n`) is resolved **now** (the newest version for a bare name, as
-   the engine would at the first run); `harness`, `model`, `canPush`, `instructions` are copied; `defaultResult` becomes the step's `result`
-   if the step declared none; the profile's `description` becomes the step's if it had none; `costLimitCents` is **not** copied (a value
-   the engine never read must not start limiting turns). The step names its **runner**: the profile's environment if it had one, else the
-   step's own `environment`, mapped as in the next paragraph. The new version's description is "Profile values and runner written into
-   the steps (ADR 0007)", and its author is the author of the version it replaces. Older versions stay as saved. A lane the migration cannot
-   convert (a profile that is archived or gone, a runner it cannot name) keeps its version and is **listed in the migration's log**, as the
-   migration of #937 did for lanes without a project; the validator keeps accepting the old form until release B for exactly these.
-3. **Environments to runners.** A **hosted** environment becomes the workspace's hosted runner (one per workspace, created by the
-   migration, concurrency set to the pool cap that applies today). A **runner** environment becomes the self-hosted runner whose labels
-   are all of the environment's labels **if exactly one runner of the workspace matches**; with none or several, the step is not
-   converted and the lane is listed. Duplicate runner names in a workspace are made unique by the migration (a suffix with a short id of the
-   runner) and listed. A hosted environment's size, script and network rule are not applied to a converted step; the workspaces that had a
-   script or a rule other than the standard are listed too (see Open points).
-4. **Lanes without a project** are archived and listed if any still exist (the migration of #937 did that once; the check makes the not
-   null column safe).
+   both a `profile` and inline settings is refused (`profile_with_inline_settings`). The profile and environment **routes stay as they are**
+   in release A, so a lane that could not be converted keeps working; the pages and navigation entries for profiles, environments and the
+   builder go with their sub-issues (#1105, #1107, #1108), the routes in release B. `workflow_versions` gets the nullable
+   `change_description` column in the same release, so the migration can write one.
+2. **A data migration gives every lane that is not archived a new version with the profile values inline**, only the **current** version.
+   For each agent step: the profile reference (`name`, or `name@n`) is resolved **now** (the newest version for a bare name, as the engine
+   would at the first run); `harness`, `model`, `canPush`, `instructions` are copied; `defaultResult` becomes the step's `result` if the
+   step declared none; the profile's `description` becomes the step's if it had none; `costLimitCents` is **not** copied (a value the engine
+   never read must not start limiting turns). The step names its **runner**, mapped as in step 3. The new version's description is
+   "Profile values and runner written into the steps (ADR 0007)", and its author is the author of the version it replaces. Older versions
+   stay as saved.
+   **The converted document is validated before it is saved**, by the same validator a save uses (including the rules at the step's
+   runner, such as `runner_needs_own_key`). If it has **any** issue, no version is written: the lane keeps its current version and is
+   **listed** with the issue codes. A lane that cannot be converted at all (a profile that is archived or gone, a runner it cannot name,
+   one of the cases in step 3) is listed the same way. Nothing is guessed.
+3. **Environments to runners.**
+   - A **hosted** environment becomes a step on the workspace's **hosted runner** (one per workspace, created by the migration, with a
+     concurrency the operator sets for the migration; **not** the Dispatcher's `maxRunning`, which is a pool-wide number over all workspaces).
+     Its setup script and network rule are copied **into the converted step** (point 2). An environment with a **size** other than the
+     platform's standard is **not converted**: the lane is listed (size has no place any more, and dropping it would change what runs).
+   - A **runner** environment (labels) becomes the self-hosted runner whose labels include all of the environment's labels **only if exactly
+     one runner of the workspace matches**. With **none or several** the step is not converted and the lane is listed with the candidates.
+     Several matches are the usual case of a fleet sharing a label, and picking one would quietly turn "any of N" into "one": **the owner
+     decides** which runner (or whether to split the lane), and the lead agent rewrites the lane. The migration never picks.
+   - Duplicate runner names among the non-revoked runners of a workspace are made unique (a suffix with a short id) and listed.
+4. **Lanes without a project.** Archived lanes with a null `project_id` are left as they are (by design, see above). A lane that is **not**
+   archived and has none is archived and listed, as the migration of #937 did; this is what lets Release B add the check constraint.
 5. **In-flight and old runs are untouched.** A run holds the version of the lane it started with (`workflow_runs.workflow_version`), so a
    run that started before the migration finishes on the old document: the engine reads **both forms** in release A (`resolveProfile` and
    the environment lookup stay for a step in `profile` form). A step run keeps `profile_name`, `profile_version` and its turn's copy
-   (`implementer_turns.profile_*`, `environment_*`): the run page shows them as before ("profile reviewer version 2"), and nothing is
-   rewritten. A new turn of an inline step records no profile; its copy of the harness, the push right and the instructions is the same
-   columns, filled from the step, so the claim and the runner read one shape.
+   (`implementer_turns.profile_*`, `environment_*`): the run page shows them as before and nothing is rewritten. A new turn of an inline
+   step records no profile; its copy of the harness, the push right and the instructions is the same columns, filled from the step, so
+   the claim and the runner read one shape.
 6. **The wire contract is not changed in this epic.** The job's `profile` object (`ImplementerProfile`, `implementer_profile`) stays: the
    app fills it from the step, with the lane's name and version as `name` and `version`. Renaming it would need a runner release and
    gains nothing for the person; it can follow later.
 
-**Release B, one release later: contract.**
+**The schema version.** `contracts/workflow.v1.json` has `profile` in `required` (`:123`). Proposal: **the document stays version 1**.
+Release A is additive: the new settings are optional properties and `profile` leaves `required`; the validator requires either `profile`
+or the inline settings (together with `profile_with_inline_settings`). In release B the validator, not the schema, refuses `profile` and
+`environment` on a save (`profile_removed`, `environment_removed`). The schema keeps them as deprecated properties, so every version
+ever stored stays a valid v1 document and nothing needs a second reader. A bump to `version: 2` would need the app to read and migrate
+every stored version of both forms for the sake of a rule the validator already holds; #1105 can still choose it.
 
-1. The validator refuses `profile` and `environment` in a step (`profile_removed`, `environment_removed`, with a message that names the
-   field to use), and the engine's `profile_not_found` / `environment_not_found` paths for the old form go. Lane versions older than the
-   migration stay readable as documents but cannot be saved again as they are.
-2. The **profile tables** `profiles` and `profile_versions` are dropped (and `workspace-erasure-repository.ts` stops listing them), as
-   are the profile routes, the pages, the `profile` field of the Implementer bodies, and the capability routes. The columns of past
-   turns and step runs stay: they are history.
-3. The `implementer_environments` table and its routes and page go when its last reader does; the turn copies (`environment_*`) stay.
-4. The labels a runner announces stay in the registration (they are shown on the runners page) and stop being a routing input.
+**Release B, one release later: contract.** Precondition: the list of release A is empty. Every lane on it has been rewritten into the new
+form by a saved version (the lead agent writes it, the owner decides where a choice is needed) or archived, and the release's migration
+**fails loudly** while any lane that is not archived still holds `profile` or `environment` in its current version, instead of breaking it.
+
+1. The validator refuses `profile` and `environment` in a step on a save (`profile_removed`, `environment_removed`, with a message naming
+   the field to use), and the engine's `profile_not_found` / `environment_not_found` paths for the old form go. Stored versions older than
+   the migration stay readable as documents but cannot be saved again as they are.
+2. The **profile tables** `profiles` and `profile_versions` are dropped (and `workspace-erasure-repository.ts` stops listing them), as are
+   the profile routes, the pages, the `profile` field of the Implementer bodies (subject to the open question on tasks started by hand),
+   and the capability routes. The columns of past turns and step runs stay: they are history.
+3. `workflows` gets the check constraint `archived_at is not null or project_id is not null`.
+4. The size, script and network columns of `implementer_environments` of the kind `hosted` are dropped once nothing reads them; the
+   table and its rows (name, concurrency) stay as the hosted runners. The turn copies (`environment_*`) stay.
+5. The labels a runner announces stay in the registration (they are shown on the runners page) and stop being a routing input for lane
+   steps.
+
+## Documentation
+
+The documentation is part of #1104. Where a document describes behaviour that this record supersedes, a **Superseded** note sits directly
+under the heading it concerns and says "This section" or "This page". What stays to be rewritten with the code, by sub-issue:
+
+- **#1105:** `docs/profiles.md` (whole page), the agent step and "Known limits" of `docs/workflows.md`, "Environments" and "Profiles" of
+  `docs/implementer.md`, "Routing" and "Validator rules" of `docs/runner.md`, the built-in lanes.
+- **#1106:** the manual trigger in `docs/workflows.md` (the trigger table, `repo_required`).
+- **#1107:** `docs/workflows.md` "The lane builder", the lane page under "The pages", the intro, and the run page text that names the
+  profile.
+- **#1108:** Setup and control panel pages (`docs/workflows.md`, "The pages"; the navigation).
+
+`docs/dispatcher.md`, `docs/factory-bring-up.md`, `docs/implementer-smoke-test.md` and `docs/jira-cloud-setup.md` name a "container
+profile" or an Atlassian profile, not a lane profile: nothing to change.
 
 ## Touch points (where the code reads profiles and environments today)
 
@@ -234,7 +356,7 @@ reads no profile and no label of a lane: only its copies of the contracts mentio
   `workflows/service.ts:10,41,148,216-230` and `workflows/shared.ts:9,34` (the resolver is built from the profile repository);
   `workflows/issues.ts:51,79-97` (the codes `profile_unknown`, `profile_archived`, `profile_version_unknown`, `environment_mismatch`,
   `environment_required`, `runner_needs_own_key`, `harness_needs_runner`, `no_runner_announces`); `workflows/scope.ts:40-47`;
-  `workflows/facts.ts`; `workflows/validate.ts:180-225` (the manual trigger's `repo_required`, for #1106).
+  `workflows/facts.ts`; `workflows/validate.ts:180-225` and `:421` (the manual **and api** trigger's `repo_required`, for #1106).
 - `app/src/workflows/built-in-lanes.ts:5,108-139,348-382,399-402`: the three built-in lanes name `implementer@1` and `reviewer@1`
   (`:117,:138,:381`) and an environment that the caller passes in.
 
@@ -242,9 +364,10 @@ reads no profile and no label of a lane: only its copies of the contracts mentio
 
 - `app/src/workflow-runs/engine.ts`: dependencies `:121-122` (profiles, environments); `resolveProfile` `:760-772`; its use `:808-819`
   and `:945-990` (`profile_not_found`); the turn of a step `:1203-1307` (the environment by name, case ignored, `:1219-1247`,
-  `environment_not_found`, `environment_mismatch`); a continuing session `:1326`; `:1463-1474`.
-- `app/src/workflow-runs/service.ts:85,357`; `workflow-runs/shared.ts:14,232`; `workflow-runs/turn-facts.ts:128,375` (harness and push
-  right read from the turn's profile copy); `workflow-runs/errors.ts:106-120`.
+  `environment_not_found`, `environment_mismatch`); a continuing session `:1326` (`continueSessionOf`); `:1463-1474`.
+- `app/src/workflow-runs/service.ts:85,357` and `:476-490` (`withProjectRepository`, the project's repository from
+  `ticketSource.repositoryId`); `workflow-runs/shared.ts:14,232`; `workflow-runs/turn-facts.ts:128,375` (harness and push right read from
+  the turn's profile copy); `workflow-runs/errors.ts:106-120`.
 - `app/src/db/repositories/workflow-runs-repository.ts:102,252,704,1411,1449`; `db/schema.ts:1573` (`profile_name`, `profile_version`
   of a step run).
 
@@ -268,19 +391,24 @@ reads no profile and no label of a lane: only its copies of the contracts mentio
 - `app/src/runner-identity/` (`harness.ts`, `access.ts` `demandOfProfile`, `announced.ts`, `online.ts`) and
   `db/repositories/runner-jobs-repository.ts:96-116` (the harness read from the turn's profile copy).
 
-**Labels and environments (where a runner is chosen today)**
+**Labels, routing and concurrency (where a runner is chosen today, and what proposals 1 and 4 change)**
 
-- `app/src/runner-identity/labels.ts`: `hostedLabels`, `PLATFORM_LABELS` `:36-52`, `hasAllLabels` `:78`, **`requiredLabelsOfTurn` `:90`**
-  (a runner environment's own labels, or `cr:managed` and the size). It is called when a turn is enqueued:
-  `db/repositories/jobs-repository.ts:751,:879` (`required_labels`; a review has `hostedLabels` at `:575`).
-- `app/src/db/repositories/jobs-claim.ts:136-150`: the claim query, `required_labels` against the caller's labels, with the **fallback for
-  jobs written before the column** (the legacy environment labels of the turn); `runner-jobs-repository.ts` (the runner turns a runner may
-  take); `runner-api/claim.ts:2250-2286` (`maxRunning`, the per-runner pool cap); `runner-identity/announcement.ts:43` (`parallelRuns`).
+- `app/src/runner-identity/labels.ts`: `hostedLabels`, `PLATFORM_LABELS` `:36-52`, `isReservedLabel`, `hasAllLabels` `:78`,
+  **`requiredLabelsOfTurn` `:90`**. It is called when a turn is enqueued: `db/repositories/jobs-repository.ts:751,:879`
+  (`required_labels`; a review has `hostedLabels` at `:575`).
+- `app/src/db/repositories/jobs-claim.ts:129-153`: `callerLabels` (a customer runner's labels **without** any `cr:` label, `:129-132`),
+  the claim query, `required_labels` against the caller's labels, with the **fallback for jobs written before the column** (the legacy
+  environment labels of the turn) and the platform branch's exclusion by `implementer_turns.environment_kind = 'runner'`;
+  `runner-jobs-repository.ts` (the runner turns a runner may take; `runningInPool` `:1078,:1197`); `runner-api/claim.ts:2250-2286`
+  (`maxRunning`, sent by the caller, counted per `X-Runner-Id`); `runner-identity/announcement.ts:43` (`parallelRuns`, stored in
+  `runners.limits`, read by nothing in the claim); `dispatcher/src/config.ts` (`DISPATCHER_MAX_RUNNING`, `DISPATCHER_APPS[].maxRunning`).
+- `app/src/runner-api/registration.ts` and `contracts` (`RUNNER_LABEL_RESERVED`); the doorbell matcher of ADR 0005 (`job_rings`).
 - `app/src/implementer/environments/` (`input.ts:19-120` labels of the kind `runner`, `service.ts:26-84`, the page and its panel under
   `ui/`), `db/schema.ts:1366-1386` (`implementer_environments`), `:1200-1206` (the turn's copy of kind and labels), `db/schema.ts:1621`
-  (`runners`: **`name` is not unique**, labels, manifest, limits, `last_seen_at`, `revoked_at`).
-- The wait: `runs/run-view.ts:219,1044` ("Waiting for a runner with labels …"), `db/job-limits.ts:54-56` and `:122` (`no_runner_available` after
-  `RUNNER_WAIT_DEADLINE_MINUTES`).
+  (`runners`: **`name` is not unique**, only `runners_workspace_idx` and the credential index exist; labels, manifest, limits,
+  `last_seen_at`, `revoked_at`).
+- The wait: `runs/run-view.ts:219,1044` ("Waiting for a runner with labels …"), `db/job-limits.ts:54-56` and `:122` (`no_runner_available`
+  after `RUNNER_WAIT_DEADLINE_MINUTES`).
 
 **Pages and UI**
 
@@ -299,22 +427,11 @@ reads no profile and no label of a lane: only its copies of the contracts mentio
 
 ## Open points
 
-- **Hosted setup script and network rule.** A hosted environment no longer configures a size, a script or a network rule (owner's
-  decision). Some lanes rely on them today: a setup script that installs the project's tools, and a network rule that lets the agent reach
-  a package registry. Where does that go: into the repository (a file the runner reads), into the lane's step, or nowhere (the hosted runner
-  gets a fixed, documented base)? Until decided, the migration lists every workspace whose hosted environments have either and converts
-  nothing for them; self-hosted runners keep their own machine's setup.
-- **Who may save lanes through the API.** Every member of a workspace may today (`start_implementer_task`). With the configuration
-  inline, whoever saves decides a step's model (and so its cost), push right and instructions. A narrower right (Owners and Admins, or a
-  token an AI holds that is limited to a project) is for the owner to decide before the MCP server, and in any case before an AI other than
-  the lead agent writes lanes.
-- **The wait of a job behind a runner's concurrency.** A queued job that waits for a runner that is online and busy must not expire the way a
-  job for a runner nobody has does (`no_runner_available` after 30 minutes). The rule to apply (the deadline counts only while the named
-  runner is offline or revoked) is proposed here and to be confirmed in #1105.
-- **Names of runners** are unique per workspace from now on; whether a name can change after a lane uses it (and the lanes follow) or
-  never, as with a profile's name, is not decided.
-- **Where the change description of the migration's version comes from if #1107 is merged first.** This record puts the column into
-  release A so that the migration can write it; the order of #1105 and #1107 must keep that true.
+- **Awaiting owner:** the five points of "Proposal / awaiting owner".
+- **Tasks started by hand:** does the Implementer start by hand stay, and with the one shape of a step? (see the Proposal).
+- **The `api` trigger:** does an `api` trigger without input work like the manual one? (decision 4 names the manual trigger only.)
+- **Order of #1105 and #1107.** The migration writes `change_description`; the column is in release A so that stays true whichever merges
+  first, but #1105 must not ship the migration before it.
 
 ## Out of scope
 

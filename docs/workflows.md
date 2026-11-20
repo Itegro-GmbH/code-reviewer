@@ -2,15 +2,15 @@
 
 A **workflow** is a JSON document that says what the factory does when something happens: a trigger, and a list of steps that
 run in order. A GitHub issue gets a label, an agent implements it, another reviews, the first fixes what the review found, and a pull
-request is opened. Workflows are written by an AI through the API or edited in the [lane builder](#the-lane-builder), checked by a strict validator, and saved per
+request is opened. Workflows are written by an AI through the API (the [lane builder](#the-lane-builder) is superseded, ADR 0007), checked by a strict validator, and saved per
 workspace with versions.
 
-**Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
+**Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to (superseded, ADR 0007), the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
 workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger)), and one with a `ticket.statusChanged` trigger (#1036) starts when a ticket is moved into its status on the project's board ([The status trigger](#the-status-trigger));
-either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926) reads and edits a workflow and saves versions.
+either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926, superseded by ADR 0007) reads and edits a workflow and saves versions.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
-a deployment with the capability `implementer` (the factory); the routes below, the [lane builder](#the-lane-builder) and, for the runs, [pages](#the-run-page). Every member of a workspace may
+a deployment with the capability `implementer` (the factory); the routes below, the [lane builder](#the-lane-builder) (superseded, ADR 0007) and, for the runs, [pages](#the-run-page). Every member of a workspace may
 use them (the permission `start_implementer_task`).
 
 The format is described by two JSON Schemas, [`contracts/workflow.v1.json`](../contracts/workflow.v1.json) and
@@ -81,8 +81,6 @@ characters (an emoji is one), as the JSON Schema counts them.
 Everything else is configuration. The nodes talk to each other only through values; each one has an input and an output, and the validator
 holds one to the other.
 
-> **Superseded (ADR 0007, epic #1103).** A manual trigger will be allowed to have no `input`; its run then works on the project's repository (#1106, [ADR 0007](decisions/0007-ai-configured-factory.md)). The rule below (`repo_required`) holds until then.
-
 ### The triggers and their pre-steps
 
 A workflow has **several triggers** (`triggers`, 1 to 10). Each one starts the workflow its own way and has its own **pre-steps**; when it
@@ -107,7 +105,7 @@ may only read what **every** trigger yields.
 | --- | --- | --- |
 | `ticket.labeled` | `label` (needed, not only spaces): the label that starts the workflow | `trigger.ticket` (below), and, as workflows written before #916 read them, `trigger.issue.number` (an integer), `.title`, `.body`, `.url`, `.labels` and `trigger.repo.fullName`, `.owner`, `.name`, `.defaultBranch`. `github.issueLabeled` is the old name of this kind and is accepted wherever it was |
 | `ticket.statusChanged` | `to` (needed, 1 to 100 characters, not only spaces, none at either end: a name with spaces around it would never match, so it is refused with `invalid_value`): the status a ticket must be moved into; `from` (optional, same rules): only a move out of that status starts it. The names are the provider's own: for GitHub the options of the Status field of the project's board, spelled as the board spells them (case counts); for a Jira project the names of its workflow statuses, spelled as Jira spells them. **A lane must not move a ticket into its own `to`** ([The status trigger](#the-status-trigger)) | `trigger.ticket` (as for `ticket.labeled`; for a Jira project `key` is `PROJ-12`, `number` is 0, and `status` is the status name) and `trigger.status.from`, `trigger.status.to` (texts; `from` is empty when the item had no status). It has no `trigger.issue` or `trigger.repo`: the old fields are for lanes written before #916 |
-| `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`ticket`** (type `ticket`, required: the run works in the repository of the ticket) or **`repo`**, a required text (`owner/name`) (`repo_required`) | `trigger.input.<field>` (without `ticket`), and `trigger.ticket` when the input requires one |
+| `manual` (**superseded, #1106:** `input` becomes optional and a run without it works on the project's repository; the `api` trigger keeps the rule until the owner says otherwise, see [ADR 0007](decisions/0007-ai-configured-factory.md)) | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`ticket`** (type `ticket`, required: the run works in the repository of the ticket) or **`repo`**, a required text (`owner/name`) (`repo_required`) | `trigger.input.<field>` (without `ticket`), and `trigger.ticket` when the input requires one |
 | `api` | the same as `manual` | the same. It is started through the API only; the start form of the web app offers `manual` triggers |
 | `pullRequest.pushed` | none | reserved: the format validates it, the engine starts no run from it yet |
 | `schedule` | `cron` (needed): five fields separated by one space | reserved, like `pullRequest.pushed` |
@@ -198,9 +196,9 @@ holds for the `number` in the default of an object input (`default {"number": -5
 The bounds of an input the caller hands in are not known to the validator (an `integer` may be `0` or `-5`), so **the engine checks the number
 again when it runs**.
 
-> **Superseded (ADR 0007, epic #1103).** Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step of the lane. This section describes the behaviour until #1105 and the release after it; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Profiles are removed, everywhere" and "Migration path". The step's `environment` is replaced by a named runner: Lane steps will name one concrete runner (a hosted environment, which states only its concurrency, or a self-hosted runner) instead of an environment and labels; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
-
 ### The agent step (`"kind": "agent"`)
+
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step, and the step's `environment` is replaced by one named runner (a hosted environment, which states only its concurrency, or a self-hosted runner); see [ADR 0007](decisions/0007-ai-configured-factory.md), "Proposal" and "Migration path".
 
 A run of an agent step gets a **profile**, and the profile says who works **and where** (#919): its harness, model, rights and its environment. The step names no environment.
 
@@ -764,16 +762,16 @@ an unknown project is `404 PROJECT_NOT_FOUND`, boards GitHub cannot be asked for
 ("None" and the readable boards; a board without a Status field is out of reach), the **Resync** button of its tickets (`POST .../repositories/<id>/issues/sync` until it answers 200, with a visible count of the calls; one press stops after 30 calls and says to press again, what was read is kept) and a
 hint when the last full sync is **older than 3 days** and no delivery has written a row since (`sync.lastWriteAt` of the issue list is not after `sync.lastFullSyncAt`), or when no full sync has ended yet.
 
-> **Superseded (ADR 0007, epic #1103).** The built-in lanes name the profiles `implementer@1` and `reviewer@1` and an environment; they get the settings and a runner inline with #1105 ([ADR 0007](decisions/0007-ai-configured-factory.md)).
-
 ### Built-in lanes
+
+> **Superseded (ADR 0007, epic #1103).** The built-in lanes name the profiles `implementer@1` and `reviewer@1` and an environment; they get the settings and a runner inline with #1105 ([ADR 0007](decisions/0007-ai-configured-factory.md)).
 
 A new project may copy three lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Both need the profile versions `implementer@1` (may push) and `reviewer@1` (may not) and run in the first environment of the workspace by name.
 
 | Key | Lane | Starts | Does | Budget |
 |---|---|---|---|---|
 | `issue-to-pr` | Issue to PR | label `agent implement` on a ticket of the project's repository, or by hand with `input.ticket` | The first workflow below: implement, review, fix (3 rounds at most), open the pull request, otherwise comment on the ticket | 20 USD |
-| `issue-to-pr-status` | Issue to PR (status) | the ticket is moved on the project's board into the status `Ready for agent` (whoever moves it), or by hand with `input.ticket` | The same as `issue-to-pr`, and it reports on the board: `In progress` at the start, `In review` when the pull request is open, back to `Backlog` plus the comment when it stopped without one (`onFailure` does the same). The four status names are literals of the document: change them in the lane builder, whose picker offers the options of the project's board (a name the board does not have fails the step with `board_status_unknown`, which lists the options). A caller that copies the lane may pass its own names (`LaneStatuses` of `built-in-lanes.ts`). It is not ticked by default in the new project dialog | 20 USD |
+| `issue-to-pr-status` | Issue to PR (status) | the ticket is moved on the project's board into the status `Ready for agent` (whoever moves it), or by hand with `input.ticket` | The same as `issue-to-pr`, and it reports on the board: `In progress` at the start, `In review` when the pull request is open, back to `Backlog` plus the comment when it stopped without one (`onFailure` does the same). The four status names are literals of the document: change them by saving a new version through the API (the lane builder is superseded, ADR 0007), whose board options the validator lists offers the options of the project's board (a name the board does not have fails the step with `board_status_unknown`, which lists the options). A caller that copies the lane may pass its own names (`LaneStatuses` of `built-in-lanes.ts`). It is not ticked by default in the new project dialog | 20 USD |
 | `review-a-pull-request` | Review a pull request | by hand: `input.pullRequest` (the number); `input.repo` may be left out | The `reviewer` reads the pull request (`git fetch origin pull/<n>/head`) against its base and changes nothing; the findings (at most 20: `type` bug, risk or nit, `name`, `description`) are written as one comment on the pull request (`pullRequest.comment`) | 5 USD |
 
 **The repository of a lane of a project is the project's** (#937). The input of "Review a pull request" still declares `repo` (a manual trigger must declare `ticket` or `repo`), but a start of a lane that belongs to a project and declares `repo` may **leave it out**: the run is given
@@ -1105,7 +1103,7 @@ When the last one is over, the run ends with the stored status and error code (`
   started are not written as skipped rows (only a step that was written and not claimed is); the page shows what ran. A discard has no such wait: the run is over at once, and only the agent's stop and push take that long. The run page has plain buttons, no confirmation.
 - **`onFailure` reads no step of the workflow.** After a failure any step may not have run, so the facts of the failure (`status`, `stepId`, `code`, `message`) and the trigger are all it has: it cannot name the branch the agent pushed or quote an earlier result. (A later extension could offer them with a `| default`.)
 - **`onFailure` is not shown apart on the run page and not in the run's JSON**: its steps are rows after the failed one, like any step; `workflow_runs.failure` is not returned by the routes yet.
-- **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
+- **Profiles are resolved per step** (superseded: profiles are removed, ADR 0007), at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
   with version 1.
 - **The sweep has a time budget** (40 seconds, 10 for the maintenance after a request), checked between two runs; a run is looked at as a whole.
 
@@ -1459,13 +1457,13 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 ## The run page
 
 *Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
-A member can edit a workflow in the [lane builder](#the-lane-builder), start one by hand and watch a run. The pages exist
+A member can edit a workflow in the [lane builder](#the-lane-builder) (superseded, ADR 0007: nobody edits a lane in the browser any more), start one by hand and watch a run. The pages exist
 only in a deployment with the capability `implementer`, are reached from the **Lanes** tab of a project (no sidebar place of their own since #925), and are open to every member (the permission
 `start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
 not exist.
 
 - **Workflows** (`/w/<slug>/workflows`): the workflows of the workspace that are not archived, with their version and the time of the last save.
-- **One workflow** (`/w/<slug>/workflows/<id>`): the [lane builder](#the-lane-builder) (its **Run now** opens the Start form) and the newest 50 runs.
+- **One workflow** (`/w/<slug>/workflows/<id>`): the [lane builder](#the-lane-builder) (to be replaced by name, description and versions, #1107; its **Run now** opens the Start form) and the newest 50 runs.
   - The form has one field for each field of the `input` of the manual trigger, the repository (`repo`) or the ticket first: a text (a ticket is a text like `github:owner/repo#128`), a whole number, a number, a
     choice (a text with a list of names), a checkbox, and a box for JSON for a list or an object. A workflow with several manual triggers shows one form for each. It sends `{trigger, input, clientRequestId}` (`trigger` when the workflow has `triggers`) to
     `POST .../workflows/<id>/runs`. The `clientRequestId` is made when the form is sent and kept for the same input: sending it again after a lost
@@ -1554,9 +1552,9 @@ The lane block of a ticket (row and drawer) draws the [step track](#the-run-page
 
 The start dialog's Start button gets the focus back when it closes. The list's `lane` now also names a run that **waits** for an answer (`status: "waiting"`) and carries `workflowId`; before, only a running run was a lane. No new route and no migration.
 
-> **Superseded (ADR 0007, epic #1103).** The lane builder is removed and a lane is configured only as JSON through the API by an AI; a lane page shows its name, description and versions with a change description each (#1107); see [ADR 0007](decisions/0007-ai-configured-factory.md).
-
 ## The lane builder
+
+> **Superseded (ADR 0007, epic #1103).** This page and its routes are removed: a lane is configured only as JSON through the API by an AI, and a lane page shows its name, description and versions, each from version 2 with a change description (#1107); see [ADR 0007](decisions/0007-ai-configured-factory.md), "Owner decisions".
 
 *#926 of epic #915; the code is [`app/src/workflow-pages/builder/`](../app/src/workflow-pages/README.md#the-lane-builder). It is the page of one workflow (`/w/<slug>/workflows/<id>`), reached from the Lanes tab of its project (#922).*
 
@@ -1636,7 +1634,7 @@ Beyond the form:
 | `mcp_server_broken` | A **warning** (`severity: "warning"`, in `warnings`, never in `errors`; the workflow is `valid` and saves): the lane names an MCP server whose last connection test failed, or an OAuth server that nobody connected or whose grant ended (`broken`). | Test the server again on the MCP page, or connect or reconnect it there, or save anyway. |
 | `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`). | Rename it. |
 | `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
-| `repo_required` | A manual or api trigger without `input` that declares `ticket` (type `ticket`, required) or `repo` as a required text: the run has no repository. | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`. |
+| `repo_required` (**superseded for the manual trigger, #1106**) | A manual or api trigger without `input` that declares `ticket` (type `ticket`, required) or `repo` as a required text: the run has no repository. | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`. |
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
 | `duplicate_trigger_label` | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first. | Give one of them another label, or merge them. |
 | `label_retriggers_workflow` | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may. | Remove the label instead, or add another one. |
