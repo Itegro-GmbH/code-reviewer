@@ -6,7 +6,7 @@
 // after a card and in an empty list (`renderGap`), so the builder puts its cards and its "+" there and the run page its read-only nodes and
 // connectors. The markup the builder's tests and styles rely on (`data-list`, `data-container`, `data-branch`, `data-group`) is kept here.
 import type { ReactNode } from "react";
-import { BUILDER_COPY } from "./copy.ts";
+import { FLOW_LAYOUT_COPY } from "./copy.ts";
 import {
   kindOf,
   nodeAt,
@@ -93,9 +93,9 @@ function Branch({
       <span className="text-xs font-semibold text-muted-foreground uppercase">
         {name}
       </span>
-      {empty && name === BUILDER_COPY.elseLabel ? (
+      {empty && name === FLOW_LAYOUT_COPY.elseLabel ? (
         <span className="text-xs text-muted-foreground">
-          {BUILDER_COPY.nothingGoesOn}
+          {FLOW_LAYOUT_COPY.nothingGoesOn}
         </span>
       ) : null}
       <Steps
@@ -130,7 +130,7 @@ function NodeTree({ pointer, ...layout }: Layout & { pointer: Pointer }) {
         </div>
         {layout.loopFooter === undefined ? (
           <span className="px-1 text-xs text-muted-foreground">
-            {BUILDER_COPY.loopFooter(node.maxRounds)}
+            {FLOW_LAYOUT_COPY.loopFooter(node.maxRounds)}
           </span>
         ) : (
           layout.loopFooter(node)
@@ -148,12 +148,12 @@ function NodeTree({ pointer, ...layout }: Layout & { pointer: Pointer }) {
         <div className="flex flex-col gap-3 sm:flex-row">
           <Branch
             {...layout}
-            name={BUILDER_COPY.thenLabel}
+            name={FLOW_LAYOUT_COPY.thenLabel}
             list={`${pointer}/then`}
           />
           <Branch
             {...layout}
-            name={BUILDER_COPY.elseLabel}
+            name={FLOW_LAYOUT_COPY.elseLabel}
             list={`${pointer}/else`}
           />
         </div>
@@ -180,7 +180,7 @@ export function FlowLayout({
         >
           <NodeTree {...layout} pointer={pointer} />
           <span className="mt-2 ml-4 text-xs text-muted-foreground">
-            {BUILDER_COPY.triggerPre}
+            {FLOW_LAYOUT_COPY.triggerPre}
           </span>
           <div className="ml-4 flex flex-col">
             <Steps
@@ -204,7 +204,7 @@ export function FlowLayout({
       {failure.length === 0 && layout.showEmptyFailure !== true ? null : (
         <>
           <span className="text-xs font-semibold text-muted-foreground uppercase">
-            {BUILDER_COPY.onFailure}
+            {FLOW_LAYOUT_COPY.onFailure}
           </span>
           <div
             className="rounded-xl border border-dashed border-line-strong p-3"

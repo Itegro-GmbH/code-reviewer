@@ -254,6 +254,7 @@ function service(world: World = {}, asked?: Asked) {
           document: JSON.stringify(document),
           createdBy: "u-1",
           createdAt: T(0),
+          changeDescription: null,
         };
       },
       async list() {

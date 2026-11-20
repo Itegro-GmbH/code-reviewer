@@ -38,6 +38,11 @@ export type StoredWorkflowVersion = {
   document: string;
   createdBy: string;
   createdAt: string;
+  /**
+   * What the version changed against the one before (#1107): null for version 1 and for a version saved before the column existed,
+   * where the lane's own description serves.
+   */
+  changeDescription: string | null;
 };
 
 /** A version without its document: for the list of versions of a workflow. */
@@ -59,6 +64,8 @@ export type NewWorkflow = {
 };
 
 export type NewVersion = NewWorkflow & {
+  /** What this version changes against the one before (#1107); the service requires it, the repository stores it. Left out: null. */
+  changeDescription?: string;
   /** Save only if this is still the current version; otherwise `version_conflict`. */
   expectedVersion?: number;
 };
@@ -176,6 +183,7 @@ function versionFrom(row: {
   document: string;
   created_by: string;
   created_at: string;
+  change_description?: string | null;
 }): StoredWorkflowVersion {
   return {
     workflowId: row.workflow_id,
@@ -183,6 +191,7 @@ function versionFrom(row: {
     document: row.document,
     createdBy: row.created_by,
     createdAt: row.created_at,
+    changeDescription: row.change_description ?? null,
   };
 }
 
@@ -358,7 +367,13 @@ export function createWorkflowsRepository(
     async listVersions(id) {
       const rows = await db
         .selectFrom("workflow_versions")
-        .select(["workflow_id", "version", "created_by", "created_at"])
+        .select([
+          "workflow_id",
+          "version",
+          "created_by",
+          "created_at",
+          "change_description",
+        ])
         .where("workspace_id", "=", workspaceId)
         .where("workflow_id", "=", id)
         .orderBy("version", "desc")
@@ -368,6 +383,7 @@ export function createWorkflowsRepository(
         version: row.version,
         createdBy: row.created_by,
         createdAt: row.created_at,
+        changeDescription: row.change_description,
       }));
     },
 
@@ -507,6 +523,7 @@ export function createWorkflowsRepository(
               document: input.document,
               created_by: input.createdBy,
               created_at: timestamp,
+              change_description: input.changeDescription ?? null,
             })
             .returningAll()
             .executeTakeFirstOrThrow();

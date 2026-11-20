@@ -39,7 +39,7 @@ import {
   WORKFLOW_RUN_POLL_MS,
   type WorkflowRunsApi,
 } from "./api.ts";
-import { normalise, type Doc } from "./builder/document.ts";
+import { normalise, type Doc } from "./flow/document.ts";
 import {
   costBasisCopy,
   COST_COPY,

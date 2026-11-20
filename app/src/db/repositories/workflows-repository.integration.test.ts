@@ -62,6 +62,7 @@ describe("the workflows repository", () => {
         document: '{ "x" :  1 }',
         createdBy: "u-1",
         createdAt: "2026-11-04T08:00:00.000Z",
+        changeDescription: null,
       },
     });
     expect(await a.get("wf-1")).toEqual({
@@ -222,6 +223,42 @@ describe("the workflows repository", () => {
     expect((await a.listVersions("wf-1")).map((v) => v.version)).toEqual([
       3, 2, 1,
     ]);
+  });
+
+  // #1107-T09
+  it("stores the change description with a version and lists it, and leaves it null where none was given", async () => {
+    const { a } = await setup();
+    await a.create(NEW, 100);
+
+    await a.saveVersion(
+      "wf-1",
+      {
+        name: "Issue to PR",
+        document: '{"v":2}',
+        createdBy: "u-2",
+        changeDescription: "Raised the budget",
+      },
+      200,
+    );
+    await a.saveVersion(
+      "wf-1",
+      { name: "Issue to PR", document: '{"v":3}', createdBy: "u-1" },
+      200,
+    );
+
+    expect(
+      (await a.listVersions("wf-1")).map((v) => [
+        v.version,
+        v.changeDescription,
+      ]),
+    ).toEqual([
+      [3, null],
+      [2, "Raised the budget"],
+      [1, null],
+    ]);
+    expect((await a.getVersion("wf-1", 2))?.changeDescription).toBe(
+      "Raised the budget",
+    );
   });
 
   // #833-M1-T146

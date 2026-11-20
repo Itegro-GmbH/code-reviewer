@@ -26,6 +26,19 @@ describe("the built-in lanes", () => {
     expect(result.valid).toBe(true);
   });
 
+  // #1107-T08
+  it.each(BUILT_IN_LANE_KEYS)(
+    "%s has a description: a new lane must have one (it is what version 1 says)",
+    (key) => {
+      const { description } = builtInLaneDocument(key, "node") as {
+        description?: unknown;
+      };
+      expect(
+        typeof description === "string" && description.trim(),
+      ).toBeTruthy();
+    },
+  );
+
   // #922-T02
   it("Issue to PR is the example of the documentation", () => {
     const example = JSON.parse(

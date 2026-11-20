@@ -1415,6 +1415,11 @@ export interface WorkflowVersionsTable {
   document: string;
   created_by: string;
   created_at: string;
+  /**
+   * What this version changed against the one before (#1107, ADR 0007): text for people, 1 to 1,000 characters, written by whoever saved it.
+   * Null for version 1 (the lane's description serves) and for every version saved before the column existed.
+   */
+  change_description: string | null;
 }
 
 /**

@@ -1524,6 +1524,7 @@ describe("a failure of the engine", () => {
           document: "not json",
           createdBy: "user-1",
           createdAt: "2026-11-05T10:00:00.000Z",
+          changeDescription: null,
         }),
       },
       profiles: app.profiles,
