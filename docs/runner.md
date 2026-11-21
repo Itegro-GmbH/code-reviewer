@@ -132,7 +132,41 @@ matches nothing and never fails the query for the other jobs.
 
 ### Routing
 
-> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105. Lane steps will not reach a runner by the labels it announced: a step names one concrete runner. A job reaches it by a reserved label `cr:runner:<id>` that only that runner's own credential carries (decided 2026-11-20); this amends ADR 0005 §1 and changes the claim and the doorbell; see [ADR 0007](decisions/0007-ai-configured-factory.md), decision 10.
+> **Amended in part (ADR 0007, epic #1103; #1105, release A).** A lane step no longer reaches a runner by the labels it announced: an agent step with settings of its own
+> names **one concrete runner** by its id ([`workflows.md`](workflows.md#settings-in-the-step-1105)). Its job reaches that runner by the **reserved label `cr:runner:<id>`**,
+> which only that runner's own credential carries; this amends [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md) §1 (below, "Named runners"). The rest of this
+> section is how a turn in an **environment** (the old form, which stays accepted in release A) is routed, and it is unchanged: the one rule still is "a job requires labels,
+> a dispatcher takes it when it has all of them".
+
+#### Named runners (#1105, ADR 0007, decisions 10, 14 and 16)
+
+A **runner** is whatever runs an agent turn, and a step names one by its id. Two kinds, both listed by the validator (`runner_unknown` has their ids in `available`):
+
+- A **self-hosted runner** is a row of `runners` (a machine the customer registered). Its **name is unique** in the workspace among the runners that are not revoked **and the hosted
+  runners**, without regard to case (a partial unique index on `(workspace_id, lower(name)) where revoked_at is null`; the service that registers a runner or renames one takes the
+  workspace's lock and checks both tables). A registration with a name that is taken is `400 RUNNER_REQUEST_INVALID` with `fields: [{"field": "name", "code": "invalid"}]` and the
+  token is **not** used, so it registers again with another name; a DevBox that was revoked registers again under its name, as a **new id**. Existing duplicates were made unique
+  by the migration (the oldest keeps its name, a later one gets ` (` and the first eight characters of its id `)`). **A runner can be renamed** (`RunnerFleetService.rename`, name
+  rules of the registration): lanes store the id, so a rename changes no lane. (The route and the page that call it are part of the Setup of #1108.)
+- A **hosted runner** is one **type** of the provided Vercel Sandbox: a row of `implementer_environments` of the kind `hosted` that has a `concurrency`, one for each size
+  an environment may name (`environmentVcpus` of `contracts/environment-sizes.v1.json`: **2, 4, 6 and 8 vCPU**; 1 vCPU is a size of the platform that leaves the agent no memory),
+  named "Vercel Sandbox 4 vCPU" and so on, in **every workspace**: the migration made them for the workspaces that exist, and the creation of a workspace (the three places that
+  make one) makes them for a new one. The **size is fixed per type** (a database index holds one hosted runner for each type and workspace); only the `concurrency` is set
+  (`HOSTED_RUNNER_DEFAULT_CONCURRENCY`, a whole number from 1 to 100 set by the operator, 2 when it is not set, is what the first rows get). A hosted runner is not an environment
+  of a person: the environments page and its routes do not list it, count it, change it or delete it. A name that a person's environment or a runner already had is not taken from
+  it: the hosted runner then is "Vercel Sandbox 4 vCPU (hosted)".
+
+**The label.** The claim of a customer's runner has the labels it announced (never one in `cr:`) **and `cr:runner:<its own id>`**, taken from the credential's row (`customer.runner.id`),
+never from what the runner announced. A runner that announces a `cr:` label is still refused at registration (`RUNNER_LABEL_RESERVED`); the one exception to "only the platform identity
+carries a `cr:` label" is this label, and only on the runner it names. A turn of a step that names a self-hosted runner is written with a **runner copy that holds exactly that label**
+(`requiredLabelsOfTurn`), so the job requires `cr:runner:<id>` and nothing else: **no other runner of the workspace takes it, however alike their labels are, the platform identity
+does not have it, and a runner of another workspace cannot** (its claim is held to its own workspace as before). A copy that holds that label **and others** is a legacy
+environment and keeps losing its `cr:` labels. The **doorbell** matches it by the same rule: a customer's dispatcher has the labels it announced plus `cr:runner:<its id>` in the
+pairing of the rings (`runner-dispatches-repository.ts`), so the named runner is rung and no other. The Dispatcher itself (`dispatcher/src`) forwards labels and does not change.
+
+A turn of a step that names a **hosted runner** is a hosted job of the size of its type, as before: `cr:managed` and `cr:size-<n>`, the platform identity takes it. The turn copies the
+hosted runner's id and size; the step's own `setupScript` and `network` apply (the hosted runner has neither). The record of which hosted runner the job was enqueued for is the id of
+that copy.
 
 One rule routes every job to every dispatcher (Runner v2, #971, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)): **a job requires labels
 and a dispatcher takes it only when it has all of them.** There is no special case for hosted jobs or for runner turns; the two that existed
@@ -250,7 +284,12 @@ lease token (`/api/runners/v1/jobs/{id}/session`, `/resume-session`), their cont
 
 ### Validator rules
 
-> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105. The rules `runner_needs_own_key`, `harness_needs_runner` and `no_runner_announces` stay but are checked at the runner a step names, not at an environment or a profile; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
+> **Amended in part (ADR 0007, epic #1103; #1105, release A).** For an agent step with settings of its own the rules `runner_needs_own_key`, `harness_needs_runner` and
+> `no_runner_announces` are checked **at the runner the step names**: a managed model on a self-hosted runner is `runner_needs_own_key`; a harness other than OpenCode on a
+> hosted runner is `harness_needs_runner`; `no_runner_announces` is a warning over **that runner's own announcement** (only when it is online). Besides them `runner_unknown` (an id
+> of no runner of the workspace, or of a revoked one, with the ids in `available`; a revoked runner is never offered), `runner_required`, `runner_with_environment` and
+> `hosted_only_setting` (`setupScript` and `network` only on a hosted runner) are the validator's; see [`workflows.md`](workflows.md#settings-in-the-step-1105). A step saved with a runner
+> that is revoked afterwards ends `runner_not_found` when it starts, free, and does not wait. The table below is the rule at an environment, which stays for the old form.
 
 The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment and, for each profile version it runs, whether
 its model is managed and which harness it runs with. Since #919 the environment is part of the profile, so the same two rules are checked when a **profile** is saved

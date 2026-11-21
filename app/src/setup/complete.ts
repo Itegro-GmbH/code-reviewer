@@ -11,6 +11,7 @@
 // credential account format), so the sign in with email and password verifies it.
 import type { Kysely } from "kysely";
 import { createInstanceSettingsRepository } from "../db/repositories/instance-settings-repository.ts";
+import { ensureHostedRunners } from "../db/repositories/named-runners-repository.ts";
 import { createWorkspacesRepository } from "../db/repositories/workspaces-repository.ts";
 import { formatTimestamp } from "../db/codecs.ts";
 import { lockSetupCompletion } from "../db/setup-lock.ts";
@@ -136,6 +137,8 @@ export async function completeSetup(
           createdBy: userId,
         }));
       await workspaces.addMember(workspace.id, userId, "owner");
+      // #1105 (ADR 0007, decision 16): the hosted runners (the migration made them for a workspace that existed before; asked again, nothing).
+      await ensureHostedRunners(trx, workspace.id, { now: () => at });
       workspaceId = workspace.id;
     } else if (
       existing !== undefined &&

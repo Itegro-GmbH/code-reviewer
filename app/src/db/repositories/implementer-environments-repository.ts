@@ -6,7 +6,12 @@
 // count, checked under a lock on the workspace row so that two creators cannot both take the last place. Everything about the
 // shape of the input (the size list, the script bound) is the service's.
 import "server-only";
-import { sql, type Kysely, type Selectable } from "kysely";
+import {
+  sql,
+  type ExpressionBuilder,
+  type Kysely,
+  type Selectable,
+} from "kysely";
 import { formatTimestamp } from "../codecs.ts";
 import { UNIQUE_VIOLATION, errorCode } from "../errors.ts";
 import type { Database, ImplementerEnvironmentsTable } from "../schema.ts";
@@ -99,6 +104,15 @@ export type ImplementerEnvironmentsRepository = {
   remove(id: string): Promise<boolean>;
 };
 
+/**
+ * #1105 (ADR 0007): the rows of this table that have a `concurrency` are the **hosted runners** (one for each type of the provided Vercel
+ * Sandbox, made by the platform; `named-runners-repository.ts`). They are no environment of a person: they are not listed, not counted
+ * against the workspace's bound, and neither changed nor deleted through the environments.
+ */
+const OF_A_PERSON = (
+  eb: ExpressionBuilder<Database, "implementer_environments">,
+) => eb("concurrency", "is", null);
+
 function kindOf(text: string): EnvironmentKind {
   return text === "runner" ? "runner" : "hosted";
 }
@@ -138,7 +152,8 @@ function environmentFrom(
     setupScript: row.setup_script,
     labels: labelsFromText(row.labels),
     network: ruleOf(row.network_mode, row.network_hosts),
-    createdBy: row.created_by,
+    // A row of a person always has its maker; only the hosted runners (not read here) are made by the platform.
+    createdBy: row.created_by ?? "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -158,6 +173,7 @@ export function createImplementerEnvironmentsRepository(
         .selectFrom("implementer_environments")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
+        .where(OF_A_PERSON)
         .orderBy((eb) => eb.fn("lower", ["name"]))
         .orderBy("id")
         .execute();
@@ -177,6 +193,7 @@ export function createImplementerEnvironmentsRepository(
           "network_mode",
         ])
         .where("workspace_id", "=", workspaceId)
+        .where(OF_A_PERSON)
         .orderBy((eb) => eb.fn("lower", ["name"]))
         .orderBy("id")
         .execute();
@@ -196,6 +213,7 @@ export function createImplementerEnvironmentsRepository(
         .selectFrom("implementer_environments")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
+        .where(OF_A_PERSON)
         .where("id", "=", id)
         .executeTakeFirst();
       return row === undefined ? undefined : environmentFrom(row);
@@ -214,6 +232,7 @@ export function createImplementerEnvironmentsRepository(
           .selectFrom("implementer_environments")
           .select((eb) => eb.fn.countAll<string>().as("count"))
           .where("workspace_id", "=", workspaceId)
+          .where(OF_A_PERSON)
           .executeTakeFirstOrThrow();
         if (Number(count) >= maximum)
           return { ok: false, reason: "limit_reached" };
@@ -247,6 +266,7 @@ export function createImplementerEnvironmentsRepository(
             updated_at: formatTimestamp(now()),
           })
           .where("workspace_id", "=", workspaceId)
+          .where(OF_A_PERSON)
           .where("id", "=", id)
           .returningAll()
           .executeTakeFirst();
@@ -264,6 +284,7 @@ export function createImplementerEnvironmentsRepository(
       const result = await db
         .deleteFrom("implementer_environments")
         .where("workspace_id", "=", workspaceId)
+        .where(OF_A_PERSON)
         .where("id", "=", id)
         .executeTakeFirst();
       return Number(result.numDeletedRows) > 0;

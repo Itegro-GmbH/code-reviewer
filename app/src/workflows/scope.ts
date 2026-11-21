@@ -51,6 +51,8 @@ export type Binding = {
   agent?: {
     profile?: string;
     environment?: string;
+    /** #1105: the id of the runner a step with settings of its own names (ADR 0007); a session goes on only on the runner it started on. */
+    runner?: string;
     settings?: {
       harness: string;
       model: string;

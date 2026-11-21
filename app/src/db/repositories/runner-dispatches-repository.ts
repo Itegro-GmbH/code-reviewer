@@ -22,6 +22,7 @@ import { jobKindOf, type JobKind } from "../../job-kind/job-kind.ts";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
 import { accessRule, customerAccess } from "../../runner-identity/access.ts";
+import { RUNNER_LABEL_PREFIX } from "../../runner-identity/labels.ts";
 import {
   labelsFromText,
   manifestFromText,
@@ -135,6 +136,11 @@ function isCode(value: string): value is DispatchResultCode {
   return (DISPATCH_RESULT_CODES as readonly string[]).includes(value);
 }
 
+/**
+ * #1105 (ADR 0007, decision 10): the labels a runner has for the doorbell are the ones it announced and the label of its own id, as in the
+ * claim (`jobs-claim.ts`): a job of a step that names this runner is rung at it and at no other dispatcher.
+ */
+
 /** The labels of a job as the claim reads them (`jobs-claim.ts`): the stored ones, else those of its runner environment without `cr:` labels. */
 const REQUIRED = sql`coalesce(
   string_to_array(j.required_labels, E'\n'),
@@ -239,7 +245,7 @@ export function createRunnerDispatchesRepository(
       where j.status = 'queued'
         and j.command = 'review'
         and cardinality(${REQUIRED}) > 0
-        and ${REQUIRED} <@ string_to_array(r.labels, E'\n')
+        and ${REQUIRED} <@ (string_to_array(r.labels, E'\n') || array[${RUNNER_LABEL_PREFIX} || r.id])
         and ${accessRule(sql`coalesce(${announced} -> r.id, '[]'::jsonb)`, "t")}
         and ${where}
       order by j.run_after, j.id, r.id

@@ -8,6 +8,7 @@ import type {
   RunnerLimits,
   RunnerManifest,
 } from "../runner-identity/announcement.ts";
+import { checkRunnerName } from "../runner-identity/announcement.ts";
 import { RunnerFleetError } from "./errors.ts";
 import {
   hashSecret,
@@ -51,6 +52,12 @@ export type RunnerFleetService = {
   list(): Promise<RunnerList>;
   createToken(user: { id: string }): Promise<NewTokenView>;
   revoke(id: string): Promise<void>;
+  /**
+   * #1105 (ADR 0007, decision 14): gives a runner that is not revoked another name. A lane stores the runner's id and the pages show its
+   * name, so a rename never breaks a lane. The name is one line of 1 to 80 characters and free among the runners that are not revoked and the
+   * hosted runners of the workspace, without regard to case.
+   */
+  rename(id: string, name: unknown): Promise<void>;
 };
 
 const ID_MAX_LENGTH = 128;
@@ -109,6 +116,30 @@ export function createRunnerFleetService(deps: {
           { maximum: OPEN_TOKENS_PER_WORKSPACE_MAX },
         );
       return { token, expiresAt: outcome.expiresAt };
+    },
+
+    async rename(id, name) {
+      const checked = checkRunnerName(name);
+      if (checked === null)
+        throw new RunnerFleetError(
+          "RUNNER_FLEET_NAME_INVALID",
+          "A runner's name is one line of 1 to 80 characters.",
+        );
+      const outcome =
+        id.length > 0 &&
+        id.length <= ID_MAX_LENGTH &&
+        !id.includes("\u0000") &&
+        (await deps.runners.rename(id, checked));
+      if (outcome === "name_taken")
+        throw new RunnerFleetError(
+          "RUNNER_FLEET_NAME_TAKEN",
+          "A runner or a hosted runner of the workspace has this name.",
+        );
+      if (outcome !== "renamed")
+        throw new RunnerFleetError(
+          "RUNNER_FLEET_NOT_FOUND",
+          "There is no such runner in this workspace.",
+        );
     },
 
     async revoke(id) {

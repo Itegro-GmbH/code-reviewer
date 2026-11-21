@@ -111,6 +111,8 @@ export const STEP_FAILURE_CODES = [
   "profile_not_found",
   /** #1105: a step with settings of its own does not read (a document the validator never saved), so no turn starts. */
   "agent_settings_invalid",
+  /** #1105 (ADR 0007, decision 14): the runner a step names is not one of the workspace, or it was revoked since the lane was saved. */
+  "runner_not_found",
   /** The environment is not one of the workspace. */
   "environment_not_found",
   /** The step names another environment than the version of its profile runs in (#919). */

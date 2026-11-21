@@ -132,7 +132,7 @@
           "const": "agent"
         },
         "profile": {
-          "description": "A profile, `name` for the newest version or `name@version` to pin one. Deprecated (ADR 0007, #1105): a step either names a profile or carries its settings itself (`harness`, `model`, `canPush`, `instructions`, `setupScript`, `network`), never both (`profile_with_inline_settings`) and never neither (`agent_settings_required`; both are the validator's, the schema allows either).",
+          "description": "A profile, `name` for the newest version or `name@version` to pin one. Deprecated (ADR 0007, #1105): a step either names a profile or carries its settings itself (`harness`, `model`, `canPush`, `instructions`, `setupScript`, `network`, `runner`), never both (`profile_with_inline_settings`) and never neither (`agent_settings_required`; both are the validator's, the schema allows either).",
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?:@[1-9][0-9]{0,5})?$"
         },
@@ -204,8 +204,13 @@
             "properties": { "hosts": { "maxItems": 0 } }
           }
         },
+        "runner": {
+          "description": "#1105 (ADR 0007, decisions 6, 14 and 16), a setting of the step itself: the **id** of the concrete runner the agent runs on: a hosted runner (one type of the provided Vercel Sandbox, such as \"Vercel Sandbox 4 vCPU\", a fixed size) or a self-hosted runner of the workspace. A literal: where the agent works is a target, so version 1 takes no reference (`target_from_untrusted_value`). The id, not the name: a rename changes the name and no id, so no lane. An id of no runner of the workspace, or of a revoked runner, is `runner_unknown` (`available` lists the ids). A step with settings of its own names this or an `environment`, never both (`runner_with_environment`) and never neither (`runner_required`). Not with `profile` (a profile says where it works).",
+          "type": "string",
+          "maxLength": 20000
+        },
         "environment": {
-          "description": "Deprecated (#919): leave it out, the step runs in the environment of its profile. A step with settings of its own (no `profile`) names its environment here (`environment_required`) until the runner field of ADR 0007 replaces it. The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator). When the profile names an environment, this must be that one (`environment_mismatch`); a profile version saved before #919 names none and needs it (`environment_required`).",
+          "description": "Deprecated (#919): leave it out, the step runs in the environment of its profile. A step with settings of its own (no `profile`) may name its environment here instead of a `runner`, in release A, for documents written before the runner (`runner_required` when it names neither; `runner_with_environment` when it names both). The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator). When the profile names an environment, this must be that one (`environment_mismatch`); a profile version saved before #919 names none and needs it (`environment_required`).",
           "type": "string",
           "maxLength": 20000
         },
@@ -285,7 +290,8 @@
               { "required": ["canPush"] },
               { "required": ["instructions"] },
               { "required": ["setupScript"] },
-              { "required": ["network"] }
+              { "required": ["network"] },
+              { "required": ["runner"] }
             ]
           },
           "then": {

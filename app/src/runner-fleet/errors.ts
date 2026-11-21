@@ -9,6 +9,10 @@ export const RUNNER_FLEET_ERROR_CODES = [
   "RUNNER_FLEET_NOT_FOUND",
   /** The workspace holds the most unused registration tokens it may. */
   "RUNNER_FLEET_TOKEN_LIMIT_REACHED",
+  /** #1105: the new name of a runner is no name (one line of 1 to 80 characters). */
+  "RUNNER_FLEET_NAME_INVALID",
+  /** #1105: a runner that is not revoked, or a hosted runner ("Vercel Sandbox 4 vCPU"), has this name in the workspace, without regard to case. */
+  "RUNNER_FLEET_NAME_TAKEN",
 ] as const;
 export type RunnerFleetErrorCode = (typeof RUNNER_FLEET_ERROR_CODES)[number];
 
@@ -16,6 +20,8 @@ export const RUNNER_FLEET_ERROR_STATUS: Record<RunnerFleetErrorCode, number> = {
   RUNNER_FLEET_CROSS_SITE_REQUEST: 403,
   RUNNER_FLEET_NOT_FOUND: 404,
   RUNNER_FLEET_TOKEN_LIMIT_REACHED: 409,
+  RUNNER_FLEET_NAME_INVALID: 400,
+  RUNNER_FLEET_NAME_TAKEN: 409,
 };
 
 export class RunnerFleetError extends Error {

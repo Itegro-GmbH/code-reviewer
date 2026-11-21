@@ -57,7 +57,11 @@ import {
   SETUP_SCRIPT_MAX_BYTES,
 } from "./limits.ts";
 import { demandOfProfile } from "../runner-identity/access.ts";
-import { announcedBy, describeDemand } from "../runner-identity/announced.ts";
+import {
+  announcedBy,
+  announcedByRunner,
+  describeDemand,
+} from "../runner-identity/announced.ts";
 import { issue, listNames, pointer, shown, warning } from "./issues.ts";
 import { checkStepMcp } from "./mcp-check.ts";
 import {
@@ -65,6 +69,7 @@ import {
   type EnvironmentInfo,
   type ProfileInfo,
   type ProfileVersionFacts,
+  type RunnerInfo,
   type WorkflowResolver,
 } from "./resolver.ts";
 import {
@@ -328,6 +333,36 @@ function environmentOf(
   };
 }
 
+/**
+ * The runner a step with settings of its own names (#1105, ADR 0007): the id it wrote (a literal; anything else is reported where it is
+ * written) and the runner of the workspace with that id. `info` is undefined for an id of no runner of the workspace; a resolver that does
+ * not know the workspace's runners knows none.
+ */
+function runnerOfStep(
+  node: Record<string, unknown>,
+  resolver: WorkflowResolver,
+): { id: string; info: RunnerInfo | undefined } | undefined {
+  if (typeof node.runner !== "string") return undefined;
+  const id = literalText(parseTemplate(node.runner));
+  if (id === undefined) return undefined;
+  return { id, info: resolver.runners?.().find((runner) => runner.id === id) };
+}
+
+/** The ids of the runners a step may name (a revoked one is not offered). */
+function runnerIds(resolver: WorkflowResolver): string[] {
+  return (resolver.runners?.() ?? [])
+    .filter((runner) => runner.revoked !== true)
+    .map((runner) => runner.id);
+}
+
+/** "id (name)" for every runner a step may name, for a message: the `available` of the issue holds the ids alone, so they can be copied. */
+function runnersListed(resolver: WorkflowResolver): string {
+  const pairs = (resolver.runners?.() ?? [])
+    .filter((runner) => runner.revoked !== true)
+    .map((runner) => `${runner.id} (${runner.name})`);
+  return listNames(pairs);
+}
+
 /** The profile name and the environment (lower case) an agent step runs with: what makes two steps share a session. */
 function setupOf(
   node: Record<string, unknown>,
@@ -340,9 +375,11 @@ function setupOf(
       ? parseProfileRef(node.profile)?.name
       : undefined;
   const model = isInlineStep(node) ? inlineModelOf(node) : undefined;
+  const runner = runnerOfStep(node, resolver)?.id;
   return {
     ...(profile === undefined ? {} : { profile }),
     ...(environment === undefined ? {} : { environment }),
+    ...(runner === undefined ? {} : { runner }),
     ...(isInlineStep(node)
       ? {
           settings: {
@@ -768,19 +805,26 @@ function checkHostedSettings(
   }
   if (node.network !== undefined)
     checkNetworkRule(node.network, pointer(path, "network"), c);
-  // A runner's setup and network are its owner's: the step cannot promise either there. What is not known (no such environment, a
-  // computed name) is reported elsewhere.
+  // A runner's setup and network are its owner's: the step cannot promise either there. What is not known (no such environment or
+  // runner, a computed name) is reported elsewhere.
   const known = environmentOf(node, c.resolver)?.info;
-  if (known?.kind !== "runner") return;
-  for (const key of ["setupScript", "network"] as const)
-    if (node[key] !== undefined)
-      c.report(
-        issue(
-          pointer(path, key),
-          "hosted_only_setting",
-          `${shown(key)} applies to a hosted environment. The environment ${shown(known.name)} runs on a runner, whose setup and network are its owner's. Take it out, or name a hosted environment.`,
-        ),
+  const named = runnerOfStep(node, c.resolver)?.info;
+  const report = (key: string, message: string): void =>
+    c.report(issue(pointer(path, key), "hosted_only_setting", message));
+  for (const key of ["setupScript", "network"] as const) {
+    if (node[key] === undefined) continue;
+    if (named !== undefined && named.revoked !== true) {
+      if (named.kind === "self_hosted")
+        report(
+          key,
+          `${shown(key)} applies to a hosted runner. The runner ${shown(named.name)} is self-hosted, and its setup and network are its owner's. Take it out, or name a hosted runner.`,
+        );
+    } else if (known?.kind === "runner")
+      report(
+        key,
+        `${shown(key)} applies to a hosted environment. The environment ${shown(known.name)} runs on a runner, whose setup and network are its owner's. Take it out, or name a hosted environment.`,
       );
+  }
 }
 
 /**
@@ -911,20 +955,83 @@ function checkNetworkRule(value: unknown, at: string, c: Checker): void {
     );
 }
 
-/** A step with settings of its own has no profile to say where it works: it names its environment (until the runner field of ADR 0007). */
-function checkInlineEnvironment(
+/**
+ * #1105 (ADR 0007, decisions 6 and 14): a step with settings of its own says where it runs by the **id of a concrete runner** (a hosted
+ * runner of one type, such as "Vercel Sandbox 4 vCPU", or a self-hosted one). `environment` stays accepted in release A for documents written
+ * before the runner; a step names one of the two, never both. The id is a literal: where an agent runs is a target (nothing an agent wrote).
+ * A rename of the runner changes no id, so no lane; a runner that was revoked and registered again has a new id.
+ */
+function checkRunner(
   node: Record<string, unknown>,
   path: string,
   c: Checker,
+  use: Omit<Use, "path">,
 ): void {
-  if (!isInlineStep(node) || node.environment !== undefined) return;
-  const names = c.resolver.environments().map((e) => e.name);
+  if (!isInlineStep(node)) return;
+  const at = pointer(path, "runner");
+  if (node.runner === undefined) {
+    if (node.environment !== undefined) return;
+    c.report(
+      issue(
+        at,
+        "runner_required",
+        `A step with settings of its own names the runner it runs on: the id of one of these runners (the "runner" field). Runners: ${runnersListed(c.resolver)}.`,
+        runnerIds(c.resolver),
+      ),
+    );
+    return;
+  }
+  if (node.environment !== undefined)
+    c.report(
+      issue(
+        pointer(path, "environment"),
+        "runner_with_environment",
+        `A step runs in one place: it names a "runner" or an "environment", not both. Take the environment out and keep the runner (an environment is accepted only for steps written before the runner).`,
+      ),
+    );
+  const id = stringField(
+    node,
+    "runner",
+    path,
+    "the id of a runner of the workspace.",
+    c,
+    false,
+  );
+  if (id === undefined) return;
+  const literal = checkLiteral(
+    id,
+    c,
+    { ...use, path: at },
+    "'runner' decides where the agent works, so in version 1 it is a literal: the id of a runner of the workspace. A reference to the trigger or to a result is not taken.",
+    "target_from_untrusted_value",
+  );
+  if (literal === undefined) return;
+  const found = c.resolver.runners?.().find((runner) => runner.id === literal);
+  if (found?.revoked === true) {
+    c.report(
+      issue(
+        at,
+        "runner_unknown",
+        `The runner ${shown(found.name)} was revoked. A runner that is registered again has a new id: name that runner, or another. Runners: ${runnersListed(c.resolver)}.`,
+        runnerIds(c.resolver),
+      ),
+    );
+    return;
+  }
+  if (found !== undefined) return;
+  const byName = (c.resolver.runners?.() ?? []).find(
+    (runner) =>
+      runner.revoked !== true &&
+      runner.name.toLowerCase() === literal.toLowerCase(),
+  );
   c.report(
     issue(
-      pointer(path, "environment"),
-      "environment_required",
-      `A step with settings of its own names the environment it runs in. Environments: ${listNames(names)}.`,
-      names,
+      at,
+      "runner_unknown",
+      byName === undefined
+        ? `There is no runner ${shown(literal)} in this workspace. The step names a runner by its id. Runners: ${runnersListed(c.resolver)}.`
+        : `${shown(literal)} is the name of a runner, and the step names a runner by its id (a rename changes no id): write ${shown(byName.id)}. Runners: ${runnersListed(c.resolver)}.`,
+      runnerIds(c.resolver),
     ),
   );
 }
@@ -1073,6 +1180,64 @@ function checkRunnerRules(
         where,
         "harness_needs_runner",
         `${inline ? "The step" : `The profile ${shown(parseProfileRef(String(node.profile))?.name ?? "")}`} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
+      ),
+    );
+}
+
+/**
+ * #1105 (ADR 0007, "What the validator checks"): the rules a profile and an environment had together, at the runner a step names. A
+ * self-hosted runner works with its owner's own key (`runner_needs_own_key`) and says what it can run (`no_runner_announces`, a warning,
+ * judged over the runner's own announcement and only when it is online); a harness the platform's catalog does not hold exists only on a
+ * self-hosted runner (`harness_needs_runner`). A runner nobody knows is reported by `checkRunner` and not again here.
+ */
+function checkRunnerRulesAtRunner(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const placed = runnerOfStep(node, c.resolver);
+  const known = placed?.info;
+  const facts = factsOf(node, c.resolver);
+  if (
+    placed === undefined ||
+    known === undefined ||
+    known.revoked === true ||
+    facts === undefined
+  )
+    return;
+  const where = pointer(path, "runner");
+  const subject = subjectOf(node);
+  const selfHosted = known.kind === "self_hosted";
+  if (selfHosted && facts.managedModel === true)
+    c.report(
+      issue(
+        where,
+        "runner_needs_own_key",
+        `The runner ${shown(known.name)} is self-hosted and works with the workspace's own key, but ${subject} uses a managed model. Use a model of your own key, or a hosted runner.`,
+      ),
+    );
+  const harness = harnessOfProfile(facts);
+  const online = c.resolver.onlineRunners?.();
+  if (
+    selfHosted &&
+    facts.managedModel !== true &&
+    online !== undefined &&
+    announcedByRunner(online, known.id, demandOfProfile(facts)) ===
+      "not_announced"
+  )
+    c.report(
+      warning(
+        where,
+        "no_runner_announces",
+        `The runner ${shown(known.name)} is online and does not announce what ${subject} asks for (${describeDemand(demandOfProfile(facts))}). The workflow can still be saved; the turn waits until it announces it.`,
+      ),
+    );
+  if (!selfHosted && harnessNeedsRunner(harness))
+    c.report(
+      issue(
+        where,
+        "harness_needs_runner",
+        `${subject.charAt(0).toUpperCase()}${subject.slice(1)} runs with the harness ${shown(harness)}, which exists only on a self-hosted runner. The runner ${shown(known.name)} is a hosted one: name a self-hosted runner.`,
       ),
     );
 }
@@ -1272,6 +1437,18 @@ function checkSession(
           `${shown(target)} runs with the ${what} ${shown(b)}, this step with ${shown(a)}. A session can only go on with the same profile and the same environment.`,
         ),
       );
+  // #1105: and on the same runner, when either step names one: the session's files live on that machine.
+  if (
+    (mine.runner !== undefined || theirs.runner !== undefined) &&
+    mine.runner !== theirs.runner
+  )
+    c.report(
+      issue(
+        at,
+        "session_target_invalid",
+        `${shown(target)} and this step must run on the same runner to share a session: ${theirs.runner === undefined ? "the other names an environment" : `the other runs on ${shown(theirs.runner)}`}, this step ${mine.runner === undefined ? "names an environment" : `on ${shown(mine.runner)}`}. Repeat the runner of ${shown(target)} here.`,
+      ),
+    );
   // #1105: a session also keeps the settings of a step that carries them itself (the turn goes on with those of the session's last turn),
   // so a step that goes on in it repeats them: a `canPush` that differed would be the write token of a step that never asked for it.
   const mineSettings = mine.settings;
@@ -1534,8 +1711,9 @@ function checkAgent(
     reachOf(env, pointer(path, "environment"), state),
   );
   checkProfileEnvironment(node, path, c);
-  checkInlineEnvironment(node, path, c);
+  checkRunner(node, path, c, reachOf(env, pointer(path, "runner"), state));
   checkRunnerRules(node, path, c);
+  checkRunnerRulesAtRunner(node, path, c);
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);
   checkStartBranch(node, path, c, env, state);

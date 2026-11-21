@@ -53,6 +53,19 @@ function fakeRepository(
       return { ok: true, id: "t1", expiresAt: token.expiresAt.toISOString() };
     },
     revoke: async (id) => stored.some((entry) => entry.id === id),
+    rename: async (id, name) => {
+      const found = stored.find((entry) => entry.id === id);
+      if (found === undefined) return "not_found";
+      if (
+        stored.some(
+          (entry) =>
+            entry.id !== id && entry.name.toLowerCase() === name.toLowerCase(),
+        )
+      )
+        return "name_taken";
+      found.name = name;
+      return "renamed";
+    },
   };
 }
 
@@ -183,5 +196,35 @@ describe("the runner fleet service", () => {
     await expect(service.revoke("nope")).rejects.toMatchObject({
       code: "RUNNER_FLEET_NOT_FOUND",
     });
+  });
+
+  // #1105-R20
+  it("renames a runner, keeps its id, and refuses a bad name, a name another runner has (any case) and a runner that is not there", async () => {
+    const stored = [
+      runner(),
+      runner({ id: "r2", name: "DevBox", labels: ["devbox"] }),
+    ];
+    const service = createRunnerFleetService({
+      runners: fakeRepository(stored),
+      settings: () => SETTINGS,
+      now: () => NOW,
+    });
+
+    await expect(service.rename("r1", "  Build box ")).resolves.toBeUndefined();
+    expect(stored.map((entry) => [entry.id, entry.name])).toEqual([
+      ["r1", "Build box"],
+      ["r2", "DevBox"],
+    ]);
+    await expect(service.rename("r1", "devbox")).rejects.toMatchObject({
+      code: "RUNNER_FLEET_NAME_TAKEN",
+    });
+    for (const name of ["", "   ", "x".repeat(81), "a\nb", 5, null])
+      await expect(service.rename("r1", name)).rejects.toMatchObject({
+        code: "RUNNER_FLEET_NAME_INVALID",
+      });
+    for (const id of ["nope", "", "a\u0000b"])
+      await expect(service.rename(id, "Free")).rejects.toMatchObject({
+        code: "RUNNER_FLEET_NOT_FOUND",
+      });
   });
 });

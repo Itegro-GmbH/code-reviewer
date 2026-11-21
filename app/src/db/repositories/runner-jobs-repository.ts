@@ -372,11 +372,13 @@ export type ClaimOptions = {
   acceptsMultiRepo?: boolean;
   /**
    * #854: the claim is a customer's runner's. It takes only the jobs of `workspaceId` whose required labels are all in `labels` (#971: the
-   * labels of a customer's runner never include the reserved namespace `cr:`), and never a job of another kind. Without it the claim is
+   * labels of a customer's runner never include the reserved namespace `cr:`, except the label of its own id, `cr:runner:<runnerId>`,
+   * ADR 0007 decision 10), and never a job of another kind. Without it the claim is
    * the platform identity's: its labels are the reserved ones, so it takes the hosted jobs and never a turn of a runner environment. #856: and whose
    * turn is one an entry of `access` (the entries of the runner's manifest) can run (#973).
    */
   customerRunner?: {
+    runnerId: string;
     workspaceId: string;
     labels: readonly string[];
     access: readonly HarnessAccess[];

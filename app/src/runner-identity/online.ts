@@ -35,6 +35,8 @@ export function statusOf(
 
 /** What the listing of runners gives (`RunnersRepository.list`), as far as this module reads it. */
 export type ListedRunner = {
+  /** #1105: the runner's id, handed on to the validator (a step names its runner by id). */
+  id?: string;
   labels: readonly string[];
   baseVersion: string;
   lastSeenAt: string;
@@ -53,6 +55,7 @@ export async function onlineRunnersOf(
   return (await runners.list())
     .filter((runner) => statusOf(runner, now, settings) === "online")
     .map((runner) => ({
+      ...(runner.id === undefined ? {} : { id: runner.id }),
       labels: runner.labels,
       access: runner.manifest.harnesses,
     }));

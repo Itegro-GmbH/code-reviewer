@@ -17,6 +17,7 @@
 import type { Kysely } from "kysely";
 import { lockWorkspaceCreation } from "../db/workspace-creation-lock.ts";
 import { createInstanceSettingsRepository } from "../db/repositories/instance-settings-repository.ts";
+import { ensureHostedRunners } from "../db/repositories/named-runners-repository.ts";
 import {
   createWorkspacesRepository,
   type Workspace,
@@ -81,6 +82,8 @@ export async function createWorkspaceUnderTenancy(
       createdBy: input.creatorId,
     });
     await workspaces.addMember(workspace.id, input.creatorId, "owner");
+    // #1105 (ADR 0007, decision 16): the hosted runners, one for each type of the provided Vercel Sandbox, from the first moment.
+    await ensureHostedRunners(trx, workspace.id, { now });
     return { ok: true, workspace } as const;
   });
 }

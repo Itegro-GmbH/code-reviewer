@@ -90,6 +90,10 @@ const failureCopy = (
     typeof failure.maximum === "number" && Number.isFinite(failure.maximum)
       ? `The workspace holds ${failure.maximum} registration tokens that nobody used yet. Use one, or wait an hour for them to run out.`
       : "The workspace holds as many unused registration tokens as it may. Use one, or wait an hour for them to run out.",
+  RUNNER_FLEET_NAME_INVALID:
+    "A runner's name is one line of 1 to 80 characters.",
+  RUNNER_FLEET_NAME_TAKEN:
+    "A runner or a hosted runner of this workspace already has this name. Choose another.",
 });
 
 function hasCopy(code: string): code is RunnerFleetErrorCode {

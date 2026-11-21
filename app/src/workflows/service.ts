@@ -7,6 +7,7 @@
 import type { McpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import type { McpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import type { NamedRunnersRepository } from "../db/repositories/named-runners-repository.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type { ProjectsRepository } from "../db/repositories/projects-repository.ts";
@@ -39,7 +40,8 @@ import {
   WORKFLOWS_PER_PROJECT_MAX,
 } from "./limits.ts";
 import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
-import { inlineModelsIn } from "./agent-settings.ts";
+import { isRevoked } from "../named-runners/types.ts";
+import { inlineModelsIn, runnerIdsIn } from "./agent-settings.ts";
 import { isRecord, textLength } from "./json.ts";
 import { mcpServersNamedBy } from "./mcp.ts";
 import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
@@ -53,6 +55,7 @@ import {
 import {
   createResolver,
   type McpServerInfo,
+  type RunnerInfo,
   type WorkflowResolver,
 } from "./resolver.ts";
 import { validateWorkflow, type ValidationResult } from "./validate.ts";
@@ -178,6 +181,11 @@ export type WorkflowServiceDependencies = {
    */
   onlineRunners?: () => Promise<readonly OnlineRunner[]>;
   /**
+   * #1105 (ADR 0007): the concrete runners of the workspace, so a step can name only one of them (`runner_unknown`) and the rules of a
+   * runner are judged at the one it names. Left out: the workspace's runners are not known, and a step that names one is refused.
+   */
+  runners?: Pick<NamedRunnersRepository, "list" | "find">;
+  /**
    * #1105: the rule of the Implementer form for a model, as the claim applies it, so the model of a step with settings of its own is held to
    * what a profile's model is held to when it is saved (`model_not_allowed`). Left out: such a model is not checked against the workspace.
    */
@@ -224,6 +232,38 @@ async function mcpServerInfos(
   }));
 }
 
+/** The most distinct runner ids of a document that are looked up one by one (a revoked runner is no part of the list). */
+const RUNNER_LOOKUPS_MAX = STEPS_MAX + 1;
+
+/**
+ * The runners of the workspace as the validator sees them: the list (hosted runners, then the self-hosted ones that are not revoked), and
+ * a revoked runner the document names (found by its id, so the answer is "revoked" and not "unknown").
+ */
+async function runnerInfos(
+  runners: Pick<NamedRunnersRepository, "list" | "find">,
+  document: unknown,
+): Promise<RunnerInfo[]> {
+  const listed = await runners.list();
+  const known = new Set(listed.map((runner) => runner.id));
+  const infos: RunnerInfo[] = listed.map((runner) => ({
+    id: runner.id,
+    name: runner.name,
+    kind: runner.kind,
+  }));
+  for (const id of runnerIdsIn(document, RUNNER_LOOKUPS_MAX)) {
+    if (known.has(id)) continue;
+    const found = await runners.find(id);
+    if (found !== undefined && isRevoked(found))
+      infos.push({
+        id: found.id,
+        name: found.name,
+        kind: found.kind,
+        revoked: true,
+      });
+  }
+  return infos;
+}
+
 export function createWorkflowService({
   workflows,
   projects,
@@ -232,6 +272,7 @@ export function createWorkflowService({
   mcpServers,
   mcpOAuth,
   onlineRunners,
+  runners,
   models,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
   archivedMax = ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
@@ -273,6 +314,9 @@ export function createWorkflowService({
       ...(onlineRunners === undefined
         ? {}
         : { onlineRunners: await onlineRunners() }),
+      ...(runners === undefined
+        ? {}
+        : { runners: await runnerInfos(runners, body) }),
     });
   }
 

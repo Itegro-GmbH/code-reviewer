@@ -125,6 +125,8 @@ const STEP_FAILURE_TEXT: Record<
     "The profile of the step no longer exists, is archived, or has no such version.",
   agent_settings_invalid:
     "The settings written in the step (model, canPush, harness, instructions, setup script or network rule) cannot be used.",
+  runner_not_found:
+    "The runner of the step is not one of the workspace any more, or it was revoked. Save a new version of the lane that names a runner that exists.",
   environment_not_found: "The environment of the step does not exist.",
   environment_mismatch:
     "The step names another environment than its profile runs in.",

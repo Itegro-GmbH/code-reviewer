@@ -24,6 +24,8 @@ import {
 import type { Integration, RepoRef } from "../integrations/types.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { isEnvironmentVcpus } from "./environments/limits.ts";
+import { isRevoked, type NamedRunner } from "../named-runners/types.ts";
+import { runnerLabel } from "../runner-identity/labels.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import { readStoredResultSchema } from "./agent-result.ts";
 import type { ResultSchema } from "../workflows/result-schema.ts";
@@ -166,6 +168,52 @@ export async function copyEnvironment(
       vcpus: found.vcpus,
       setupScript: found.setupScript,
       network: found.network,
+    },
+    runnerEnvironment: null,
+  };
+}
+
+/**
+ * #1105 (ADR 0007): the concrete runner of a lane step as a turn copies it. A hosted runner is the copy of a hosted environment with the
+ * size of its type (the step's script and network rule replace the empty ones, and the caller does that); a self-hosted runner is a runner
+ * copy that holds exactly the label `cr:runner:<id>`, which only that runner's credential carries (decision 10), so the job is its alone. A
+ * self-hosted runner works with its owner's own key: a managed `model` is refused here, before a turn, a job or a charge exists. A runner
+ * that was revoked is refused like one that is gone.
+ */
+export function copyRunner(
+  runner: NamedRunner,
+  model: ModelChoice,
+): {
+  environment: TurnEnvironment | null;
+  runnerEnvironment: TurnRunnerEnvironment | null;
+} {
+  if (isRevoked(runner))
+    throw new ImplementerError(
+      "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
+      "There is no such runner in this workspace.",
+    );
+  if (runner.kind === "self_hosted") {
+    requireOwnKey(model);
+    return {
+      environment: null,
+      runnerEnvironment: {
+        id: runner.id,
+        name: runner.name,
+        labels: [runnerLabel(runner.id)],
+      },
+    };
+  }
+  if (!isEnvironmentVcpus(runner.vcpus))
+    throw new ImplementerError(
+      "IMPLEMENTER_ENVIRONMENT_SIZE_UNSUPPORTED",
+      "The size of this runner is no longer offered.",
+    );
+  return {
+    environment: {
+      id: runner.id,
+      name: runner.name,
+      vcpus: runner.vcpus,
+      setupScript: "",
     },
     runnerEnvironment: null,
   };
