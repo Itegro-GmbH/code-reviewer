@@ -129,6 +129,86 @@ describe("the workspace settings sub-pages", () => {
   });
 });
 
+describe("a page of Setup below the settings address (#1108)", () => {
+  const llm = (setup: boolean) => (
+    <LlmSettingsPageContent
+      product={PRODUCT}
+      workspaceSlug="acme"
+      canManage
+      keyStatuses={[
+        { provider: "openrouter", status: { state: "not_configured" } },
+      ]}
+      summary={{ configured: false, reason: "no_key" }}
+      setup={setup}
+    />
+  );
+
+  // #1108
+  it("has the title of its sidebar link, Setup as its breadcrumb root and no settings tabs", () => {
+    render(llm(true));
+
+    expect(
+      screen.getByRole("heading", { level: 1, name: "LLM keys" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("navigation", { name: "Settings sections" }),
+    ).toBeNull();
+    const trail = screen.getByRole("navigation", { name: "breadcrumb" });
+    expect(within(trail).getByText("Setup")).toBeTruthy();
+    expect(within(trail).queryByRole("link", { name: "Settings" })).toBeNull();
+    expect(
+      within(trail).getByText("LLM keys").getAttribute("aria-current"),
+    ).toBe("page");
+  });
+
+  // #1108: code-review.com renders this page as it always did
+  it("is the settings page called LLM, with its tabs, where it is not a place of Setup", () => {
+    render(llm(false));
+
+    expect(screen.getByRole("heading", { level: 1, name: "LLM" })).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Settings sections" }),
+    ).toBeTruthy();
+    const trail = screen.getByRole("navigation", { name: "breadcrumb" });
+    expect(within(trail).getByRole("link", { name: "Settings" })).toBeTruthy();
+  });
+});
+
+describe("the review defaults page, read only (#1108)", () => {
+  const defaults = (props: { canEdit?: boolean; readOnlyNote?: string }) => (
+    <GlobalSettingsPageContent
+      product={PRODUCT}
+      workspaceSlug="acme"
+      data={GLOBAL_DATA}
+      {...props}
+    />
+  );
+
+  // #1108: the factory shows the defaults and an AI sets them through the API
+  it("shows the note in place of Save, and offers neither a reset of the defaults nor a change", () => {
+    render(
+      defaults({
+        canEdit: false,
+        readOnlyNote: "An AI sets these through the API.",
+      }),
+    );
+
+    expect(screen.getByText("An AI sets these through the API.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Save/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Reset every default/ }),
+    ).toBeNull();
+  });
+
+  // #1108: the guard of code-review.com
+  it("keeps Save and no note where the person may edit", () => {
+    render(defaults({ canEdit: true }));
+
+    expect(screen.getByRole("button", { name: /Save/ })).toBeTruthy();
+    expect(screen.queryByText("An AI sets these through the API.")).toBeNull();
+  });
+});
+
 describe("the review defaults page (#656)", () => {
   // #656-T06
   it("has the same sections as a project: Review, LLM, Trigger and Limits, with the kind and verdict as defaults and no skill", () => {

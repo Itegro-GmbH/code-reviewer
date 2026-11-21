@@ -33,6 +33,7 @@ export function GlobalSettingsPageContent({
   product,
   workspaceSlug,
   canEdit = true,
+  readOnlyNote,
   showPlan = false,
   showBilling = false,
   billingOn = true,
@@ -47,6 +48,8 @@ export function GlobalSettingsPageContent({
   workspaceSlug: string;
   /** Whether the person may change the defaults (an Admin or an Owner). */
   canEdit?: boolean;
+  /** What the form says while it is read only (the default tells it is the role). */
+  readOnlyNote?: string;
   /** The workspace has entitlements (#282): the settings navigation lists the Plan page. */
   showPlan?: boolean;
   /** Billing is on (#505): the settings navigation lists the Billing page instead of the Plan page. */
@@ -90,6 +93,7 @@ export function GlobalSettingsPageContent({
           product={product}
           workspaceSlug={workspaceSlug}
           readOnly={!canEdit}
+          {...(readOnlyNote === undefined ? {} : { readOnlyNote })}
           dynamicReviewEnabled={data.dynamicReviewEnabled}
           billingOn={billingOn}
           initial={data.model}

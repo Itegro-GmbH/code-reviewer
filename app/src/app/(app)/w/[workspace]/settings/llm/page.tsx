@@ -2,6 +2,7 @@
 
 import { getProductIdentity } from "@/product-identity/current";
 import type { Metadata } from "next";
+import { getCapabilities } from "@/capabilities/shared";
 import { instanceAccessOf } from "@/llm/access";
 import { getLlmKeyModeService } from "@/llm/key-mode-shared";
 import { getWorkspaceLlm } from "@/llm/shared";
@@ -12,7 +13,13 @@ import { planPageLinkedFor } from "@/usage/shared";
 import { requireWorkspace } from "@/workspaces/access-runtime";
 import { can } from "@/workspaces/permissions";
 
-export const metadata: Metadata = { title: "Settings · LLM" };
+export function generateMetadata(): Metadata {
+  return {
+    title: getCapabilities().has("implementer")
+      ? "Setup · LLM keys"
+      : "Settings · LLM",
+  };
+}
 
 // The LLM access of the workspace (#178): the provider and the write-only key on one form (an Admin or
 // an Owner), with "Save key" and "Test key"; a Member only reads whether reviews have a key. Removing
@@ -102,6 +109,8 @@ async function LlmSettingsContent({
       {...(keyChoice === undefined ? {} : { keyChoice })}
       showPlan={showPlan}
       showBilling={showBilling}
+      // In the factory the LLM keys are a place of Setup, not of the settings (#1108); code-review.com keeps its settings page.
+      setup={getCapabilities().has("implementer")}
     />
   );
 }

@@ -1601,7 +1601,7 @@ first ran into it).
 > do not list, count, change or delete it. Environments stay accepted for a step in release A, and for tasks started by hand; both go in release B (decisions 11, 15 and 16).
 
 An environment is a start configuration for a task: a **name**, a **size**, a **setup script** and (step 7) a **network** setting. They are kept per workspace on
-the page `/w/<slug>/environments` (navigation entry "Environments", between Implementer and Runs; only in a deployment with the
+the page `/w/<slug>/environments` (no navigation entry since #1108: the navigation of the factory has no place for environments, ADR 0007; the page and its routes stay until release B; only in a deployment with the
 capability `implementer`, anywhere else the path is a 404 like an unknown one).
 
 - **Who:** every member sees the list and the scripts, because every member may use one. Owners and Admins create, change and

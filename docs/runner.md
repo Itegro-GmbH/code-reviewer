@@ -147,14 +147,17 @@ A **runner** is whatever runs an agent turn, and a step names one by its id. Two
   workspace's lock and checks both tables). A registration with a name that is taken is `400 RUNNER_REQUEST_INVALID` with `fields: [{"field": "name", "code": "invalid"}]` and the
   token is **not** used, so it registers again with another name; a DevBox that was revoked registers again under its name, as a **new id**. Existing duplicates were made unique
   by the migration (the oldest keeps its name, a later one gets ` (` and the first eight characters of its id `)`). **A runner can be renamed** (`RunnerFleetService.rename`, name
-  rules of the registration): lanes store the id, so a rename changes no lane. (The route and the page that call it are part of the Setup of #1108.)
+  rules of the registration): lanes store the id, so a rename changes no lane. (No route or Setup page calls it yet: #1116.)
 - A **hosted runner** is one **type** of the provided Vercel Sandbox: a row of `implementer_environments` of the kind `hosted` that has a `concurrency`, one for each size
   an environment may name (`environmentVcpus` of `contracts/environment-sizes.v1.json`: **2, 4, 6 and 8 vCPU**; 1 vCPU is a size of the platform that leaves the agent no memory),
   named "Vercel Sandbox 4 vCPU" and so on, in **every workspace**: the migration made them for the workspaces that exist, and the creation of a workspace (the three places that
   make one) makes them for a new one. The **size is fixed per type** (a database index holds one hosted runner for each type and workspace); only the `concurrency` is set
   (`HOSTED_RUNNER_DEFAULT_CONCURRENCY`, a whole number from 1 to 100 set by the operator, 2 when it is not set, is what the first rows get). A hosted runner is not an environment
   of a person: the environments page and its routes do not list it, count it, change it or delete it. A name that a person's environment or a runner already had is not taken from
-  it: the hosted runner then is "Vercel Sandbox 4 vCPU (hosted)".
+  it: the hosted runner then is "Vercel Sandbox 4 vCPU (hosted)" (or "(hosted 2)" and so on). **The hosted runners repair themselves**: reading a workspace's runners
+  (`NamedRunnersRepository.list`, which the validator and the Setup page use) makes a missing type again under the workspace's lock, so a type that the release that was still
+  running during a rollout deleted, or a workspace it made, is whole again at the next read (a made-again type has a new id, so a step that named the old id is `runner_unknown`
+  at the next save). The `concurrency` is stored from #1114 and enforced in the claim from #1115; setting it has no route yet (#1116).
 
 **The label.** The claim of a customer's runner has the labels it announced (never one in `cr:`) **and `cr:runner:<its own id>`**, taken from the credential's row (`customer.runner.id`),
 never from what the runner announced. A runner that announces a `cr:` label is still refused at registration (`RUNNER_LABEL_RESERVED`); the one exception to "only the platform identity

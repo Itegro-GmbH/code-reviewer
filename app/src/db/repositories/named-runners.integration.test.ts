@@ -215,6 +215,85 @@ describe("the hosted runners of a workspace", () => {
     ]);
   });
 
+  // #1114-review-1
+  it("repair themselves where they are read: a type the previous release deleted, or a workspace it made, is made again, once, under concurrent reads", async () => {
+    const { db, idA, named } = await setup();
+    // The previous release has no `concurrency` filter: through its environments it could delete a hosted runner.
+    const deleted = await sql<{
+      id: string;
+    }>`delete from implementer_environments
+      where workspace_id = ${idA} and vcpus = 4 and concurrency is not null returning id`.execute(
+      db,
+    );
+    expect(deleted.rows).toHaveLength(1);
+    // And a workspace it made after the migration has none at all.
+    const late = await addWorkspace(db, "late");
+
+    const [first, second] = await Promise.all([named.list(), named.list()]);
+    const lateList = await createNamedRunnersRepository(db, late).list();
+
+    for (const list of [first, second])
+      expect(
+        list.filter((entry) => entry.kind === "hosted").map((e) => e.name),
+      ).toEqual([
+        "Vercel Sandbox 2 vCPU",
+        "Vercel Sandbox 4 vCPU",
+        "Vercel Sandbox 6 vCPU",
+        "Vercel Sandbox 8 vCPU",
+      ]);
+    expect(lateList.map((entry) => entry.name)).toEqual([
+      "Vercel Sandbox 2 vCPU",
+      "Vercel Sandbox 4 vCPU",
+      "Vercel Sandbox 6 vCPU",
+      "Vercel Sandbox 8 vCPU",
+    ]);
+    const rows = await db
+      .selectFrom("implementer_environments")
+      .select(["workspace_id", "vcpus"])
+      .where("concurrency", "is not", null)
+      .execute();
+    expect(rows.filter((row) => row.workspace_id === idA)).toHaveLength(4);
+    expect(rows.filter((row) => row.workspace_id === late)).toHaveLength(4);
+    // The old id is gone for good (decision 14): a step that named it is `runner_unknown` at the next save.
+    expect(await named.find(deleted.rows[0]?.id ?? "")).toBeUndefined();
+  });
+
+  // #1114-review-2
+  it(
+    "find a free name when " +
+      '"(hosted)"' +
+      ` is taken too, and a clash of names is never swallowed as "the type exists"`,
+    async () => {
+      const { db, options } = await setup();
+      const fresh = await addWorkspace(db, "fresh");
+      const environments = createImplementerEnvironmentsRepository(
+        db,
+        fresh,
+        options,
+      );
+      for (const name of [
+        "Vercel Sandbox 4 vCPU",
+        "Vercel Sandbox 4 vCPU (hosted)",
+      ])
+        await environments.create(
+          { name, vcpus: 4, setupScript: "x", createdBy: "u-1" },
+          50,
+        );
+
+      await ensureHostedRunners(db, fresh, options);
+
+      const names = (await createNamedRunnersRepository(db, fresh).list()).map(
+        (entry) => entry.name,
+      );
+      expect(names).toEqual([
+        "Vercel Sandbox 2 vCPU",
+        "Vercel Sandbox 4 vCPU (hosted 2)",
+        "Vercel Sandbox 6 vCPU",
+        "Vercel Sandbox 8 vCPU",
+      ]);
+    },
+  );
+
   // #1105-R75
   it("have a concurrency that is set within bounds, for a hosted runner of the workspace only", async () => {
     const { named, namedB } = await setup();
@@ -261,6 +340,39 @@ describe("the names of the runners of a workspace", () => {
         createRunnersRepository(s.db, s.idB, s.options),
       ),
     ).toMatchObject({ ok: true });
+  });
+
+  // #1114-review-7
+  it("are taken by one of two registrations at the same time, and by one of a registration and a rename", async () => {
+    const s = await setup();
+    const hashes = ["race-1", "race-2", "race-3"];
+    for (const hash of hashes)
+      await s.runners.createToken(
+        {
+          tokenHash: hash,
+          createdBy: "u-1",
+          expiresAt: new Date("2026-11-21T11:00:00.000Z"),
+        },
+        20,
+      );
+
+    const both = await Promise.all([
+      s.credentials.redeem("race-1", runner("cred-r1", "Racer")),
+      s.credentials.redeem("race-2", runner("cred-r2", "racer")),
+    ]);
+
+    expect(both.filter((result) => result.ok)).toHaveLength(1);
+    expect(both.filter((result) => !result.ok)).toEqual([
+      { ok: false, reason: "name_taken" },
+    ]);
+    // A rename to "Taken" and a registration of "taken" at the same time: one wins.
+    const other = await register(s, "Other");
+    if (!other.ok) throw new Error("not registered");
+    const [renamed, registered] = await Promise.all([
+      s.runners.rename(other.runner.id, "Taken"),
+      s.credentials.redeem("race-3", runner("cred-r3", "taken")),
+    ]);
+    expect((renamed === "renamed" ? 1 : 0) + (registered.ok ? 1 : 0)).toBe(1);
   });
 
   // #1105-R77

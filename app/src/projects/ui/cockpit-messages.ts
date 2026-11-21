@@ -99,7 +99,7 @@ export type CockpitTab = (typeof COCKPIT_TABS)[number]["segment"];
 
 export const LANES_COPY = {
   title: "Lanes",
-  hint: "The flows that run on this project. A lane belongs to the project and works on its tickets, in its repository.",
+  hint: "The flows that run on this project, read only: open a lane to start it or to follow its runs. An AI changes a lane through the API.",
   emptyTitle: "No lanes yet",
   emptyDescription:
     "A new project copies the built-in lanes it is asked to; others are written through the API with the project's id (docs/workflows.md).",
@@ -107,7 +107,7 @@ export const LANES_COPY = {
   noteJira:
     "A lane starts when a ticket of this project's Jira project moves into the status the lane waits for, or by hand with a ticket of it (jira:owner/repo#PROJ-12).",
   taskNote:
-    "Until a lane can be started from an issue, a task goes to the agent by hand:",
+    "Until the one-off lane replaces it, a task that belongs to no lane still goes to the agent by hand:",
   taskLink: "send a task",
   name: "Lane",
   version: "Version",

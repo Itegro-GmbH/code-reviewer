@@ -298,8 +298,8 @@ test.describe("the pages of the factory", () => {
     ).toBeVisible();
   });
 
-  // #951
-  test("@smoke Profiles, Runners, MCP and Settings open from the sidebar", async ({
+  // #951, #1108
+  test("@smoke the sidebar is the control panel, Setup and Settings, and the Setup places open", async ({
     page,
   }) => {
     await signInAsFactoryAdmin(page);
@@ -309,35 +309,84 @@ test.describe("the pages of the factory", () => {
       /^ToDos/,
       "Projects",
       "Runs",
-      "Profiles",
+      "GitHub and Jira",
+      "MCP servers",
       "Runners",
-      "MCP",
+      "LLM keys",
       "Settings",
     ]);
+    // Nothing to configure by hand: no Profiles, no Environments.
+    await expect(nav.getByRole("link", { name: "Profiles" })).toHaveCount(0);
+    await expect(nav.getByRole("link", { name: "Environments" })).toHaveCount(
+      0,
+    );
 
-    await nav.getByRole("link", { name: "Profiles" }).click();
+    // The pages of Setup have the title of their sidebar link and none of the tabs of the settings (#1108).
+    const settingsTabs = page.getByRole("navigation", {
+      name: "Settings sections",
+    });
+    await nav.getByRole("link", { name: "GitHub and Jira" }).click();
     await expect(
-      page.getByRole("heading", { level: 1, name: "Profiles" }),
+      page.getByRole("heading", { level: 1, name: "GitHub and Jira" }),
     ).toBeVisible();
+    await expect(
+      nav.getByRole("link", { name: "GitHub and Jira" }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(
+      nav.getByRole("link", { name: "Settings" }),
+    ).not.toHaveAttribute("aria-current", "page");
+    await expect(settingsTabs).toHaveCount(0);
     await nav.getByRole("link", { name: "Runners" }).click();
     await expect(
       page.getByRole("heading", { level: 1, name: "Runners" }),
     ).toBeVisible();
     // #1050: the MCP servers of the workspace.
-    await nav.getByRole("link", { name: "MCP" }).click();
+    await nav.getByRole("link", { name: "MCP servers" }).click();
     await expect(
-      page.getByRole("heading", { level: 1, name: "MCP" }),
+      page.getByRole("heading", { level: 1, name: "MCP servers" }),
     ).toBeVisible();
     await expect(page.getByText("No MCP server yet")).toBeVisible();
+    await nav.getByRole("link", { name: "LLM keys" }).click();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "LLM keys" }),
+    ).toBeVisible();
+    await expect(nav.getByRole("link", { name: "LLM keys" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await expect(settingsTabs).toHaveCount(0);
+    // The groups of the sidebar are named for assistive technology.
+    await expect(
+      nav.getByRole("group", { name: "Setup" }).getByRole("link"),
+    ).toHaveCount(4);
+
+    // Settings is the workspace itself: General (with its pages) and Members, and no Integrations tab any more.
     await nav.getByRole("link", { name: "Settings" }).click();
-    const sections = page.getByRole("navigation", {
-      name: "Settings sections",
-    });
-    for (const name of ["Integrations", "Members"]) {
-      await sections.getByRole("link", { name, exact: true }).click();
-      await expect(
-        sections.getByRole("link", { name, exact: true }),
-      ).toHaveAttribute("aria-current", "page");
-    }
+    await expect(
+      page.getByRole("heading", { level: 1, name: "General" }),
+    ).toBeVisible();
+    await expect(settingsTabs.getByRole("link")).toHaveText([
+      "General",
+      "Members",
+    ]);
+    await settingsTabs
+      .getByRole("link", { name: "Members", exact: true })
+      .click();
+    await expect(
+      settingsTabs.getByRole("link", { name: "Members", exact: true }),
+    ).toHaveAttribute("aria-current", "page");
+    await settingsTabs
+      .getByRole("link", { name: "General", exact: true })
+      .click();
+    // Review defaults is a page of General and read only: an AI sets it through the API, so there is nothing to save.
+    await page
+      .getByRole("navigation", { name: "General pages" })
+      .getByRole("link", { name: "Review defaults", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Review defaults" }),
+    ).toBeVisible();
+    await expect(page.getByText(/set through the API/)).toBeVisible();
+    await expect(page.getByRole("button", { name: /Save/ })).toHaveCount(0);
   });
 });

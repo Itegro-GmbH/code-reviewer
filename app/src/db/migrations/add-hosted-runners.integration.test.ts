@@ -256,6 +256,94 @@ describe("the hosted runners migration", () => {
   });
 });
 
+describe("the hosted runners migration on awkward names", () => {
+  // #1114-review-2
+  it(
+    "finds a free name for a hosted runner when " +
+      '"(hosted)"' +
+      " is taken too, so one workspace cannot fail the batch of all",
+    async () => {
+      const { db } = await createEmptyTestDatabase();
+      await migrateToLatest(
+        db,
+        upTo((name) => name < THIS),
+      );
+      await sql`insert into users (id, name, email, email_verified, created_at, updated_at)
+      values ('u-1', 'A', 'a@example.com', 1, ${T}, ${T})`.execute(db);
+      for (const [id, slug] of [
+        ["w-1", "acme"],
+        ["w-2", "beta"],
+      ] as const)
+        await sql`insert into workspaces (id, name, slug, created_by, created_at)
+        values (${id}, ${slug}, ${slug}, 'u-1', ${T})`.execute(db);
+      let n = 0;
+      for (const name of [
+        "Vercel Sandbox 4 vCPU",
+        "Vercel Sandbox 4 vCPU (hosted)",
+      ])
+        await sql`insert into implementer_environments (id, workspace_id, name, vcpus, setup_script, created_by, created_at, updated_at)
+        values (${`env-${String((n += 1))}`}, 'w-1', ${name}, 4, '', 'u-1', ${T}, ${T})`.execute(
+          db,
+        );
+
+      await migrateToLatest(
+        db,
+        upTo((name) => name <= THIS),
+      );
+
+      const hosted = await db
+        .selectFrom("implementer_environments")
+        .select(["workspace_id", "name", "vcpus"])
+        .where("concurrency", "is not", null)
+        .orderBy("workspace_id")
+        .orderBy("vcpus")
+        .execute();
+      expect(hosted).toHaveLength(8);
+      expect(
+        hosted.filter((row) => row.vcpus === 4).map((row) => row.name),
+      ).toEqual([
+        "Vercel Sandbox 4 vCPU (hosted w-1)",
+        "Vercel Sandbox 4 vCPU",
+      ]);
+    },
+  );
+
+  // #1114-review-7
+  it("makes runners with long names that are the same up to the cut unique too", async () => {
+    const { db } = await createEmptyTestDatabase();
+    await migrateToLatest(
+      db,
+      upTo((name) => name < THIS),
+    );
+    await sql`insert into users (id, name, email, email_verified, created_at, updated_at)
+      values ('u-1', 'A', 'a@example.com', 1, ${T}, ${T})`.execute(db);
+    await sql`insert into workspaces (id, name, slug, created_by, created_at)
+      values ('w-1', 'acme', 'acme', 'u-1', ${T})`.execute(db);
+    const long = "x".repeat(80);
+    for (const [index, id] of [
+      "run-aaaa1111",
+      "run-bbbb2222",
+      "run-cccc3333",
+    ].entries())
+      await sql`insert into runners (id, workspace_id, name, labels, base_version, manifest, limits, credential_hash, created_at, last_seen_at)
+        values (${id}, 'w-1', ${long}, '', '1.0.0', '{}', '{}', ${`hash-${id}`}, ${`2026-11-0${String(index + 1)}T00:00:00.000Z`}, ${T})`.execute(
+        db,
+      );
+
+    await migrateToLatest(
+      db,
+      upTo((name) => name <= THIS),
+    );
+
+    const names = (
+      await db.selectFrom("runners").select("name").orderBy("id").execute()
+    ).map((row) => row.name);
+    expect(new Set(names.map((name) => name.toLowerCase())).size).toBe(3);
+    expect(names[0]).toBe(long);
+    for (const name of names) expect(name.length).toBeLessThanOrEqual(80);
+  });
+});
+
 describe("the frozen rules of the hosted runners migration", () => {
   // #1105-M05
   it("are what the application knows today: the sizes, the names and the default concurrency", () => {
