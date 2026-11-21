@@ -1689,3 +1689,86 @@ describe("the continuation mode of an implementer run (#841)", () => {
     expect(viewOf("imported")).toBeNull();
   });
 });
+
+describe("the wait of a turn for a runner a step named (#1105)", () => {
+  // #1105-R140
+  it("says it waits for the runner by its name, and shows no label for it; a turn of an environment keeps its labels", () => {
+    const queued = turn({ status: "queued", finishedAt: null });
+    const named = view(
+      queued,
+      source({
+        runner: { name: "DevBox", labels: ["cr:runner:abc-123"] },
+      }),
+    ).implementer;
+    expect(named?.waitingForRunner).toBe("Waiting for the runner DevBox");
+    expect(named?.runner).toEqual({ name: "DevBox", labels: [] });
+
+    const labelled = view(
+      queued,
+      source({ runner: { name: "GPU box", labels: ["gpu", "linux"] } }),
+    ).implementer;
+    expect(labelled?.waitingForRunner).toBe(
+      "Waiting for a runner with labels gpu, linux",
+    );
+    expect(labelled?.runner).toEqual({
+      name: "GPU box",
+      labels: ["gpu", "linux"],
+    });
+  });
+});
+
+describe("why a queued turn waits for its runner (#1105, decision 13)", () => {
+  const queued = () => turn({ status: "queued", finishedAt: null });
+  const textOf = (wait: ImplementerDetailSource["wait"]) =>
+    view(queued(), source({ wait })).implementer?.waitingForRunner;
+
+  // #1105-review-2
+  it("names the full hosted runner, how many of its places are in use, and says a cancel is the way out", () => {
+    expect(
+      textOf({
+        kind: "hosted",
+        name: "Vercel Sandbox 4 vCPU",
+        running: 2,
+        limit: 2,
+      }),
+    ).toBe(
+      "Waiting for a free place on Vercel Sandbox 4 vCPU (2 of 2 in use). The run starts when a place is free; cancel it to stop waiting.",
+    );
+  });
+
+  it("tells a busy self-hosted runner (no deadline) from an offline one and one that cannot take the step (both end after the deadline)", () => {
+    const base = {
+      kind: "self_hosted",
+      name: "DevBox",
+      running: 3,
+      limit: 3,
+      deadlineMinutes: 30,
+    } as const;
+    expect(textOf({ ...base, state: "busy" })).toBe(
+      "Waiting for a free place on the runner DevBox (3 of 3 in use). The run starts when a place is free; cancel it to stop waiting.",
+    );
+    expect(textOf({ ...base, state: "offline" })).toContain(
+      "offline or revoked",
+    );
+    expect(textOf({ ...base, state: "offline" })).toContain("30 minutes");
+    expect(textOf({ ...base, state: "cannot_serve" })).toContain(
+      "cannot take this step",
+    );
+    expect(textOf({ ...base, state: "ready" })).toBe(
+      "Waiting for the runner DevBox",
+    );
+  });
+
+  it("says nothing once the turn is no longer queued, and cleans an untrusted runner name", () => {
+    const running = view(
+      turn({ status: "running", finishedAt: null }),
+      source({
+        wait: { kind: "hosted", name: "x", running: 1, limit: 1 },
+      }),
+    ).implementer;
+    expect(running?.waitingForRunner).toBeNull();
+    expect(
+      textOf({ kind: "hosted", name: "Box\u0007\u202e", running: 1, limit: 1 }),
+    ).toContain("Waiting for a free place on Box (1 of 1 in use)");
+  });
+});

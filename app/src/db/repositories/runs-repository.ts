@@ -9,6 +9,8 @@
 // by every open tab.
 import { parseSessionRepos } from "../session-repos.ts";
 import { labelsFromText } from "../../runner-identity/announcement.ts";
+import { runnerIdOfLabel } from "../../runner-identity/labels.ts";
+import { hostedWaitOf, selfHostedWaitOf } from "../runner-wait.ts";
 import "server-only";
 import type { Kysely } from "kysely";
 import type { JobStatus } from "../job-status.ts";
@@ -130,9 +132,25 @@ function shownBranch(branch: string, repos: string | null): string {
   return parseSessionRepos(repos)?.[0]?.branch ?? branch;
 }
 
+/** The wait of a queued turn whose runner copy holds exactly `cr:runner:<id>` (a step that named a self-hosted runner); null for any other. */
+async function selfHostedWait(
+  db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  labelsText: string | null,
+  jobId: string,
+  at: Date,
+) {
+  const labels = labelsFromText(labelsText ?? "");
+  const [only] = labels;
+  const runnerId = only === undefined ? undefined : runnerIdOfLabel(only);
+  if (labels.length !== 1 || runnerId === undefined) return null;
+  return selfHostedWaitOf(db, workspaceId, runnerId, jobId, at);
+}
+
 export function createRunsRepository(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
+  now: () => Date = () => new Date(),
 ): RunsRepository {
   return {
     async list(filter) {
@@ -271,6 +289,7 @@ export function createRunsRepository(
           "implementer_turns.environment_network_hosts as turn_environment_network_hosts",
           "implementer_turns.environment_kind as turn_environment_kind",
           "implementer_turns.environment_labels as turn_environment_labels",
+          "implementer_turns.environment_id as turn_environment_id",
           "usage_records.key_mode as key_mode",
           "usage_records.catalog_entry_id as catalog_entry_id",
           "usage_records.model_tier as model_tier",
@@ -300,8 +319,24 @@ export function createRunsRepository(
         turn_environment_network_hosts: networkHosts,
         turn_environment_kind: environmentKind,
         turn_environment_labels: environmentLabels,
+        turn_environment_id: environmentId,
         ...job
       } = row;
+      // #1105 (decision 13): why a queued turn waits for its runner (a hosted runner's free place, a named runner's state).
+      const wait =
+        job.status !== "queued" || environmentId === null
+          ? null
+          : environmentKind === null
+            ? await hostedWaitOf(db, workspaceId, environmentId)
+            : environmentKind === "runner"
+              ? await selfHostedWait(
+                  db,
+                  workspaceId,
+                  environmentLabels,
+                  id,
+                  now(),
+                )
+              : null;
       const branch =
         storedBranch === null ? null : shownBranch(storedBranch, sessionRepos);
       return {
@@ -339,6 +374,7 @@ export function createRunsRepository(
                         labels: labelsFromText(environmentLabels),
                       }
                     : null,
+                wait,
                 // #818: the environment the turn copied; none for a task without one.
                 environment:
                   environmentName === null || environmentVcpus === null
