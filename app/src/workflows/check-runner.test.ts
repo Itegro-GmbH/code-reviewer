@@ -163,7 +163,7 @@ describe("the runner of an agent step (#1105)", () => {
     expect(codes(lane(step({ ...extras, runner: DEVBOX.id })))).toEqual([]);
   });
 
-  // #1126-V03
+  // #1126-V05
   it("refuses a suffix entry on a domain anybody can get a subdomain of, for the harness whose login lives in the container", () => {
     const claude = { harness: "claude-code", model: LOGIN, runner: DEVBOX.id };
     expect(
