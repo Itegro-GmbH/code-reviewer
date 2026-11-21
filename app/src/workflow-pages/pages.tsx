@@ -325,8 +325,10 @@ export async function loadRunPage(
   deps: {
     workflows: Pick<WorkflowService, "get">;
     runs: Pick<WorkflowRunService, "get">;
-    /** The runners of the workspace, for their names. Left out: the page shows the ids. */
-    runners?: { list(): Promise<readonly { id: string; name: string }[]> };
+    /** The runners of the workspace, looked up by id for their names. Left out: the page shows the ids. */
+    runners?: {
+      find(id: string): Promise<{ id: string; name: string } | undefined>;
+    };
   },
 ): Promise<RunPageData> {
   const found = await orNotFound(async () => ({
@@ -347,13 +349,41 @@ export async function loadRunPage(
     workflow: { id: found.workflow.id, name: found.workflow.name },
     run: found.run,
     document,
-    runnerNames: Object.fromEntries(
-      ((await deps.runners?.list()) ?? []).map((runner) => [
-        runner.id,
-        runner.name,
-      ]),
-    ),
+    runnerNames: await runnerNamesOf(document, deps.runners),
   };
+}
+
+/** The ids of the runners the agent steps of a lane document name (steps are found at any depth: loops, branches, pre-steps). */
+function runnerIdsIn(
+  value: unknown,
+  ids: Set<string> = new Set(),
+): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) runnerIdsIn(item, ids);
+    return ids;
+  }
+  if (!isRecord(value)) return ids;
+  if (value.kind === "agent" && typeof value.runner === "string")
+    ids.add(value.runner);
+  for (const child of Object.values(value)) runnerIdsIn(child, ids);
+  return ids;
+}
+
+/**
+ * The names of the runners the document names, by id. Only those ids are looked up (`find`), never the whole list: listing a workspace's
+ * runners can make a missing hosted runner, a write that a page read must not cause. An id nobody knows has no name (the page shows it).
+ */
+async function runnerNamesOf(
+  document: unknown,
+  runners: Parameters<typeof loadRunPage>[2]["runners"],
+): Promise<Record<string, string>> {
+  if (runners === undefined) return {};
+  const found = await Promise.all(
+    [...runnerIdsIn(document)].map((id) => runners.find(id)),
+  );
+  return Object.fromEntries(
+    found.flatMap((runner) => (runner ? [[runner.id, runner.name]] : [])),
+  );
 }
 
 export function RunPageContent({

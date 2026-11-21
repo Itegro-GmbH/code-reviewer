@@ -185,7 +185,13 @@ describe("the built-in lanes", () => {
     expect(document.steps[1]).toMatchObject({
       connector: "github.pullRequest.open",
       head: "{{implement.branch}}",
+      title: "One-off task: {{trigger.input.task}}",
     });
+    // It has no review step, so the note must not speak of one (#1119).
+    expect(document.steps[0]?.instruction).toContain(
+      "The lane opens the pull request itself; do not open one.",
+    );
+    expect(document.steps[0]?.instruction).not.toContain("review");
     const text = JSON.stringify(document);
     for (const absent of ['"profile"', '"environment"', '"repo"', '"ticket"'])
       expect(text).not.toContain(absent);

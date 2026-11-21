@@ -80,7 +80,7 @@ export const NEW_PROJECT_COPY = {
     "review-a-pull-request": "Review a pull request",
   } as Record<string, string>,
   laneProblem: (names: string) =>
-    `The project was created, but these lanes could not be copied: ${names}. An Admin can add them through the API (docs/workflows.md, "Built-in lanes").`,
+    `The project was created, but these lanes could not be copied: ${names}. An Admin can add them through the API.`,
   none: "Every repository of the GitHub App already is a project.",
   cancel: "Cancel",
   create: "Create and read from GitHub",

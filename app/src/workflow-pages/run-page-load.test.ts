@@ -87,3 +87,31 @@ describe("the lane of a run", () => {
     );
   });
 });
+
+describe("the runner names of the run page", () => {
+  // #1105: a page read never lists the workspace's runners (listing can make a missing hosted runner, a write): it looks up the ids the lane names.
+  it("looks up only the runners the lane's agent steps name, at any depth", async () => {
+    const { deps } = services({ runVersion: 3 });
+    const document = {
+      steps: [
+        { kind: "agent", runner: "r-1" },
+        { kind: "loop", body: [{ kind: "agent", runner: "r-2" }] },
+        { kind: "action", runner: "not-a-runner" },
+      ],
+    };
+    const find = vi.fn(async (id: string) =>
+      id === "r-1" ? { id, name: "Hosted 4 vCPU" } : undefined,
+    );
+    const get = vi.fn(async () => view(3, document));
+    const page = await loadRunPage("wf-1", "run-1", {
+      ...deps,
+      workflows: { get } as unknown as Pick<WorkflowService, "get">,
+      runners: { find },
+    });
+    expect(find.mock.calls.map(([id]) => id).sort()).toEqual(["r-1", "r-2"]);
+    expect(page).toMatchObject({
+      kind: "ready",
+      runnerNames: { "r-1": "Hosted 4 vCPU" },
+    });
+  });
+});

@@ -149,6 +149,10 @@ const FINDINGS = {
 const PULL_REQUEST_NOTE =
   "The lane opens the pull request itself after the review; do not open one and do not report it as missing or open work.";
 
+/** The one-off lane has no review step: it only says who opens the pull request. */
+const ONE_OFF_PULL_REQUEST_NOTE =
+  "The lane opens the pull request itself; do not open one.";
+
 export const REVIEW_INSTRUCTION =
   `Review branch {{implement.branch}} against this issue. Do not change anything. ${PULL_REQUEST_NOTE}\n\n` +
   "Issue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\n" +
@@ -232,7 +236,7 @@ function oneOffTask(agents: BuiltInAgents): Record<string, unknown> {
         kind: "agent",
         ...settingsOf(agents.implementer),
         session: "new",
-        instruction: `{{trigger.input.task}}\n\n${PULL_REQUEST_NOTE}`,
+        instruction: `{{trigger.input.task}}\n\n${ONE_OFF_PULL_REQUEST_NOTE}`,
         result: {
           type: "object",
           required: ["summary"],
@@ -249,7 +253,7 @@ function oneOffTask(agents: BuiltInAgents): Record<string, unknown> {
         kind: "action",
         connector: "github.pullRequest.open",
         head: "{{implement.branch}}",
-        title: "{{trigger.input.task}}",
+        title: "One-off task: {{trigger.input.task}}",
         body: "{{implement.summary}}\n\nTask: {{trigger.input.task}}",
       },
     ],

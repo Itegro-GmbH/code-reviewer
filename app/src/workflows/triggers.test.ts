@@ -580,6 +580,26 @@ describe("the input of a manual or api trigger", () => {
     ).toEqual([]);
   });
 
+  // #1105: `ticket` is reserved, a text field of that name would be split off and read as the run's ticket.
+  it("refuses an input named ticket whose type is not ticket, required or not", () => {
+    for (const required of [["ticket"], []])
+      expect(
+        codes(
+          workflow([
+            {
+              id: "m",
+              kind: "manual",
+              input: {
+                type: "object",
+                properties: { ticket: { type: "string" } },
+                required,
+              },
+            },
+          ]),
+        ),
+      ).toEqual([["/triggers/0/input/properties/ticket", "repo_required"]]);
+  });
+
   // #1106
   it("refuses a reference to trigger.input or trigger.ticket in a lane whose manual or api trigger has no input", () => {
     for (const kind of ["manual", "api"] as const) {

@@ -196,6 +196,17 @@ function checkRepositoryInput(
       );
     return;
   }
+  // `ticket` is reserved: the run splits it off the input and reads it as the ticket the run is about, so a text field of that name would break.
+  if (Object.hasOwn(schema.properties, TICKET_INPUT)) {
+    report(
+      issue(
+        pointer(where, "properties", TICKET_INPUT),
+        "repo_required",
+        `The input '${TICKET_INPUT}' is reserved for the ticket the run is about: type it \`ticket\` or rename it.`,
+      ),
+    );
+    return;
+  }
   // Neither a ticket nor a `repo`: the run works on the repository of the lane's project, on its default branch.
   if (!Object.hasOwn(schema.properties, "repo")) return;
   const repo = schema.properties.repo;
