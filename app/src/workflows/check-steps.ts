@@ -764,7 +764,9 @@ function checkInlineSettings(
   checkHostedSettings(node, path, c);
 }
 
-/** The setup script and the network rule of a hosted environment, now settings of the step (ADR 0007, decision 11). */
+const ANTHROPIC_API_HOST = "api.anthropic.com";
+
+/** The setup script and the network rule of an environment, now settings of the step (ADR 0007, decision 11, amended by #1126: any runner). */
 function checkHostedSettings(
   node: Record<string, unknown>,
   path: string,
@@ -805,26 +807,42 @@ function checkHostedSettings(
   }
   if (node.network !== undefined)
     checkNetworkRule(node.network, pointer(path, "network"), c);
-  // A runner's setup and network are its owner's: the step cannot promise either there. What is not known (no such environment or
-  // runner, a computed name) is reported elsewhere.
-  const known = environmentOf(node, c.resolver)?.info;
-  const named = runnerOfStep(node, c.resolver)?.info;
-  const report = (key: string, message: string): void =>
-    c.report(issue(pointer(path, key), "hosted_only_setting", message));
-  for (const key of ["setupScript", "network"] as const) {
-    if (node[key] === undefined) continue;
-    if (named !== undefined && named.revoked !== true) {
-      if (named.kind === "self_hosted")
-        report(
-          key,
-          `${shown(key)} applies to a hosted runner. The runner ${shown(named.name)} is self-hosted, and its setup and network are its owner's. Take it out, or name a hosted runner.`,
+  // #1126 (ADR 0007, decision 11 as amended): a self-hosted runner takes the script and the rule too. What it cannot honour is an
+  // open network for the harness whose login lives in the container: the runner would refuse the turn when it starts, so the lane is
+  // refused when it is saved.
+  if (
+    node.harness === CLAUDE_CODE_HARNESS &&
+    isRecord(node.network) &&
+    node.network.mode === "open"
+  )
+    c.report(
+      issue(
+        pointer(path, "network"),
+        "subscription_network_open",
+        'A step on the harness "claude-code" cannot have an open network: its login is inside the container, so any host could be a place to send it to. Use mode "list" with the hosts the work needs (they are only read: GET and HEAD), or "off".',
+      ),
+    );
+  // The model's own host is reached through a tunnel the runner pins; a wildcard that covers it would make it a read-only host, and
+  // Claude Code posts to it. The runner refuses the turn for it, so the lane is refused here.
+  if (
+    node.harness === CLAUDE_CODE_HARNESS &&
+    isRecord(node.network) &&
+    node.network.mode === "list" &&
+    Array.isArray(node.network.hosts)
+  )
+    for (const [index, host] of node.network.hosts.entries())
+      if (
+        typeof host === "string" &&
+        host.trim().toLowerCase().startsWith("*.") &&
+        ANTHROPIC_API_HOST.endsWith(host.trim().toLowerCase().slice(1))
+      )
+        c.report(
+          issue(
+            pointer(path, "network", "hosts", index),
+            "network_host_invalid",
+            `The entry ${shown(host)} covers ${ANTHROPIC_API_HOST}, the host of the model: it is reached as it is and cannot be read-only. Write the other hosts by name.`,
+          ),
         );
-    } else if (known?.kind === "runner")
-      report(
-        key,
-        `${shown(key)} applies to a hosted environment. The environment ${shown(known.name)} runs on a runner, whose setup and network are its owner's. Take it out, or name a hosted environment.`,
-      );
-  }
 }
 
 /**

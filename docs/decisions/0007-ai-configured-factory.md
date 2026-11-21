@@ -12,6 +12,8 @@
   **environment** of a lane step (`docs/implementer.md`, "Environments"), and the **labels** as the way a lane step reaches a runner.
 - **Amends** (decision 10): [ADR 0005](0005-runner-v2-one-dispatcher-contract.md) §1, "Labels": today only the platform
   identity may carry a label in `cr:`. See "Decisions 10 to 16 in detail", point 10, for what changes. The rest of ADR 0005 stays.
+- **Amended** (decision 11, #1126, the owner's request of 2026-11-21): the setup script and the network rule are valid on a
+  **self-hosted** runner too, including a turn on the Claude Code subscription. See "Amendment to decision 11 (#1126)" below.
 
 ## Context
 
@@ -122,10 +124,51 @@ For a **hosted** runner the job still carries the size label `cr:size-<n>` of th
 **11. The hosted environment's setup script and network rule move into the agent step of the lane JSON.** Today a hosted environment
 holds a size, a setup script and a network rule (`docs/implementer.md`, "Environments"); the decision leaves the hosted runner with
 its type's size and concurrency only. The step carries `setup` (the script text) and `network` (the rule) as optional settings, valid only
-when the step's runner is hosted (the validator refuses them for a self-hosted runner: that machine's setup is its owner's). The
+when the step's runner is hosted (the validator refuses them for a self-hosted runner: that machine's setup is its owner's) **[amended by #1126: valid on a self-hosted runner too, see "Amendment to decision 11"]**. The
 size is not a step setting: it is the size of the hosted runner's type (decision 16). The field names and limits are #1105's. The
 migration copies a hosted environment's script and rule into the converted steps and maps its size to the hosted runner of that type
 (see Migration), so nothing a lane relied on is dropped silently.
+
+**Amendment to decision 11 (#1126, 2026-11-21): the setup script and the network rule on a self-hosted runner.** The owner asked for an
+agent step on a self-hosted runner (the DevBox, Claude Code on the owner's own subscription) to run a setup script, so the agent has the
+tools to build and test (a Next.js landing page: `npm ci` in the setup, then the agent runs `npm run lint && npm run build`, which also
+fetches fonts, and looks at the live site). Decision 11 said the setup of a self-hosted machine is its owner's; the owner is the one who
+now says otherwise, so **`setupScript` and `network` are valid on any runner** and `hosted_only_setting` is gone (the validator refuses
+what the runner cannot honour instead: `network.mode` `open` on the harness `claude-code`, `subscription_network_open`, and a wildcard
+entry that covers the model's host). What was the reason for the old rule, and what keeps each part safe:
+
+- *The script on a runner.* It runs in the agent's own container (decision of #1009), as for a hosted step, with the internet open and
+  no secret of ours in it. The turn row copies it with the runner (`environment_setup_script`, the same columns as a hosted copy; one
+  check constraint is loosened, the migration `allow_runner_turn_setup`). The author of a lane is an Admin or Owner (decision 12); on
+  a self-hosted runner that is the person whose machine it is, and the script is as trusted as that person's own shell.
+- *The subscription token must never be readable by anything with a wider exit than `api.anthropic.com`.* The login is not in the
+  container when the script runs: the token is handed to the agent's own `exec` as an environment variable at each message, after the
+  script has ended and the container has left the setup network and joined the model network behind the doors. So the order is
+  **setup phase (setup network, internet open, no token anywhere) → hand-over → agent phase (token, narrow network)**, which is the
+  "validate against the code, choose the safest workable variant" of the request: it is the only variant in which the setup has a
+  wide network at all, and it needs no change to how the login is placed. The runner makes the setup container from the layer's image
+  with `no-new-privileges` (so that the agent that takes it over is not in a different container), and the job reaches only a Worker
+  that names the feature `implementer_subscription_setup`; an older Worker ends the turn, free, with `implementer_engine_unavailable`
+  (reason `subscription_setup`) instead of ignoring the script or the rule.
+- *The agent phase of a subscription turn needs more than the model's host.* The build fetches Google Fonts and the agent checks the
+  live site. Decision: **a subscription turn may list further hosts, every one of them read-only**: the door ends the TLS connection
+  to the listed host itself and lets only `GET` and `HEAD` through, on port 443, with the same machinery that keeps the package
+  registries read-only (#784), its certificate authority name-constrained to exactly those hosts. The model's own host stays a tunnel,
+  pinned to 443. `open` is never allowed for a subscription turn, and a wildcard entry that covers the model's host is refused (it
+  would make that host read-only, and Claude Code posts to it).
+- *What this does not remove, said plainly.* The token is in the agent's tools' environment (follow-up 5 of `docs/runner.md`, "R3"):
+  a command can print it. So **every listed host is a place something could be sent to**: read-only removes `POST`, request bodies and
+  every upload API, but a `GET` carries a path and a query. A listed host that publishes what it is asked for (a paste host, a wildcard
+  over user content, a host that echoes) is an exit; the owner writes the list, and the guard here is the owner's choice of hosts and
+  the rule "guard money, key and exits". A root process that the *script* (or a package's install script, in `npm ci`) leaves running can
+  read the agent's environment too: it can do no more than the agent, because the exits are the same. Accepted consequence: a
+  supply-chain attack through the install script gets, at worst, the same exits as the agent.
+- *Memory.* The agent's container gets about 1.9 GB on a 2 vCPU VM, which a Next.js build can exceed. No code change: the owner sets
+  `FACTORY_RUNNER_VM_VCPUS` (documented with the sizes and the host's limit in `docs/runner.md`).
+
+Rejected: running the setup under the pinned subscription rule (no `npm ci`); handing the token in a file the script could read; an
+allow-list of the hosts the app thinks a build needs (a closed list of what the engine does, against the sandbox principle); `open`
+with the token guarded only by the push scan (that scan is a net, not a wall).
 
 **12. Saving lanes through the API: workspace Admins and Owners.** Every member may save a lane today. With the settings inline, whoever
 saves decides a step's model (and so its cost), push right and instructions, which a profile page used to gate by being a separate

@@ -111,7 +111,11 @@ describe("the runner environments migration", () => {
   // #854-T222
   it("lets a turn copy a runner environment: labels and no size, and refuses a half copy", async () => {
     const { db } = await createEmptyTestDatabase();
-    await migrateToLatest(db, migrationProvider);
+    // The rule of this migration: #1126 relaxed the runner copy's script later (`allow-runner-turn-setup.integration.test.ts`).
+    await migrateToLatest(
+      db,
+      upTo((name) => name <= THIS),
+    );
     await seed(db);
     await sql`insert into repositories (id, workspace_id, integration_id, external_id, full_name, url, default_branch, created_at, updated_at)
       values ('r-1', 'w-1', 'i-1', '1', 'a/b', 'https://github.com/a/b', 'main', ${T}, ${T})`

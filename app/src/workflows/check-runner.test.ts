@@ -2,7 +2,7 @@
 
 // The concrete runner of an agent step (#1105, ADR 0007, decisions 6, 14 and 16): a step with settings of its own names a runner by id,
 // and the rules a profile and an environment had together (`runner_needs_own_key`, `harness_needs_runner`, `no_runner_announces`,
-// `hosted_only_setting`) are judged at that runner.
+// `subscription_network_open`) are judged at that runner.
 import { describe, expect, it } from "vitest";
 import { BUILT_IN_CONNECTORS } from "./connectors.ts";
 import type { RunnerInfo, WorkflowResolver } from "./resolver.ts";
@@ -156,14 +156,71 @@ describe("the runner of an agent step (#1105)", () => {
     ).toContainEqual(["/steps/0/profile", "profile_with_inline_settings"]);
   });
 
-  // #1105-R09
-  it("takes setupScript and network on a hosted runner and refuses them on a self-hosted one (hosted_only_setting)", () => {
+  // #1105-R09, #1126-V01
+  it("takes setupScript and network on a hosted and on a self-hosted runner", () => {
     const extras = { setupScript: "npm ci\n", network: { mode: "open" } };
     expect(codes(lane(step(extras)))).toEqual([]);
-    expect(codes(lane(step({ ...extras, runner: DEVBOX.id })))).toEqual([
-      ["/steps/0/network", "hosted_only_setting"],
-      ["/steps/0/setupScript", "hosted_only_setting"],
-    ]);
+    expect(codes(lane(step({ ...extras, runner: DEVBOX.id })))).toEqual([]);
+  });
+
+  // #1126-V02
+  it("refuses an open network for the harness whose login lives in the container, and takes a list or off", () => {
+    const claude = { harness: "claude-code", model: LOGIN, runner: DEVBOX.id };
+    expect(codes(lane(step({ ...claude, network: { mode: "open" } })))).toEqual(
+      [["/steps/0/network", "subscription_network_open"]],
+    );
+    expect(
+      codes(
+        lane(
+          step({
+            ...claude,
+            setupScript: "npm ci\n",
+            network: {
+              mode: "list",
+              hosts: ["fonts.googleapis.com", "*.gstatic.com", "lateinorum.de"],
+            },
+          }),
+        ),
+      ),
+    ).toEqual([]);
+    expect(codes(lane(step({ ...claude, network: { mode: "off" } })))).toEqual(
+      [],
+    );
+    // OpenCode on the same runner keeps its open network: its key is the model door's, not a login in the container.
+    expect(
+      codes(lane(step({ runner: DEVBOX.id, network: { mode: "open" } }))),
+    ).toEqual([]);
+  });
+
+  // #1126-V04
+  it("refuses a wildcard that covers the model's host for the harness claude-code, and takes other wildcards", () => {
+    const claude = { harness: "claude-code", model: LOGIN, runner: DEVBOX.id };
+    expect(
+      codes(
+        lane(
+          step({
+            ...claude,
+            network: {
+              mode: "list",
+              hosts: ["lateinorum.de", "*.anthropic.com"],
+            },
+          }),
+        ),
+      ),
+    ).toEqual([["/steps/0/network/hosts/1", "network_host_invalid"]]);
+    expect(
+      codes(
+        lane(
+          step({
+            ...claude,
+            network: {
+              mode: "list",
+              hosts: ["*.gstatic.com", "api.anthropic.com"],
+            },
+          }),
+        ),
+      ),
+    ).toEqual([]);
   });
 
   // #1105-R10

@@ -1607,6 +1607,48 @@ space left on device" and the mirror on the reserve disk was whole; a stop durin
 install` without an `apt-get update` first exited 100 and ended the turn the same way (the "script that tried to undo the rules" of the table
 first ran into it).
 
+### A self-hosted runner, and the Claude Code subscription (#1126)
+
+> **Amended (ADR 0007, decision 11, #1126).** The setup script and the network rule are settings of the **agent step**, and a step may
+> have them on a **self-hosted** runner too (the validator refused them there before). The turn copies them with its runner
+> (`environment_setup_script`, `environment_network_*` of the turn row, the same columns as for a hosted copy); the job carries them as
+> `implementer.environment` (`name`, `setupScript`, `network`), exactly as for a hosted turn.
+
+For a turn on the **harness `claude-code`** (the owner's own subscription, `docs/runner.md`, "Claude Code on the device") the script
+runs **before the login exists in the container**, and the network of the turn is the pinned one plus a narrow read-only list:
+
+1. **Setup phase.** The container is made from the layer's image (Claude Code is installed in it; the login is not, and never is: it is
+   handed to the agent's own `exec` as `CLAUDE_CODE_OAUTH_TOKEN` each time the agent runs a message, `claude_code/agent.py`) with
+   `no-new-privileges`, on the setup network, **exactly as for a hosted turn**: root, the internet open, no secret of ours, the script's
+   time limit (15 minutes), its output into the turn's `setup` block. The script can install what the build needs (`npm ci`); nothing
+   it runs, and nothing a package's install script runs, can read the token, because the token is not in that container yet (it is in
+   the job process on the host side and in no file or variable of the container).
+2. **Hand-over.** The container leaves the setup network, is frozen, read, and taken over by the agent's container object on the model
+   network behind the doors. **Only now** does the agent run, and the login is placed: in the environment of each `claude` exec.
+3. **Agent phase.** The agent's network is the rule of the step as the runner narrows it for a subscription turn
+   (`claude_code/gates.py`): `api.anthropic.com` on port 443 (a tunnel: Claude Code posts to it) and **every other host of the step's
+   `list` read-only on port 443**: the door ends the TLS connection itself and lets only `GET` and `HEAD` through (as it does for the
+   package registries, `netdoor/registries.py`; the container trusts the door's certificate for exactly those names). `open` is refused
+   for this harness, by the validator when the lane is saved (`subscription_network_open`) and by the runner at the start of the turn.
+
+So for the Lateinorum landing page a step with `"setupScript": "npm ci"` and `"network": {"mode": "list", "hosts":
+["fonts.googleapis.com", "*.gstatic.com", "lateinorum.de"]}` has its dependencies installed in phase 1, and in phase 3 the agent runs
+`npm run lint && npm run build` (which fetches the fonts through the door) and reads the live site with `curl`, but cannot `POST`
+anywhere.
+
+**What this does not make safe.** The token is in the environment of the agent's tools (follow-up 5 of R3 in `docs/runner.md`). A process
+the *script* left running, as root, can read `/proc/<pid>/environ` of the agent's commands; a package with an install script that does so
+is the way a supply-chain attack on `npm ci` would try. What stops it from leaving is the **exit**, not the secrecy: the agent phase has
+only the model's host and the read-only hosts the owner listed. A `GET` still carries a path and a query to a listed host, so a listed
+host that publishes what it is asked (a paste site, a wildcard on a platform's user content) is an exit; the owner writes the list and
+chooses hosts that do not. The setup script's text is the lane author's (an Admin or Owner of the workspace, decision 12), and on a
+self-hosted runner that is the person whose machine it is.
+
+**Memory.** The agent's container has the memory its VM leaves it: about 1.9 GB at the default 2 vCPUs of a self-hosted runner. A
+`next build` can need more. The owner raises it with `FACTORY_RUNNER_VM_VCPUS` (2, 4, 6 or 8: 2 GB of VM per vCPU, and the agent's
+container gets about 1.9, 5.8, 9.4 and 13.1 GB; the table is the launcher's `agentMemoryMb`). The limit is the host's: `parallelRuns`
+VMs of that size run at the same time, so `parallelRuns × VM size` must fit in the machine's memory with room for the host itself.
+
 ## Environments
 
 > **Amended in part (ADR 0007, epic #1103; #1105, release A).** An agent step of a lane with settings of its own no longer needs an environment: it names one **concrete runner** by its id

@@ -84,8 +84,8 @@ export const SEMANTIC_ISSUE_CODES = [
   "model_not_allowed",
   /** #1105: a host of the `network` rule of a step is no host name the rule can hold (an address, a port, a scheme; only the validator knows). */
   "network_host_invalid",
-  /** #1105: `setupScript` or `network` in a step whose environment or runner is a self-hosted one (ADR 0007, decision 11). */
-  "hosted_only_setting",
+  /** #1126: `network` with `mode` `open` in a step on the harness `claude-code`, whose login lives in the container (ADR 0007, decision 11 as amended). */
+  "subscription_network_open",
   /** #1105: a step with settings of its own names neither a `runner` nor an `environment`. `available` lists the ids of the runners. */
   "runner_required",
   /** #1105: a step names a `runner` and an `environment`; a step runs in one place (`environment` is for steps written before the runner). */
