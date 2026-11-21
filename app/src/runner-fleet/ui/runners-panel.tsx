@@ -104,13 +104,7 @@ export function RunnersPanel({
         </div>
       </div>
     );
-  return (
-    <Runners
-      api={api}
-      canManage={canManage}
-      initial={loaded.data}
-    />
-  );
+  return <Runners api={api} canManage={canManage} initial={loaded.data} />;
 }
 
 function Runners({
