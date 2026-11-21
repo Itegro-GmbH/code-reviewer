@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The sub-pages of the workspace settings: one source for the links of the navigation and the headings of the pages. A deployment
-// without the `implementer` capability (code-review.com) lists `SETTINGS_SECTIONS`, one link per page. The factory (#925) has four tabs
-// (General, Members, Billing, Integrations) instead, `FACTORY_SETTINGS_SECTIONS`; a tab with more than one page of its own lists
-// them in a second row. The addresses of the pages that existed before the tabs stay: Review defaults, LLM, Plan and Advanced are
-// then pages of the tab they belong to, not a tab of their own.
+// without the `implementer` capability (code-review.com) lists `SETTINGS_SECTIONS`, one link per page. The factory (#925) has three tabs
+// (General, Members, Billing) instead, `FACTORY_SETTINGS_SECTIONS`; a tab with more than one page of its own lists them in a second row.
+// The integrations and the LLM keys are not settings there but the places of Setup in the sidebar (ADR 0007, decision 7, #1108): their
+// pages keep their addresses below `/settings` and render their own header (`SETUP_SECTIONS`), without these tabs. Review defaults, a
+// read only page there, is a page of the General tab; Plan and Advanced belong to the tab they were always next to.
 import type { Capability } from "../../capabilities/capability.ts";
 import { PLAN_NAV_LABEL, PLAN_PAGE_TITLE } from "../../copy/plan-usage.ts";
 import { workspacePath } from "../paths.ts";
@@ -20,7 +21,7 @@ export type SettingsSection =
   | "plan"
   | "billing"
   | "advanced"
-  // The pages of the factory's tabs: the members list and the GitHub App page moved here from `/members` and `/connections`.
+  // The members list of the factory's tabs moved here from `/members`; the GitHub App page (`integrations`) is a place of Setup.
   | "members"
   | "integrations";
 
@@ -53,20 +54,42 @@ export const SETTINGS_SECTIONS: readonly SectionEntry[] = [
   { segment: "advanced", label: "Advanced", title: "Advanced" },
 ];
 
-export type SettingsTab = "general" | "members" | "billing" | "integrations";
+export type SettingsTab = "general" | "members" | "billing";
 
 export const SETTINGS_TABS: readonly { tab: SettingsTab; label: string }[] = [
   { tab: "general", label: "General" },
   { tab: "members", label: "Members" },
   { tab: "billing", label: "Billing" },
-  { tab: "integrations", label: "Integrations" },
 ];
+
+/**
+ * The pages below `/settings` that are places of Setup in the factory: the heading of the page is the word of the sidebar, so the two never
+ * differ (#1108). They have no tab bar of their own; `SettingsScreen` shows them with `area="setup"`.
+ */
+export const SETUP_SECTIONS: readonly {
+  segment: SettingsSection;
+  title: string;
+}[] = [
+  { segment: "integrations", title: "GitHub and Jira" },
+  { segment: "llm", title: "LLM keys" },
+];
+
+/** The root of the breadcrumb of a place of Setup. */
+export const SETUP_AREA_TITLE = "Setup";
 
 export const FACTORY_SETTINGS_SECTIONS: readonly (SectionEntry & {
   tab: SettingsTab;
 })[] = [
   // The `label` is the link in the second row of the tab, the `title` the `h1` of the page and the last crumb.
   { segment: "", tab: "general", label: "Workspace", title: "General" },
+  // Read only in the factory: an AI sets the defaults through the API (#1108). It is not an integration, so it is no place of Setup.
+  {
+    segment: "review-defaults",
+    tab: "general",
+    label: "Review defaults",
+    title: "Review defaults",
+    capability: "review",
+  },
   { segment: "advanced", tab: "general", label: "Advanced", title: "Advanced" },
   { segment: "members", tab: "members", label: "Members", title: "Members" },
   {
@@ -82,21 +105,15 @@ export const FACTORY_SETTINGS_SECTIONS: readonly (SectionEntry & {
     label: PLAN_NAV_LABEL,
     title: PLAN_PAGE_TITLE,
   },
-  {
-    segment: "integrations",
-    tab: "integrations",
-    label: "GitHub App",
-    title: "Integrations",
-  },
-  { segment: "llm", tab: "integrations", label: "LLM", title: "LLM" },
-  {
-    segment: "review-defaults",
-    tab: "integrations",
-    label: "Review defaults",
-    title: "Review defaults",
-    capability: "review",
-  },
 ];
+
+/** The heading of a page of Setup: the word of its sidebar link. */
+export function setupSectionTitle(segment: SettingsSection): string {
+  return (
+    SETUP_SECTIONS.find((section) => section.segment === segment)?.title ??
+    settingsSectionTitle(segment)
+  );
+}
 
 /** The heading of a page: the same in both lists, which differ in the links only. */
 export function settingsSectionTitle(segment: SettingsSection): string {

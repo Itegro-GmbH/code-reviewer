@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // @vitest-environment jsdom
-// The navigation of the workspace settings of the factory (#925): four tabs (General, Members, Billing, Integrations) and, for a tab with several pages,
+// The navigation of the workspace settings of the factory (#925): three tabs (General, Members, Billing) and, for a tab with several pages,
 // a second row; and the Plan entry (#282): it exists only for a workspace that has entitlements, and its address is the one the
 // operator's page and the refusal notice send people to.
 import { act, cleanup, render, screen, within } from "@testing-library/react";
@@ -57,8 +57,8 @@ function tabs(options: {
 
 describe("the settings tabs", () => {
   // #925
-  it("are General, Members and Integrations, and Billing only where there is a plan or billing", () => {
-    expect(tabs({})).toEqual(["General", "Members", "Integrations"]);
+  it("are General and Members, and Billing only where there is a plan or billing: the integrations are places of Setup, no tab (#1108)", () => {
+    expect(tabs({})).toEqual(["General", "Members"]);
   });
 
   // #282-T01
@@ -79,12 +79,7 @@ describe("the settings tabs", () => {
 
   // #282-T01
   it("lists the Billing tab for a workspace that has entitlements, and it leads to the Plan page", () => {
-    expect(tabs({ showPlan: true })).toEqual([
-      "General",
-      "Members",
-      "Billing",
-      "Integrations",
-    ]);
+    expect(tabs({ showPlan: true })).toEqual(["General", "Members", "Billing"]);
     expect(
       screen.getByRole("link", { name: "Billing" }).getAttribute("href"),
     ).toBe("/w/acme/settings/plan");
@@ -106,30 +101,27 @@ describe("the settings tabs", () => {
 
   // #925
   it("marks the tab of the current page, also for a page that moved under it", () => {
-    tabs({ current: "llm" });
+    tabs({ current: "review-defaults" });
 
     expect(
       screen
-        .getByRole("link", { name: "Integrations" })
+        .getByRole("link", { name: "General" })
         .getAttribute("aria-current"),
     ).toBe("page");
     expect(
       screen
-        .getByRole("link", { name: "General" })
+        .getByRole("link", { name: "Members" })
         .getAttribute("aria-current"),
     ).toBeNull();
   });
 
   // #925
-  it("links each tab to its first page: Members and the GitHub App page are pages of the settings", () => {
+  it("links each tab to its first page: Members is a page of the settings", () => {
     tabs({});
 
     expect(
       screen.getByRole("link", { name: "Members" }).getAttribute("href"),
     ).toBe("/w/acme/settings/members");
-    expect(
-      screen.getByRole("link", { name: "Integrations" }).getAttribute("href"),
-    ).toBe("/w/acme/settings/integrations");
     expect(
       screen.getByRole("link", { name: "General" }).getAttribute("href"),
     ).toBe("/w/acme/settings");
@@ -138,17 +130,17 @@ describe("the settings tabs", () => {
 
 describe("the second row of a tab", () => {
   // #925
-  it("lists the pages of Integrations: the GitHub App, the LLM key and the review defaults, and marks the current one", () => {
-    tabs({ current: "llm" });
+  it("lists the pages of General: the workspace, the read only review defaults and Advanced, and marks the current one (#1108)", () => {
+    tabs({ current: "review-defaults" });
 
-    expect(linksOf("Integrations pages")).toEqual([
-      "GitHub App",
-      "LLM",
+    expect(linksOf("General pages")).toEqual([
+      "Workspace",
       "Review defaults",
+      "Advanced",
     ]);
     expect(
-      within(screen.getByRole("navigation", { name: "Integrations pages" }))
-        .getByRole("link", { name: "LLM" })
+      within(screen.getByRole("navigation", { name: "General pages" }))
+        .getByRole("link", { name: "Review defaults" })
         .getAttribute("aria-current"),
     ).toBe("page");
   });
@@ -156,14 +148,15 @@ describe("the second row of a tab", () => {
   // #658-T02, #925
   it("lists Advanced under General only for the Owner: the layout says so, and without it there is no entry", () => {
     tabs({ current: "", showAdvanced: true });
-    expect(linksOf("General pages")).toEqual(["Workspace", "Advanced"]);
+    expect(linksOf("General pages")).toEqual([
+      "Workspace",
+      "Review defaults",
+      "Advanced",
+    ]);
     cleanup();
 
     tabs({ current: "", showAdvanced: false });
-    // One page is no row to choose from.
-    expect(
-      screen.queryByRole("navigation", { name: "General pages" }),
-    ).toBeNull();
+    expect(linksOf("General pages")).toEqual(["Workspace", "Review defaults"]);
   });
 
   // #658-T02

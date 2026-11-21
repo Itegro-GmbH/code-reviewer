@@ -769,14 +769,7 @@ export function ImplementerForm({
           </p>
         ) : (
           <p className="-mt-3 text-sm text-muted-foreground">
-            {FORM_COPY.environmentHint}{" "}
-            <Link
-              href={workspacePath(workspaceSlug, "/environments")}
-              className="font-semibold underline underline-offset-4"
-            >
-              {FORM_COPY.environmentLink}
-            </Link>
-            .
+            {FORM_COPY.environmentHint}
           </p>
         )}
         {environments.state === "failed" ? (

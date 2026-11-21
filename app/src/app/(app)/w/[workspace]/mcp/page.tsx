@@ -11,7 +11,7 @@ import { PAGE_COPY } from "@/mcp/ui/messages";
 import { requireWorkspace } from "@/workspaces/access-runtime";
 import { can } from "@/workspaces/permissions";
 
-export const metadata: Metadata = { title: "MCP" };
+export const metadata: Metadata = { title: "MCP servers" };
 
 // The MCP servers of the workspace (#1050, epic #1049). The page exists only in a deployment with the capability `implementer` (the access
 // proxy answers it as a path that does not exist everywhere else; `requireImplementerCapability()` is the second wall). Every member sees

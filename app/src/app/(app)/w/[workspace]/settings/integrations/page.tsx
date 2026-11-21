@@ -11,6 +11,7 @@ import { createRepositoriesRepository } from "@/db/repositories/repositories-rep
 import { getDatabase } from "@/db/startup";
 import { getInstallationBinding } from "@/installation-binding/shared";
 import { loadJiraSection } from "@/jira/ui/jira-page";
+import { JIRA_NOT_SET_UP } from "@/jira/ui/messages";
 import { JiraSection } from "@/jira/ui/jira-section";
 import { getJira } from "@/jira/shared";
 import {
@@ -23,17 +24,17 @@ import { billingPageLinkedFor } from "@/billing/shared";
 import { planPageLinkedFor } from "@/usage/shared";
 import { SettingsScreen } from "@/workspaces/ui/settings-shell";
 
-export const metadata: Metadata = { title: "Settings · Integrations" };
+export const metadata: Metadata = { title: "Setup · GitHub and Jira" };
 
 // The GitHub installations linked to the workspace and, for an Owner or Admin, the buttons that connect one
-// (docs/decisions/0001-editions-setup-and-accounts.md, section 2.9): the Integrations tab of the settings (#925; the page was
-// `/connections` before, which redirects here). The workspace is the one in the address, for a member only; what a flow that just
+// (docs/decisions/0001-editions-setup-and-accounts.md, section 2.9): the place "GitHub and Jira" of Setup (#925, #1108; the page was
+// `/connections` before, which redirects here, and a tab of the settings until #1108). The workspace is the one in the address, for a member only; what a flow that just
 // ended said is in the query, as a code of our own list.
 export default async function ConnectionsPage({
   params,
   searchParams,
 }: PageProps<"/w/[workspace]/settings/integrations">) {
-  // A tab of the factory's settings only (the proxy answers the same, `capabilities/routes.ts`; asked again here like a route file).
+  // A place of the factory's Setup only (the proxy answers the same, `capabilities/routes.ts`; asked again here like a route file).
   if (!getCapabilities().has("implementer")) notFound();
   const { workspace: slug } = await params;
   const { workspace, role, user } = await requireWorkspace(slug);
@@ -93,6 +94,7 @@ async function ConnectionsContent({
     <SettingsScreen
       workspaceSlug={workspaceSlug}
       current="integrations"
+      area="setup"
       showPlan={showPlan}
       showBilling={showBilling}
     >
@@ -110,7 +112,10 @@ async function ConnectionsContent({
             data={jira}
           />
         </div>
-      ) : null}
+      ) : (
+        // The sidebar says "GitHub and Jira": where the Atlassian app is not set up the page says so instead of showing GitHub alone.
+        <p className="mt-6 text-sm text-muted-foreground">{JIRA_NOT_SET_UP}</p>
+      )}
     </SettingsScreen>
   );
 }
