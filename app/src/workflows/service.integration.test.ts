@@ -636,6 +636,50 @@ describe("the workflow service", () => {
     expect(JSON.stringify(lane.document)).not.toContain('"environment"');
   });
 
+  // #1105-T402
+  it("reports a built-in lane whose profile model the workspace cannot run any more as a refused lane, the way a missing profile is, and still copies the others", async () => {
+    const { db, idA, projectIds } = await setup();
+    await createProfilesRepository(db, idA).create(
+      {
+        name: "reviewer",
+        content: { ...PROFILE_CONTENT, model: { entryId: "gone" } },
+        createdBy: USER.id,
+      },
+      100,
+    );
+    const service = createWorkflowService({
+      workflows: createWorkflowsRepository(db, idA),
+      projects: createProjectsRepository(db, idA),
+      environments: createImplementerEnvironmentsRepository(db, idA),
+      profiles: createProfilesRepository(db, idA),
+      runners: createNamedRunnersRepository(db, idA),
+      // The rule of the workspace today: the entry the reviewer profile names is not enabled.
+      models: {
+        check: async (model) => ("entryId" in model ? "not_enabled" : null),
+      },
+    });
+    const mine = projectIds.get(idA)!;
+
+    const results = await service.copyBuiltIn(USER, mine, [
+      "issue-to-pr",
+      "review-a-pull-request",
+    ]);
+
+    // Both lanes carry a reviewer, and the implementer profile of `setup` names the same kind of model: both are refused, with the code
+    // `profile_unknown` has (`WORKFLOW_INVALID`) and the issue `model_not_allowed`, and nothing is saved.
+    expect(results.map((r) => [r.key, r.ok])).toEqual([
+      ["issue-to-pr", false],
+      ["review-a-pull-request", false],
+    ]);
+    for (const result of results) {
+      expect(result).toMatchObject({ ok: false, code: "WORKFLOW_INVALID" });
+      expect(
+        result.ok ? [] : result.errors.map((error) => error.code),
+      ).toContain("model_not_allowed");
+    }
+    expect((await service.list(mine)).workflows).toEqual([]);
+  });
+
   // #937 (from the re-review of #936)
   it("reports a database error on the second built-in lane as that lane's failure only, and the first stays saved", async () => {
     const { db, idA, projectIds } = await setup();

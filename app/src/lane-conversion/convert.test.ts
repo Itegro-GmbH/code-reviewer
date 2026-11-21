@@ -453,7 +453,7 @@ describe("converting a lane document", () => {
       const { value, profile } = world();
       const first = await convertDocument(inline, value);
 
-      expect(first).toEqual({ steps: 0, reasons: [] });
+      expect(first).toEqual({ steps: 0, models: [], reasons: [] });
       expect(profile).not.toHaveBeenCalled();
     });
 
@@ -463,7 +463,7 @@ describe("converting a lane document", () => {
       const once = await convertDocument(lane(agent()), value);
       const again = await convertDocument(once.document, value);
 
-      expect(again).toEqual({ steps: 0, reasons: [] });
+      expect(again).toEqual({ steps: 0, models: [], reasons: [] });
     });
 
     // #1105-T232

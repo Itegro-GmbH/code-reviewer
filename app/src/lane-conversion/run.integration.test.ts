@@ -25,7 +25,42 @@ import {
 } from "../test-support/workspaces.ts";
 import { runLaneConversionCommand } from "./cli.ts";
 import { CONVERSION_CHANGE_DESCRIPTION } from "./convert.ts";
-import { runLaneConversion } from "./run.ts";
+import { LaneConversionError, runLaneConversion } from "./run.ts";
+
+/**
+ * The database with a hook on its first select that `match` recognises (the node of the query as JSON): `before` runs when the query is
+ * built and may throw (the query then fails), `after` runs once the query has its result and before the caller sees it. It is how a test
+ * makes somebody else act, or the database fail, at one exact moment of the run.
+ */
+function hooked(
+  db: Kysely<Database>,
+  hook: {
+    match: (node: string) => boolean;
+    before?: () => void;
+    after?: () => Promise<void>;
+  },
+): Kysely<Database> {
+  let fired = false;
+  const marked = new Set<string>();
+  return db.withPlugin({
+    transformQuery({ node, queryId }) {
+      if (
+        !fired &&
+        node.kind === "SelectQueryNode" &&
+        hook.match(JSON.stringify(node))
+      ) {
+        fired = true;
+        marked.add(queryId.queryId);
+        hook.before?.();
+      }
+      return node;
+    },
+    async transformResult({ result, queryId }) {
+      if (marked.has(queryId.queryId)) await hook.after?.();
+      return result;
+    },
+  });
+}
 
 const OWN_KEY_MODEL = { provider: "openai", model: "gpt-5" };
 const MANAGED_MODEL = { entryId: "entry-1" };
@@ -667,6 +702,298 @@ describe("the lane conversion against Postgres", () => {
     expect(stepA?.runner).not.toBe(stepB?.runner);
   });
 
+  // #1105-T340
+  it("lists a lane that somebody saved while it was converted as version_conflict, keeps the rival's version and writes nothing over it", async () => {
+    const w = await setup();
+    const id = await addLane(w.workflowsA, w.projectA, oldLane("Lane"));
+    const rival = oldLane("Lane", { instruction: "Rival." });
+    const db = hooked(w.db, {
+      // The environments are read after the lane was read and before it is saved.
+      match: (node) => node.includes('"name":"implementer_environments"'),
+      after: async () => {
+        await w.workflowsA.saveVersion(
+          id,
+          {
+            name: "Lane",
+            document: JSON.stringify(rival),
+            createdBy: "u-author",
+            changeDescription: "A person saved",
+          },
+          500,
+        );
+      },
+    });
+
+    const report = await runLaneConversion({
+      db,
+      dryRun: false,
+      workspaceId: w.idA,
+    });
+
+    expect(report.notConverted).toMatchObject([
+      { laneId: id, reasons: [{ code: "version_conflict" }] },
+    ]);
+    expect(report.counts.converted).toBe(0);
+    const found = await w.workflowsA.get(id);
+    expect(found?.workflow.version).toBe(2);
+    expect(JSON.parse(found?.current.document ?? "")).toEqual(rival);
+  });
+
+  // #1105-T341
+  it("lists a lane that holds the most versions it may as version_limit_reached and keeps it as it is", async () => {
+    const w = await setup();
+    const document = oldLane("Lane");
+    const id = await addLane(w.workflowsA, w.projectA, document);
+    for (let version = 2; version <= 500; version += 1)
+      await w.workflowsA.saveVersion(
+        id,
+        {
+          name: "Lane",
+          document: JSON.stringify(document),
+          createdBy: "u-author",
+        },
+        500,
+      );
+
+    const report = await runLaneConversion({
+      db: w.db,
+      dryRun: false,
+      workspaceId: w.idA,
+    });
+
+    expect(report.notConverted).toMatchObject([
+      { laneId: id, reasons: [{ code: "version_limit_reached" }] },
+    ]);
+    expect((await w.workflowsA.get(id))?.workflow.version).toBe(500);
+  }, 60_000);
+
+  // #1105-T342
+  it("lists a lane whose stored document is not JSON as document_unreadable and keeps it", async () => {
+    const w = await setup();
+    const created = await w.workflowsA.create(
+      {
+        name: "Broken",
+        document: "this is not json",
+        createdBy: "u-author",
+        projectId: w.projectA,
+      },
+      100,
+    );
+    if (!created.ok) throw new Error("lane");
+
+    const report = await runLaneConversion({
+      db: w.db,
+      dryRun: false,
+      workspaceId: w.idA,
+    });
+
+    expect(report.notConverted).toMatchObject([
+      {
+        laneId: created.workflow.id,
+        reasons: [{ code: "document_unreadable" }],
+      },
+    ]);
+    expect(
+      (await w.workflowsA.get(created.workflow.id))?.workflow.version,
+    ).toBe(1);
+  });
+
+  // #1105-T343
+  it("reports a lane that was archived while the run was going as lane_gone, not as already inline, and does not touch it", async () => {
+    const w = await setup();
+    await addLane(w.workflowsA, w.projectA, oldLane("Stays"));
+    const gone = await addLane(w.workflowsA, w.projectA, oldLane("Gone"));
+    const db = hooked(w.db, {
+      // The first read of the lanes is the list; the lane goes right after it.
+      match: (node) => node.includes('"name":"workflows"'),
+      after: async () => {
+        await w.workflowsA.archive(gone, 100);
+      },
+    });
+
+    const report = await runLaneConversion({
+      db,
+      dryRun: false,
+      workspaceId: w.idA,
+    });
+
+    expect(report.gone).toMatchObject([{ laneId: gone, outcome: "lane_gone" }]);
+    expect(report.counts).toMatchObject({
+      converted: 1,
+      lane_gone: 1,
+      already_inline: 0,
+    });
+    expect((await w.workflowsA.get(gone))?.workflow.version).toBe(1);
+  });
+
+  // #1105-T344
+  it("keeps the report of the workspaces already written when another workspace fails, lists the failure, and writes a line for each lane as it is done", async () => {
+    const w = await setup();
+    const [first, second] = [w.idA, w.idB].sort() as [string, string];
+    const laneOf = (id: string) => (id === w.idA ? w.workflowsA : w.workflowsB);
+    const projectOf = (id: string) => (id === w.idA ? w.projectA : w.projectB);
+    const written = await addLane(
+      laneOf(first),
+      projectOf(first),
+      oldLane("Written"),
+    );
+    const lost = await addLane(
+      laneOf(second),
+      projectOf(second),
+      oldLane("Lost"),
+    );
+    const db = hooked(w.db, {
+      match: (node) =>
+        node.includes('"name":"workflows"') && node.includes(second),
+      before: () => {
+        throw Object.assign(new Error("connection lost to postgres://secret"), {
+          code: "08006",
+        });
+      },
+    });
+    const lines: string[] = [];
+    const warned: string[] = [];
+
+    const report = await runLaneConversion({
+      db,
+      dryRun: false,
+      progress: (line) => lines.push(line),
+      warn: (line) => warned.push(line),
+    });
+
+    expect(report.complete).toBe(true);
+    expect(report.workspaceFailures).toMatchObject([
+      { workspaceId: second, code: "08006" },
+    ]);
+    expect(report.lanes).toMatchObject([
+      { laneId: written, outcome: "converted" },
+    ]);
+    expect(lines.join("\n")).toContain(`converted workspace ${first}`);
+    expect((await laneOf(first).get(written))?.workflow.version).toBe(2);
+    expect((await laneOf(second).get(lost))?.workflow.version).toBe(1);
+    expect(JSON.stringify([report, warned])).not.toContain("secret");
+  });
+
+  // #1105-T345
+  it("ends early with what was done when the failure is outside the handling of a workspace: the report says so", async () => {
+    const w = await setup();
+    const [first, second] = [w.idA, w.idB].sort() as [string, string];
+    const laneOf = (id: string) => (id === w.idA ? w.workflowsA : w.workflowsB);
+    const projectOf = (id: string) => (id === w.idA ? w.projectA : w.projectB);
+    const written = await addLane(
+      laneOf(first),
+      projectOf(first),
+      oldLane("Written"),
+    );
+    const db = hooked(w.db, {
+      match: (node) =>
+        node.includes('"name":"workflows"') && node.includes(second),
+      before: () => {
+        throw Object.assign(new Error("down"), { code: "08006" });
+      },
+    });
+
+    // The note of the failed workspace cannot be written: the run itself fails, and its report must survive.
+    const report = await runLaneConversion({
+      db,
+      dryRun: false,
+      warn: () => {
+        throw new Error("stderr is closed");
+      },
+    });
+
+    expect(report.complete).toBe(false);
+    expect(report.aborted).toMatchObject({ code: "Error" });
+    expect(report.workspacesReached).toBe(2);
+    expect(report.lanes).toMatchObject([
+      { laneId: written, outcome: "converted" },
+    ]);
+  });
+
+  // #1105-T346
+  it("refuses a workspace that does not exist, and a run over one workspace says that it covered only that one", async () => {
+    const w = await setup();
+    await addLane(w.workflowsA, w.projectA, oldLane("Lane"));
+
+    await expect(
+      runLaneConversion({ db: w.db, dryRun: false, workspaceId: "typo" }),
+    ).rejects.toMatchObject({
+      code: "LANE_CONVERSION_WORKSPACE_NOT_FOUND",
+    });
+    await expect(
+      runLaneConversion({ db: w.db, dryRun: false, workspaceId: "typo" }),
+    ).rejects.toBeInstanceOf(LaneConversionError);
+    const report = await runLaneConversion({
+      db: w.db,
+      dryRun: false,
+      workspaceId: w.idA,
+    });
+    expect(report.scope).toEqual({ kind: "workspace", workspaceId: w.idA });
+    expect(report.workspaces).toBe(1);
+  });
+
+  // #1105-T347
+  it("lists every converted step whose model was not checked, and warns for each lane archived without a project", async () => {
+    const w = await setup();
+    const id = await addLane(w.workflowsA, w.projectA, oldLane("Lane"));
+    const orphan = await addLane(w.workflowsA, undefined, oldLane("Orphan"));
+
+    const report = await runLaneConversion({
+      db: w.db,
+      dryRun: false,
+      workspaceId: w.idA,
+    });
+
+    const lane = report.lanes.find((entry) => entry.laneId === id);
+    expect(lane?.warnings).toMatchObject([
+      { code: "model_unchecked", stepId: "implement" },
+    ]);
+    expect(lane?.warnings[0]?.message).toContain("catalog entry entry-1");
+    expect(
+      report.lanes.find((entry) => entry.laneId === orphan)?.warnings,
+    ).toMatchObject([{ code: "archived_without_project" }]);
+    expect(report.warned.map((entry) => entry.laneId).sort()).toEqual(
+      [id, orphan].sort(),
+    );
+  });
+
+  // #1105-T348
+  it("reads the environments again for each lane, so a change made while the run goes is seen by the next lane", async () => {
+    const w = await setup();
+    const first = await addLane(
+      w.workflowsA,
+      w.projectA,
+      oldLane("A first", { profile: "implementer" }),
+    );
+    const second = await addLane(
+      w.workflowsA,
+      w.projectA,
+      oldLane("B second", { profile: "implementer" }),
+    );
+    const db = hooked(w.db, {
+      match: (node) => node.includes('"name":"implementer_environments"'),
+      after: async () => {
+        // After the first lane read the environments: the environment's size changes from 4 to 2 vCPU.
+        await w.db
+          .updateTable("implementer_environments")
+          .set({ vcpus: 2 })
+          .where("id", "=", w.nodeA.id)
+          .execute();
+      },
+    });
+
+    await runLaneConversion({ db, dryRun: false, workspaceId: w.idA });
+
+    const runnerOf = async (id: string) =>
+      (
+        JSON.parse((await w.workflowsA.get(id))?.current.document ?? "") as {
+          steps: { runner: string }[];
+        }
+      ).steps[0]?.runner;
+    expect(await runnerOf(first)).toBe(await hostedId(w, 4));
+    expect(await runnerOf(second)).toBe(await hostedId(w, 2));
+  });
+
   describe("pnpm lanes:convert", () => {
     const recorder = () => {
       const out: string[] = [];
@@ -701,7 +1028,7 @@ describe("the lane conversion against Postgres", () => {
       expect(first.err).toEqual([]);
       expect(first.out.join("\n")).toContain(stuck);
       expect(first.out.join("\n")).toContain("profile_missing");
-      expect(first.out.join("\n")).toContain("dry run");
+      expect(first.out.join("\n")).toContain("DRY RUN");
       expect(first.out.join("\n")).not.toContain(w.url);
       await w.workflowsA.archive(stuck, 100);
       const second = recorder();
@@ -716,6 +1043,81 @@ describe("the lane conversion against Postgres", () => {
         dryRun: false,
         notConverted: [],
       });
+    });
+
+    // #1105-T322
+    it("exits 3 on a dry run with lanes that would be converted, writes nothing, and never says the list is empty", async () => {
+      const w = await setup();
+      const id = await addLane(w.workflowsA, w.projectA, oldLane("Lane"));
+      const orphan = await addLane(w.workflowsA, undefined, oldLane("Orphan"));
+      const run = recorder();
+
+      const exit = await runLaneConversionCommand(
+        { DATABASE_URL_MIGRATE: w.url },
+        ["--dry-run"],
+        run.io,
+      );
+
+      expect(exit).toBe(3);
+      expect(run.out.join("\n")).toContain("DRY RUN");
+      expect(run.out.join("\n")).toContain("would convert");
+      expect(run.out.join("\n")).not.toContain(
+        "The list of release A is empty",
+      );
+      expect((await w.workflowsA.get(id))?.workflow.version).toBe(1);
+      expect((await w.workflowsA.get(orphan))?.workflow.archivedAt).toBeNull();
+      expect(await w.workflowsA.listVersions(id)).toHaveLength(1);
+    });
+
+    // #1105-T323
+    it("with --workspace: a known workspace is covered alone and says so, an unknown one is an error that touches nothing", async () => {
+      const w = await setup();
+      const a = await addLane(w.workflowsA, w.projectA, oldLane("Lane"));
+      const b = await addLane(w.workflowsB, w.projectB, oldLane("Lane"));
+      const known = recorder();
+
+      const exit = await runLaneConversionCommand(
+        { DATABASE_URL_MIGRATE: w.url },
+        ["--workspace", w.idA, "--json"],
+        known.io,
+      );
+
+      expect(exit).toBe(0);
+      expect(JSON.parse(known.out.join("\n"))).toMatchObject({
+        scope: { kind: "workspace", workspaceId: w.idA },
+        workspaces: 1,
+        counts: { converted: 1 },
+      });
+      expect((await w.workflowsA.get(a))?.workflow.version).toBe(2);
+      expect((await w.workflowsB.get(b))?.workflow.version).toBe(1);
+      // The line of the lane went to stderr, so stdout stayed one JSON document.
+      expect(known.err.join("\n")).toContain("converted workspace");
+
+      const text = recorder();
+      expect(
+        await runLaneConversionCommand(
+          { DATABASE_URL_MIGRATE: w.url },
+          ["--workspace", w.idB],
+          text.io,
+        ),
+      ).toBe(0);
+      expect(text.out.join("\n")).toContain(`ONLY workspace ${w.idB}`);
+      expect(text.out.join("\n")).not.toContain(
+        "The list of release A is empty",
+      );
+
+      const unknown = recorder();
+      expect(
+        await runLaneConversionCommand(
+          { DATABASE_URL_MIGRATE: w.url },
+          ["--workspace", "typo"],
+          unknown.io,
+        ),
+      ).toBe(1);
+      expect(unknown.err.join("\n")).toContain(
+        "LANE_CONVERSION_WORKSPACE_NOT_FOUND",
+      );
+      expect(unknown.out).toEqual([]);
     });
 
     // #1105-T321

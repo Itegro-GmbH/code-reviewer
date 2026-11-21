@@ -285,6 +285,15 @@ const BUILT_IN_PROFILES: Record<BuiltInRole, string> = {
  * The settings of a built-in agent (#1105, ADR 0007): what the profile `implementer@1` or `reviewer@1` of the workspace holds (the harness,
  * the model, the push right, the instructions) and the id of the workspace's hosted runner of 4 vCPU. The profile and the runner are
  * what the built-in lanes needed before, so a workspace that could copy them can still; a missing one is the validator's own answer.
+ *
+ * RELEASE B FOLLOW-UP (ADR 0007): the profile pages and routes go away in release B, and then `implementer@1` / `reviewer@1` can no longer be
+ * made, so this copy can never succeed for a workspace that lacks them (`profile_unknown` at `/steps`). Release B must first give the built-in
+ * lanes another source of settings (instance-level defaults, or settings stored with the built-in lane). Until then this is the source.
+ *
+ * A built-in lane goes through `createLane`, so it also meets the model rule of a save (`model_not_allowed`): a profile's model that the
+ * workspace cannot run any more refuses the copy of the lane, which the profile form did not (its rule ran when the profile was saved).
+ * Project creation reports it per lane exactly like `profile_unknown`: `{ key, ok: false, code: "WORKFLOW_INVALID" }`, and the others
+ * are still copied.
  */
 async function builtInSettings(
   role: BuiltInRole,

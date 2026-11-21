@@ -10,6 +10,17 @@
 // A dry run does everything but the writes: it reads, converts and validates exactly as a real run does and says what it would do. (A
 // workspace that lacks a hosted runner type gets it made when its runners are read, as it does when any page lists them: that is the
 // platform repairing itself and the only write a dry run can cause.)
+//
+// What a run never does, on purpose, and says in its report:
+//  - It does not check the model rule of a save (`model_not_allowed`). That check (`implementerModelsFor`) reads the workspace's keys,
+//    which means decrypting them with the app secret, and the entitlements and catalogs of the running app: a script run with the migrate
+//    URL has neither the secret nor the wiring, and must not have them. A converted step keeps the model its profile ran with (the claim
+//    refuses one that is gone at the run, as it did before), and every converted lane is listed under the warning `model_unchecked` with
+//    the steps and models, so the operator sees which lanes a later save in the app could refuse.
+//  - It does not cover a workspace it was not asked about: a run with `--workspace` says so in its report and is never the gate of release B.
+//
+// The environments and runners a lane is converted against are read again for every lane (a few small queries), so a change an owner makes
+// while the job runs is seen by the next lane; the profiles were always read live. The save re-reads the runners itself.
 import type { Kysely } from "kysely";
 import { errorCode } from "../db/errors.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
@@ -23,9 +34,11 @@ import {
   type StoredWorkflow,
 } from "../db/repositories/workflows-repository.ts";
 import type { Database } from "../db/schema.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { WorkflowError } from "../workflows/errors.ts";
 import { createWorkflowService } from "../workflows/service.ts";
 import { CONVERSION_CHANGE_DESCRIPTION, convertDocument } from "./convert.ts";
+import { progressLine } from "./format.ts";
 import {
   LANE_OUTCOMES,
   type ConversionReason,
@@ -34,8 +47,20 @@ import {
   type LaneConversionReport,
   type LaneOutcome,
   type LaneReportEntry,
+  type LaneWarning,
   type ProfileLookup,
+  type WorkspaceFailure,
 } from "./types.ts";
+
+/** A run that cannot start: the stable code a caller branches on, and a sentence that names no secret. */
+export class LaneConversionError extends Error {
+  readonly code: "LANE_CONVERSION_WORKSPACE_NOT_FOUND";
+  constructor(code: LaneConversionError["code"], message: string) {
+    super(message);
+    this.name = "LaneConversionError";
+    this.code = code;
+  }
+}
 
 export type LaneConversionOptions = {
   db: Kysely<Database>;
@@ -45,6 +70,11 @@ export type LaneConversionOptions = {
   workspaceId?: string;
   /** Where an unexpected failure of one lane is noted (its database error code, never its text). Left out: `console.error`. */
   warn?: (line: string) => void;
+  /**
+   * Called with one line for every lane as soon as it is done (converted, archived, listed), so what a run did survives a crash of the
+   * run: the line is out before the next lane is touched. Left out: nothing.
+   */
+  progress?: (line: string) => void;
 };
 
 /** A workspace may hold more archived lanes than the limit of a person's archive; the conversion archives past it rather than leave the lane. */
@@ -65,15 +95,14 @@ async function workspaceIds(
   return (await query.execute()).map((row) => row.id);
 }
 
-/** What the conversion asks of one workspace's data, read through the repositories the app itself uses. */
+/**
+ * What the conversion asks of one workspace's data, read through the repositories the app itself uses. Read for each lane, not once for
+ * the workspace: a run over many lanes can last, and an environment an owner changed or a runner an owner revoked meanwhile is seen by
+ * the next lane.
+ */
 async function worldOf(
-  db: Kysely<Database>,
-  workspaceId: string,
-): Promise<{
-  world: ConversionWorld;
-  repositories: ReturnType<typeof repositoriesOf>;
-}> {
-  const repositories = repositoriesOf(db, workspaceId);
+  repositories: ReturnType<typeof repositoriesOf>,
+): Promise<ConversionWorld> {
   const live = new Set(
     (await repositories.profiles.list()).map((profile) => profile.name),
   );
@@ -138,7 +167,7 @@ async function worldOf(
     hostedRunners: () => hosted,
     selfHostedRunners: () => selfHosted,
   };
-  return { world, repositories };
+  return world;
 }
 
 function repositoriesOf(db: Kysely<Database>, workspaceId: string) {
@@ -208,9 +237,31 @@ function saveFailure(
   };
 }
 
+/** A model as the report names it: the provider and model id, or the id of the catalog entry. Never a key. */
+function describeModel(model: ModelChoice): string {
+  return "entryId" in model
+    ? `catalog entry ${model.entryId}`
+    : `${model.provider}/${model.model}`;
+}
+
+/** The warnings of a lane the conversion wrote (or would write): every model that came from a profile was not checked. */
+function modelWarnings(
+  models: readonly { stepId: string; model: ModelChoice }[],
+): LaneWarning[] {
+  return models.map(({ stepId, model }) => ({
+    code: "model_unchecked",
+    stepId,
+    message: `The model of step ${stepId} (${describeModel(model)}) came from its profile and was not checked against the workspace's model rule; a later save of the lane in the app may refuse it (model_not_allowed).`,
+  }));
+}
+
+const archivedWarning = (dryRun: boolean): LaneWarning => ({
+  code: "archived_without_project",
+  message: `The lane has no project and ${dryRun ? "would be" : "was"} archived. A trigger or an MCP assignment that still points at it no longer runs it: check them.`,
+});
+
 async function convertLane(
   lane: StoredWorkflow,
-  world: ConversionWorld,
   repositories: ReturnType<typeof repositoriesOf>,
   service: ReturnType<typeof createWorkflowService>,
   options: LaneConversionOptions,
@@ -226,15 +277,36 @@ async function convertLane(
     projectId: lane.projectId,
     outcome,
     reasons: [],
+    warnings: [],
     ...rest,
   });
   if (lane.projectId === null) {
-    if (options.dryRun) return entry("would_archive_without_project");
-    await repositories.workflows.archive(lane.id, NO_ARCHIVE_LIMIT);
-    return entry("archived_without_project");
+    if (options.dryRun)
+      return entry("would_archive_without_project", {
+        warnings: [archivedWarning(true)],
+      });
+    const archived = await repositories.workflows.archive(
+      lane.id,
+      NO_ARCHIVE_LIMIT,
+    );
+    if (archived.ok)
+      return entry("archived_without_project", {
+        warnings: [archivedWarning(false)],
+      });
+    if (archived.reason === "not_found") return entry("lane_gone");
+    return entry("not_converted", {
+      reasons: [
+        {
+          code: "save_failed",
+          message: `The archive was refused (${archived.reason}).`,
+        },
+      ],
+    });
   }
   const found = await repositories.workflows.get(lane.id);
-  if (found === undefined) return entry("already_inline");
+  // Deleted, or archived by somebody, since the run listed it: nothing to convert, and not "already in the new form".
+  if (found === undefined || found.workflow.archivedAt !== null)
+    return entry("lane_gone");
   const { current } = found;
   let stored: unknown;
   try {
@@ -249,21 +321,24 @@ async function convertLane(
       ],
     });
   }
-  const converted = await convertDocument(stored, world);
+  const converted = await convertDocument(stored, await worldOf(repositories));
   if (converted.reasons.length > 0)
     return entry("not_converted", { reasons: converted.reasons });
   if (converted.document === undefined) return entry("already_inline");
 
-  // The same validator a save uses, with the runner rules at the step's runner. Any issue: no version.
+  // The same validator a save uses, with the runner rules at the step's runner, but not its model rule (see the top of this file).
+  // Any issue: no version.
   const checked = await service.validate(converted.document);
   if (!checked.valid)
     return entry("not_converted", {
       reasons: [validationReason(checked.errors)],
     });
+  const warnings = modelWarnings(converted.models);
   if (options.dryRun)
     return entry("would_convert", {
       version: current.version + 1,
       steps: converted.steps,
+      warnings,
     });
   try {
     const saved = await service.update(
@@ -279,6 +354,7 @@ async function convertLane(
     return entry("converted", {
       version: saved.version,
       steps: converted.steps,
+      warnings,
     });
   } catch (error) {
     return entry("not_converted", {
@@ -287,40 +363,99 @@ async function convertLane(
   }
 }
 
+/** The code of an unexpected failure, as a person may read it: the database's code or the error's name, never its text. */
+function failureCode(error: unknown): string {
+  return errorCode(error) ?? (error instanceof Error ? error.name : "unknown");
+}
+
+/** Every lane of one workspace, pushed to `lanes` one by one so a failure later in the workspace loses none of them. */
+async function convertWorkspace(
+  db: Kysely<Database>,
+  workspaceId: string,
+  lanes: LaneReportEntry[],
+  options: LaneConversionOptions,
+  warn: (line: string) => void,
+  progress: (line: string) => void,
+): Promise<void> {
+  const repositories = repositoriesOf(db, workspaceId);
+  const service = createWorkflowService({
+    workflows: repositories.workflows,
+    projects: repositories.projects,
+    environments: repositories.environments,
+    profiles: repositories.profiles,
+    mcpServers: repositories.mcpServers,
+    mcpOAuth: repositories.mcpOAuth,
+    runners: repositories.runners,
+  });
+  for (const lane of await repositories.workflows.list()) {
+    let entry: LaneReportEntry;
+    try {
+      entry = await convertLane(lane, repositories, service, options, warn);
+    } catch (error) {
+      // One lane never stops the others: it is listed, and a run again tries it again.
+      entry = {
+        workspaceId,
+        laneId: lane.id,
+        laneName: lane.name,
+        projectId: lane.projectId,
+        outcome: "not_converted",
+        reasons: [saveFailure(error, warn, lane.id)],
+        warnings: [],
+      };
+    }
+    lanes.push(entry);
+    if (entry.outcome !== "already_inline") progress(progressLine(entry));
+  }
+}
+
+/**
+ * Runs the conversion. It throws only when it cannot start (an unknown `--workspace`, or the workspaces cannot be read). Once it has
+ * started it always returns its report: a failure in one workspace is listed (`workspaceFailures`) and the next workspace goes on, and a
+ * failure outside that ends the run early with `complete: false` and everything done up to then in the report.
+ */
 export async function runLaneConversion(
   options: LaneConversionOptions,
 ): Promise<LaneConversionReport> {
   const warn = options.warn ?? ((line: string) => console.error(line));
+  const progress = options.progress ?? (() => undefined);
   const ids = await workspaceIds(options.db, options.workspaceId);
+  if (options.workspaceId !== undefined && ids.length === 0)
+    throw new LaneConversionError(
+      "LANE_CONVERSION_WORKSPACE_NOT_FOUND",
+      `There is no workspace "${options.workspaceId}" that is not deleted. Nothing was looked at.`,
+    );
   const lanes: LaneReportEntry[] = [];
-  for (const workspaceId of ids) {
-    const { world, repositories } = await worldOf(options.db, workspaceId);
-    const service = createWorkflowService({
-      workflows: repositories.workflows,
-      projects: repositories.projects,
-      environments: repositories.environments,
-      profiles: repositories.profiles,
-      mcpServers: repositories.mcpServers,
-      mcpOAuth: repositories.mcpOAuth,
-      runners: repositories.runners,
-    });
-    for (const lane of await repositories.workflows.list()) {
+  const workspaceFailures: WorkspaceFailure[] = [];
+  let reached = 0;
+  let aborted: LaneConversionReport["aborted"];
+  try {
+    for (const workspaceId of ids) {
+      reached += 1;
       try {
-        lanes.push(
-          await convertLane(lane, world, repositories, service, options, warn),
+        await convertWorkspace(
+          options.db,
+          workspaceId,
+          lanes,
+          options,
+          warn,
+          progress,
         );
       } catch (error) {
-        // One lane never stops the others: it is listed, and a run again tries it again.
-        lanes.push({
+        const code = failureCode(error);
+        warn(`[lanes:convert] workspace ${workspaceId}: failed (${code})`);
+        workspaceFailures.push({
           workspaceId,
-          laneId: lane.id,
-          laneName: lane.name,
-          projectId: lane.projectId,
-          outcome: "not_converted",
-          reasons: [saveFailure(error, warn, lane.id)],
+          code,
+          message:
+            "The workspace could not be read or finished, so lanes of it may not have been looked at. See the log; run it again.",
         });
       }
     }
+  } catch (error) {
+    aborted = {
+      code: failureCode(error),
+      message: `The run ended early: ${String(ids.length - reached)} workspace(s) were not reached and the workspace being worked on may be half done (each lane is saved whole or not at all). Run it again.`,
+    };
   }
   const counts = Object.fromEntries(
     LANE_OUTCOMES.map((outcome) => [
@@ -330,7 +465,15 @@ export async function runLaneConversion(
   ) as LaneConversionReport["counts"];
   return {
     dryRun: options.dryRun,
+    scope:
+      options.workspaceId === undefined
+        ? { kind: "all" }
+        : { kind: "workspace", workspaceId: options.workspaceId },
+    complete: aborted === undefined,
+    ...(aborted === undefined ? {} : { aborted }),
     workspaces: ids.length,
+    workspacesReached: reached,
+    workspaceFailures,
     lanes,
     notConverted: lanes.filter((lane) => lane.outcome === "not_converted"),
     archivedWithoutProject: lanes.filter(
@@ -338,6 +481,8 @@ export async function runLaneConversion(
         lane.outcome === "archived_without_project" ||
         lane.outcome === "would_archive_without_project",
     ),
+    warned: lanes.filter((lane) => lane.warnings.length > 0),
+    gone: lanes.filter((lane) => lane.outcome === "lane_gone"),
     counts,
   };
 }

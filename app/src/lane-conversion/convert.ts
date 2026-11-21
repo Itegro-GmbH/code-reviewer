@@ -7,6 +7,7 @@
 import { agentNodesOf, isInlineStep } from "../workflows/agent-settings.ts";
 import { isRecord } from "../workflows/json.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type {
   ConversionReason,
   ConversionWorld,
@@ -20,6 +21,11 @@ export type DocumentConversion = {
   document?: Record<string, unknown>;
   /** How many agent steps were written inline. */
   steps: number;
+  /**
+   * The model each converted step now names, for the steps whose model came from a profile. The conversion does not check these against
+   * the workspace's model rule (see `model_unchecked`); the caller reports them so the operator sees them.
+   */
+  models: { stepId: string; model: ModelChoice }[];
   /** Empty when the document converted (or had nothing to convert). */
   reasons: ConversionReason[];
 };
@@ -246,6 +252,7 @@ export async function convertDocument(
   if (!isRecord(stored))
     return {
       steps: 0,
+      models: [],
       reasons: [
         {
           code: "document_unreadable",
@@ -258,6 +265,7 @@ export async function convertDocument(
   const nodes = [...agentNodesOf(copy)].filter(needsConversion);
   const reasons: ConversionReason[] = [];
   const done: (() => void)[] = [];
+  const models: DocumentConversion["models"] = [];
   for (const node of nodes) {
     const profile = await profileOf(node, world);
     if (!profile.ok) {
@@ -274,12 +282,14 @@ export async function convertDocument(
       reasons.push(runner.reason);
       continue;
     }
+    if (profile.value !== undefined)
+      models.push({ stepId: stepIdOf(node), model: profile.value.model });
     done.push(() =>
       write(node, profile.value, environment.value, runner.value.id),
     );
   }
-  if (reasons.length > 0) return { steps: 0, reasons };
-  if (done.length === 0) return { steps: 0, reasons: [] };
+  if (reasons.length > 0) return { steps: 0, models: [], reasons };
+  if (done.length === 0) return { steps: 0, models: [], reasons: [] };
   for (const apply of done) apply();
-  return { document: copy, steps: done.length, reasons: [] };
+  return { document: copy, steps: done.length, models, reasons: [] };
 }

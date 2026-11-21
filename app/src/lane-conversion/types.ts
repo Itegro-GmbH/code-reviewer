@@ -117,8 +117,31 @@ export const LANE_OUTCOMES = [
   "archived_without_project",
   /** Dry run: the lane would be archived. */
   "would_archive_without_project",
+  /** The lane was deleted or archived by somebody between the moment the run listed it and the moment it was looked at. Nothing was done. */
+  "lane_gone",
 ] as const;
 export type LaneOutcome = (typeof LANE_OUTCOMES)[number];
+
+/** A note on a lane that does not keep it from being converted or archived but that the operator should read. */
+export const LANE_WARNING_CODES = [
+  /**
+   * The model of a step the conversion wrote (it came from the profile) was **not** checked against the workspace's model rule
+   * (`model_not_allowed`, the rule of a save): the check needs the workspace's keys and the catalog entitlements, which a script run with
+   * the migrate URL cannot read without decrypting the keys. The next save of the lane by the app may refuse the model.
+   */
+  "model_unchecked",
+  /** The lane has no project and was archived (or would be): a trigger or an MCP assignment that still points at it no longer runs it. */
+  "archived_without_project",
+] as const;
+export type LaneWarningCode = (typeof LANE_WARNING_CODES)[number];
+
+export type LaneWarning = {
+  code: LaneWarningCode;
+  /** The step the warning is about; left out for a warning about the lane. */
+  stepId?: string;
+  /** In a sentence. Never a secret: a model is named by its provider and model id, or by the id of the catalog entry. */
+  message: string;
+};
 
 export type LaneReportEntry = {
   workspaceId: string;
@@ -131,11 +154,36 @@ export type LaneReportEntry = {
   /** How many agent steps were written inline (`converted`, `would_convert`). */
   steps?: number;
   reasons: ConversionReason[];
+  /** Notes that do not stop the lane from being converted or archived (`converted`, `would_convert`, the archived lanes). */
+  warnings: LaneWarning[];
 };
+
+/** A workspace the run could not read or finish (a failure outside the handling of one lane). It is on the list: run again. */
+export type WorkspaceFailure = {
+  workspaceId: string;
+  /** The database error code or the error's name, never its text (it could carry a connection string). */
+  code: string;
+  message: string;
+};
+
+/** What the run covered: the whole instance, or the one workspace `--workspace` named. Only the first can say "the list is empty". */
+export type ReportScope =
+  { kind: "all" } | { kind: "workspace"; workspaceId: string };
 
 export type LaneConversionReport = {
   dryRun: boolean;
+  scope: ReportScope;
+  /**
+   * False when the run ended early (an error outside the handling of a workspace, or the lock was lost): what is in the report is what
+   * was done up to then, and the lanes of the workspaces that were not reached are not in it.
+   */
+  complete: boolean;
+  /** Why the run ended early, when it did. */
+  aborted?: { code: string; message: string };
+  /** The workspaces the run was asked to cover, and how many of them it reached. */
   workspaces: number;
+  workspacesReached: number;
+  workspaceFailures: WorkspaceFailure[];
   /** Every lane that is not archived and was looked at, in the order of the workspaces. */
   lanes: LaneReportEntry[];
   /**
@@ -145,5 +193,9 @@ export type LaneConversionReport = {
   notConverted: LaneReportEntry[];
   /** Lanes without a project that were archived (or, in a dry run, would be). */
   archivedWithoutProject: LaneReportEntry[];
+  /** The lanes that carry a warning, converted or not. */
+  warned: LaneReportEntry[];
+  /** The lanes that disappeared while the run was going. */
+  gone: LaneReportEntry[];
   counts: Record<LaneOutcome, number>;
 };
