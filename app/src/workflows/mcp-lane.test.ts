@@ -4,6 +4,7 @@
 // two lists against the servers of the workspace, and `effectiveMcpServers` is the one answer the runtime (#1053) reads.
 import { describe, expect, it } from "vitest";
 import { BUILT_IN_LANE_KEYS, builtInLaneDocument } from "./built-in-lanes.ts";
+import { EXAMPLE_BUILT_IN_AGENTS } from "./test-fixtures.ts";
 import { BUILT_IN_CONNECTORS } from "./connectors.ts";
 import { isFormIssue } from "./issues.ts";
 import {
@@ -359,7 +360,7 @@ describe("a lane without MCP", () => {
   // #1052-T03
   it("is what every built-in lane is: none of them names a server", () => {
     for (const key of BUILT_IN_LANE_KEYS) {
-      const document = builtInLaneDocument(key, "node");
+      const document = builtInLaneDocument(key, EXAMPLE_BUILT_IN_AGENTS);
 
       expect(JSON.stringify(document)).not.toContain('"mcp"');
       expect(laneMcpServers(document)).toEqual([]);

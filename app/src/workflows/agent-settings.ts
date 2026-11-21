@@ -223,7 +223,9 @@ export function runnerIdsIn(document: unknown, limit: number): string[] {
  * overflow) and starts only at the places steps live (`steps`, `onFailure` and the pre-steps of `triggers`), so an agent-shaped object in a
  * description or an input default is not a step. A caller that wants only some of them stops reading.
  */
-function* agentNodesOf(document: unknown): Generator<Record<string, unknown>> {
+export function* agentNodesOf(
+  document: unknown,
+): Generator<Record<string, unknown>> {
   // Children go on the stack reversed, so the nodes come in the order the document names them.
   const pending: unknown[] = isRecord(document)
     ? [document.triggers, document.steps, document.onFailure]

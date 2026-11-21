@@ -5,6 +5,7 @@
 // version stays readable, and a workspace never sees the workflows of another.
 import { describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createNamedRunnersRepository } from "../db/repositories/named-runners-repository.ts";
 import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -76,6 +77,7 @@ async function setup() {
       profiles: createProfilesRepository(db, workspaceId),
       mcpServers: createMcpServersRepository(db, workspaceId),
       mcpOAuth: createMcpOAuthRepository(db, workspaceId),
+      runners: createNamedRunnersRepository(db, workspaceId),
       ...options,
     });
   /** The service with the project of the workspace filled in for `create` and `list`, as the tests below read. */
@@ -613,6 +615,25 @@ describe("the workflow service", () => {
       (await service.list(mine)).workflows.map((w) => w.name).sort(),
     ).toEqual(["Issue to PR", "Review a pull request"]);
     expect(twice[0]).toMatchObject({ ok: false, code: "WORKFLOW_NAME_TAKEN" });
+
+    // #1105-T401: the copies carry the profiles' settings and the hosted runner of 4 vCPU inline, and name no profile or environment.
+    const hosted = (await createNamedRunnersRepository(db, idA).list()).find(
+      (runner) => runner.kind === "hosted" && runner.vcpus === 4,
+    );
+    const review = copied[1];
+    if (!review?.ok) throw new Error("the review lane was not copied");
+    const lane = await service.get(review.workflow.id);
+    expect(
+      (lane.document as { steps: Record<string, unknown>[] }).steps[0],
+    ).toMatchObject({
+      kind: "agent",
+      harness: "opencode",
+      model: PROFILE_CONTENT.model,
+      canPush: PROFILE_CONTENT.canPush,
+      runner: hosted?.id,
+    });
+    expect(JSON.stringify(lane.document)).not.toContain('"profile"');
+    expect(JSON.stringify(lane.document)).not.toContain('"environment"');
   });
 
   // #937 (from the re-review of #936)
@@ -639,6 +660,7 @@ describe("the workflow service", () => {
       projects: createProjectsRepository(db, idA),
       environments: createImplementerEnvironmentsRepository(db, idA),
       profiles: createProfilesRepository(db, idA),
+      runners: createNamedRunnersRepository(db, idA),
     });
     const mine = projectIds.get(idA)!;
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});

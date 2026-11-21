@@ -60,6 +60,14 @@ describe("docs/workflows.md", () => {
         createResolver({
           environments: [{ name: "node" }],
           profiles: FAKE_RESOLVER.profiles(),
+          // The built-in lanes name this hosted runner (#1105).
+          runners: [
+            {
+              id: "runner-vercel-4-vcpu",
+              name: "Vercel Sandbox 4 vCPU",
+              kind: "hosted",
+            },
+          ],
         }),
       ).errors,
     ).toEqual([]);

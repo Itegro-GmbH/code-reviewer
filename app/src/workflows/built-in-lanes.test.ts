@@ -7,21 +7,42 @@ import { describe, expect, it } from "vitest";
 import {
   BUILT_IN_LANE_KEYS,
   DEFAULT_LANE_STATUSES,
-  builtInLaneDocument,
+  builtInLaneDocument as documentOf,
   isBuiltInLaneKey,
   laneStatusesFromNames,
+  type BuiltInAgents,
+  type BuiltInLaneKey,
+  type LaneStatuses,
 } from "./built-in-lanes.ts";
-import { FAKE_RESOLVER } from "./test-fixtures.ts";
+import { agentNodesOf } from "./agent-settings.ts";
+import { createResolver } from "./resolver.ts";
+import type { TicketProviderName } from "./ticket-ref.ts";
+import { EXAMPLE_BUILT_IN_AGENTS } from "./test-fixtures.ts";
 import { validateWorkflow } from "./validate.ts";
+
+// The settings of the two agents the documentation's example has (`contracts/examples/workflow/Workflow.json`), and the runner they name.
+const RUNNER = "runner-vercel-4-vcpu";
+const AGENTS = EXAMPLE_BUILT_IN_AGENTS;
+/** A workspace with the hosted runner the built-in lanes name, and no profile and no environment: they need neither (#1105). */
+const RESOLVER = createResolver({
+  profiles: [],
+  environments: [],
+  runners: [{ id: RUNNER, name: "Vercel Sandbox 4 vCPU", kind: "hosted" }],
+});
+
+const builtInLaneDocument = (
+  key: BuiltInLaneKey,
+  agents: BuiltInAgents = AGENTS,
+  statuses?: LaneStatuses,
+  provider?: TicketProviderName,
+) => documentOf(key, agents, statuses, provider);
 
 describe("the built-in lanes", () => {
   // #922-T01
   it.each(BUILT_IN_LANE_KEYS)("%s validates clean", (key) => {
-    const result = validateWorkflow(
-      builtInLaneDocument(key, "node"),
-      FAKE_RESOLVER,
-      { maxBudgetUsd: 100 },
-    );
+    const result = validateWorkflow(builtInLaneDocument(key), RESOLVER, {
+      maxBudgetUsd: 100,
+    });
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
   });
@@ -30,7 +51,7 @@ describe("the built-in lanes", () => {
   it.each(BUILT_IN_LANE_KEYS)(
     "%s has a description: a new lane must have one (it is what version 1 says)",
     (key) => {
-      const { description } = builtInLaneDocument(key, "node") as {
+      const { description } = builtInLaneDocument(key) as {
         description?: unknown;
       };
       expect(
@@ -50,21 +71,54 @@ describe("the built-in lanes", () => {
         "utf8",
       ),
     ) as unknown;
-    expect(builtInLaneDocument("issue-to-pr", "node")).toEqual(example);
+    expect(builtInLaneDocument("issue-to-pr")).toEqual(example);
   });
 
   // #922-T03
-  it("takes the environment it is given and names the lane", () => {
-    const document = JSON.stringify(
-      builtInLaneDocument("review-a-pull-request", "Python"),
+  it("takes the settings and the runner of the agents it is given and names the lane", () => {
+    const own: BuiltInAgents = {
+      implementer: { ...AGENTS.implementer, runner: "r-1" },
+      reviewer: {
+        harness: "claude-code",
+        model: { provider: "claude-code", model: "sonnet" },
+        canPush: false,
+        runner: "r-2",
+      },
+    };
+    const review = JSON.stringify(
+      builtInLaneDocument("review-a-pull-request", own),
     );
-    expect(document).toContain('"environment":"Python"');
-    expect(document).toContain('"name":"Review a pull request"');
+    const both = JSON.stringify(builtInLaneDocument("issue-to-pr", own));
+
+    expect(review).toContain('"runner":"r-2"');
+    expect(review).toContain('"harness":"claude-code"');
+    expect(review).not.toContain('"runner":"r-1"');
+    expect(review).toContain('"name":"Review a pull request"');
+    expect(both).toContain('"runner":"r-1"');
+    expect(both).toContain(AGENTS.implementer.instructions);
   });
+
+  // #1105-T400
+  it.each(BUILT_IN_LANE_KEYS)(
+    "%s carries its agents' settings inline: no profile, no environment, a model, a push right and a runner on every agent step",
+    (key) => {
+      const text = JSON.stringify(builtInLaneDocument(key));
+      expect(text).not.toContain('"profile"');
+      expect(text).not.toContain('"environment"');
+      const agents = [...agentNodesOf(builtInLaneDocument(key))];
+      expect(agents.length).toBeGreaterThan(0);
+      for (const agent of agents)
+        expect(agent).toMatchObject({
+          model: expect.any(Object) as unknown,
+          canPush: expect.any(Boolean) as unknown,
+          runner: RUNNER,
+        });
+    },
+  );
 
   // #966-T01
   it("Issue to PR hands the reviewer the issue and the implementer's report", () => {
-    const document = builtInLaneDocument("issue-to-pr", "node") as {
+    const document = builtInLaneDocument("issue-to-pr") as {
       steps: { id: string; body?: { id: string; instruction?: unknown }[] }[];
     };
     const review = document.steps
@@ -80,7 +134,7 @@ describe("the built-in lanes", () => {
   // #966-T02
   it("Issue to PR tells both agents that the lane opens the pull request", () => {
     const fix = (
-      builtInLaneDocument("issue-to-pr", "node") as {
+      builtInLaneDocument("issue-to-pr") as {
         steps: { id: string; body?: { id: string; instruction?: unknown }[] }[];
       }
     ).steps.find((step) => step.id === "fix");
@@ -99,7 +153,7 @@ describe("the built-in lanes", () => {
 
   // #1036
   it("Issue to PR (status) starts on a move into its status, reports on the board and never moves a ticket into the status that starts it", () => {
-    const document = builtInLaneDocument("issue-to-pr-status", "node") as {
+    const document = builtInLaneDocument("issue-to-pr-status") as {
       name: string;
       triggers: { kind: string; to?: string }[];
     };
@@ -122,7 +176,7 @@ describe("the built-in lanes", () => {
       DEFAULT_LANE_STATUSES.back,
     ]);
     expect(statuses).not.toContain(DEFAULT_LANE_STATUSES.ready);
-    const result = validateWorkflow(document, FAKE_RESOLVER, {
+    const result = validateWorkflow(document, RESOLVER, {
       maxBudgetUsd: 100,
     });
     expect(result.warnings ?? []).toEqual([]);
@@ -138,12 +192,12 @@ describe("the built-in lanes", () => {
     };
     const document = builtInLaneDocument(
       "issue-to-pr-status",
-      "node",
+      AGENTS,
       statuses,
     );
 
     expect(
-      validateWorkflow(document, FAKE_RESOLVER, { maxBudgetUsd: 100 }).errors,
+      validateWorkflow(document, RESOLVER, { maxBudgetUsd: 100 }).errors,
     ).toEqual([]);
     const text = JSON.stringify(document);
     for (const name of Object.values(statuses)) expect(text).toContain(name);
@@ -154,7 +208,7 @@ describe("the built-in lanes", () => {
   it("Issue to PR (status) for a Jira project puts the key in the pull request title and the ticket address in its body, never `Closes #n`", () => {
     const document = builtInLaneDocument(
       "issue-to-pr-status",
-      "node",
+      AGENTS,
       DEFAULT_LANE_STATUSES,
       "jira",
     );
@@ -163,14 +217,14 @@ describe("the built-in lanes", () => {
     expect(text).toContain("Ticket: {{trigger.ticket.url}}");
     expect(text).not.toContain("Closes #");
     expect(text).toContain("jira:owner/repo#PROJ-128");
-    const result = validateWorkflow(document, FAKE_RESOLVER, {
+    const result = validateWorkflow(document, RESOLVER, {
       maxBudgetUsd: 100,
     });
     expect(result.errors).toEqual([]);
     // The GitHub lane keeps its words.
-    expect(
-      JSON.stringify(builtInLaneDocument("issue-to-pr-status", "node")),
-    ).toContain("Closes #{{trigger.ticket.number}}");
+    expect(JSON.stringify(builtInLaneDocument("issue-to-pr-status"))).toContain(
+      "Closes #{{trigger.ticket.number}}",
+    );
   });
 
   // #1040

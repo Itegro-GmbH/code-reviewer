@@ -604,8 +604,11 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
         {
           "id": "implement",
           "kind": "agent",
-          "profile": "implementer@1",
-          "environment": "node",
+          "harness": "opencode",
+          "model": { "entryId": "example-model" },
+          "canPush": true,
+          "instructions": "Work in small steps and run the tests before you finish.",
+          "runner": "runner-vercel-4-vcpu",
           "session": {
             "continue": "implement"
           },
@@ -627,8 +630,10 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
         {
           "id": "review",
           "kind": "agent",
-          "profile": "reviewer@1",
-          "environment": "node",
+          "harness": "opencode",
+          "model": { "entryId": "example-model" },
+          "canPush": false,
+          "runner": "runner-vercel-4-vcpu",
           "session": "new",
           "branch": "{{implement.branch}}",
           "instruction": "Review branch {{implement.branch}} against this issue. Do not change anything. The lane opens the pull request itself after the review; do not open one and do not report it as missing or open work.\n\nIssue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\nWhat the implementer reports it did. It names the answers people gave to its questions; those answers are binding, so do not report them as findings:\n{{implement.summary}}",
@@ -777,7 +782,7 @@ that was written before has no stored source and reads as the issues of its repo
 **Creating a project** in the factory is `POST /api/w/<slug>/projects` (Admins and Owners, like switching a repository on): the body is
 `{ "repositoryId", "board": { "projectV2Id" } | null, "lanes": ["issue-to-pr", "review-a-pull-request"] }`, `board` and `lanes` optional. The board must be one of the boards of the repository (`GET
 /api/w/<slug>/repositories/<id>/boards` lists them with the options of their Status field, read from GitHub with a token that may read boards and nothing else); the server takes the Status field from that list, never from
-the body. `lanes` copies the built-in lanes into the new project as lanes of its own (validated like any save, with the profiles `implementer` and `reviewer` and the first environment of the workspace by name): a lane that
+the body. `lanes` copies the built-in lanes into the new project as lanes of its own (validated like any save; the agent steps carry their settings and runner inline, taken from the profiles `implementer@1` and `reviewer@1` and the hosted runner of 4 vCPU, [Built-in lanes](#built-in-lanes)): a lane that
 cannot be copied is reported in `lanes: [{ key, ok, workflowId | code }]` and does not undo the project; each lane is caught on its own (#937), so a database error on the second lane is `ok: false` with `code: "LANE_COPY_FAILED"` for that lane only and the first stays saved (when the copying fails altogether, every lane is `LANE_COPY_FAILED`). The answer is `201 { project: { id, repositoryId, active, ticketSource }, lanes }`; a body that cannot be used is
 `400 PROJECT_REQUEST_INVALID` with `issues: [{ path, code, message, available }]` (`unknown_field`, `missing_field`, `wrong_type`, `invalid_value`, `unknown_lane`, `duplicate_lane`, `unknown_board`, `board_without_status`,
 `board_unavailable`; `available` lists what would have been accepted); a repository that is a project already is `409 PROJECT_ALREADY_EXISTS`. The tickets of a project are `GET /api/w/<slug>/projects/<id>/issues`, the same
@@ -793,9 +798,9 @@ hint when the last full sync is **older than 3 days** and no delivery has writte
 
 ### Built-in lanes
 
-> **Superseded (ADR 0007, epic #1103).** The built-in lanes name the profiles `implementer@1` and `reviewer@1` and an environment; they get the settings and a runner inline with #1105 ([ADR 0007](decisions/0007-ai-configured-factory.md)).
+> **ADR 0007 (epic #1103, #1105).** The built-in lanes write their agents' settings and their runner **into the steps**; they name no profile and no environment. The profile pages go in a later release.
 
-A new project may copy three lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Both need the profile versions `implementer@1` (may push) and `reviewer@1` (may not) and run in the first environment of the workspace by name.
+A new project may copy three lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Every agent step of a copy carries `harness`, `model`, `canPush`, `instructions` (when there are any) and `runner`: the values come from the profile versions `implementer@1` (may push) and `reviewer@1` (may not) of the workspace (until the profiles go, they are where a new workspace's agent settings are written down; a workspace without one gets `profile_unknown` for that lane), and the runner is the workspace's **hosted runner of 4 vCPU** ("Vercel Sandbox 4 vCPU"). A script and a network rule the old first environment held are not carried over: add `setupScript` and `network` to the step by saving a new version.
 
 | Key | Lane | Starts | Does | Budget |
 |---|---|---|---|---|
