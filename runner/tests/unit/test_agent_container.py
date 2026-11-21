@@ -1531,10 +1531,9 @@ def test_a_container_made_for_the_agent_with_no_script_is_held_to_its_own_defini
 
 # #1009-T30
 def test_an_adopted_container_must_be_as_sealed_as_the_seams_say(rig: Rig) -> None:
-    """The Claude Code harness is refused with a setup script (`subscription_setup_script`) because
-    its agent runs with `no-new-privileges` and the setup's container is made without. Whoever lifts
-    that refusal has to make the setup container sealed too: an agent whose seams say sealed over a
-    container that was made without is refused here, not run."""
+    """The Claude Code agent runs with `no-new-privileges`, so its setup container is made with it
+    too (`job_run.harness_setup_seams`, #1126): an agent whose seams say sealed over a container
+    that was made without is refused here, not run."""
     adopted = script_container(rig)
     sealed = AgentContainer(2560, rig.seams(no_new_privileges=True), OFF, adopted=adopted)
     with pytest.raises(JobError) as refused:

@@ -21,9 +21,14 @@ import pytest
 from cryptography import x509
 from netdoor_support import PUBLIC, Lookups, Running, start_proxy, status_of, talk
 
+from code_reviewer_runner.implementer.claude_code.gates import subscription_rule
 from code_reviewer_runner.implementer.netdoor.authority import Authority
 from code_reviewer_runner.implementer.netdoor.connections import ConnectionLog
 from code_reviewer_runner.implementer.netdoor.intercept import RegistryGate
+from code_reviewer_runner.implementer.netdoor.registries import (
+    intercepted_domains,
+    interceptor_for,
+)
 from code_reviewer_runner.implementer.netdoor.wire import forwarded_head, read_head
 from code_reviewer_runner.implementer.network_rule import MODE_LIST, MODE_OPEN, NetworkRule
 
@@ -99,7 +104,15 @@ class Registry:
 
 
 class Door:
-    def __init__(self, running: Running, lookups: Lookups, registry: Registry) -> None:
+    def __init__(
+        self,
+        running: Running,
+        lookups: Lookups,
+        registry: Registry,
+        authority: Authority | None = None,
+    ) -> None:
+        # The door's own certificate authority, for a door whose test made one for its rule.
+        self.authority = authority
         self.running = running
         self.lookups = lookups
         self.registry = registry
@@ -689,3 +702,72 @@ def test_the_door_ends_the_tls_connection_with_a_close_notify(
         assert status_of(chunks) == 200
     finally:
         client.close()
+
+
+# -- the read-only hosts of a subscription turn (#1126) ------------------------------------------
+
+SITE = "site.example.org"
+SUBSCRIPTION = subscription_rule(NetworkRule(MODE_LIST, (SITE,)))
+
+
+@pytest.fixture
+def site_door() -> Iterator[Door]:
+    """The door of a Claude Code turn whose step lists one host besides the API host: that host is
+    no registry, and is read like one."""
+    authority = Authority(lifetime_seconds=3600, domains=intercepted_domains(SUBSCRIPTION))
+    # The host's own certificate authority, which only the door's upstream side trusts.
+    host_authority = Authority(lifetime_seconds=3600, domains=intercepted_domains(SUBSCRIPTION))
+    site = Registry(host_authority, certificate_for=SITE)
+    lookups = Lookups(table={SITE: [PUBLIC]}, servers={PUBLIC: site.port})
+
+    def upstream_tls(sock: socket.socket, name: str) -> socket.socket:
+        context = ssl.create_default_context(cadata=host_authority.ca_pem.decode())
+        return context.wrap_socket(sock, server_hostname=name)
+
+    running = start_proxy(
+        SUBSCRIPTION,
+        lookups,
+        gate=lambda log: RegistryGate(authority, log, upstream_tls=upstream_tls),
+        intercepts=interceptor_for(SUBSCRIPTION),
+    )
+    yield Door(running, lookups, site, authority)
+    running.stop()
+    site.close()
+
+
+# #1126-T10
+def test_a_listed_host_of_a_subscription_turn_can_be_read_and_never_written(
+    site_door: Door,
+) -> None:
+    authority = site_door.authority
+    assert authority is not None
+    read = through_the_door(
+        site_door, authority, get("/", SITE), connect_to=f"{SITE}:443", server_name=SITE
+    )
+    assert status_of(read) == 200 and TARBALL in read
+
+    for method in ("POST", "PUT"):
+        request = f"{method} /collect HTTP/1.1\r\nHost: {SITE}\r\nContent-Length: 4\r\n\r\nbody"
+        answer = through_the_door(
+            site_door,
+            authority,
+            request.encode(),
+            connect_to=f"{SITE}:443",
+            server_name=SITE,
+        )
+        assert status_of(answer) == 403 and b"X-Network-Door: method_not_allowed" in answer
+    [only_the_read] = site_door.registry.received
+    assert only_the_read.startswith(b"GET / HTTP/1.1\r\n"), "a write never reaches the host"
+
+
+# #1126-T11
+def test_a_listed_host_of_a_subscription_turn_has_443_only(site_door: Door) -> None:
+    client = socket.create_connection(("127.0.0.1", site_door.port), timeout=10)
+    try:
+        client.sendall(f"CONNECT {SITE}:80 HTTP/1.1\r\nHost: {SITE}:80\r\n\r\n".encode())
+        answer = client.recv(4096)
+    finally:
+        client.close()
+    assert status_of(answer) == 403
+    assert site_door.refusals == [(SITE, "port_not_allowed")]
+    assert site_door.registry.received == []

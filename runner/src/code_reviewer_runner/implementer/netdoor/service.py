@@ -40,7 +40,7 @@ from .protocol import (
     VERSION,
 )
 from .proxy import Connector, Decider, ProxyServer, chained_connector, tcp_connector
-from .registries import rule_has_registries
+from .registries import intercepted_domains, interceptor_for, rule_has_registries
 
 _log = logging.getLogger(__name__)
 
@@ -187,7 +187,10 @@ def make_gate(
         # Imported here: a door whose rule names no registry never loads the crypto library.
         from .authority import Authority
 
-        authority = Authority(lifetime_seconds=start.deadline_seconds + LINGER_SECONDS + 3600)
+        authority = Authority(
+            lifetime_seconds=start.deadline_seconds + LINGER_SECONDS + 3600,
+            domains=intercepted_domains(start.rule),
+        )
     except Exception:
         raise StartRefused(REFUSED_CA_FAILED) from None
     return RegistryGate(authority, log, upstream_tls=upstream_tls)
@@ -229,6 +232,7 @@ def run_netdoor(
                 decider,
                 connector=connector,
                 registry_gate=gate,
+                intercepts=interceptor_for(start.rule),
             ).start()
         except OSError:
             raise StartRefused(REFUSED_LISTEN_FAILED) from None

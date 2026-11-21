@@ -174,13 +174,13 @@
           "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]*$"
         },
         "setupScript": {
-          "description": "#1105 (ADR 0007, decision 11), settings of the step itself: the script a hosted environment runs once before the agent starts (at most 64 KB of UTF-8, kept as written). Only for a step in a hosted environment; a runner's setup is its owner's (`hosted_only_setting`). Not with `profile` (the environment of the profile holds its own).",
+          "description": "#1105 (ADR 0007, decision 11), settings of the step itself: the script the runner runs once before the agent starts, in the agent's own container (at most 64 KB of UTF-8, kept as written). For a step on a hosted runner and, since #1126, on a self-hosted one (on the harness `claude-code` the script ends before the login is handed to the agent). Not with `profile` (the environment of the profile holds its own).",
           "type": "string",
           "maxLength": 65536,
           "pattern": "^[^\\u0000]*$"
         },
         "network": {
-          "description": "#1105 (ADR 0007, decision 11), settings of the step itself: the rule for the agent's network in a hosted environment, as the environment held it: `off` (the default), `list` (the exact or `*.suffix` host names in `hosts`, at least one) or `open`; `hosts` only with `list`. Only for a step in a hosted environment (`hosted_only_setting`). Not with `profile`.",
+          "description": "#1105 (ADR 0007, decision 11), settings of the step itself: the rule for the agent's network, as the environment held it: `off` (the default), `list` (the exact or `*.suffix` host names in `hosts`, at least one) or `open`; `hosts` only with `list`. For a step on a hosted or a self-hosted runner. On the harness `claude-code` `open` is refused (`subscription_network_open`), a `*.suffix` entry on a domain anybody can get a subdomain of is refused (`subscription_network_wildcard`) and the listed hosts are only read (GET and HEAD) beside the model's own host. Not with `profile`.",
           "type": "object",
           "additionalProperties": false,
           "required": ["mode"],

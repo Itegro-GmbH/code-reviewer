@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from code_reviewer_runner.implementer.netdoor.connections import ConnectionLog
 from code_reviewer_runner.implementer.netdoor.intercept import RegistryGate
 from code_reviewer_runner.implementer.netdoor.proxy import Decider, ProxyServer
+from code_reviewer_runner.implementer.netdoor.registries import is_registry_name
 from code_reviewer_runner.implementer.network_rule import NetworkRule
 
 PUBLIC = "93.184.216.34"
@@ -111,6 +112,7 @@ def start_proxy(
     lookups: Lookups,
     max_connections: int = 128,
     gate: Callable[[ConnectionLog], RegistryGate] | None = None,
+    intercepts: Callable[[str], bool] | None = None,
 ) -> Running:
     log = ConnectionLog()
     decider = Decider(rule, log, resolver=lookups.resolve)
@@ -120,6 +122,7 @@ def start_proxy(
         connector=lookups.connect,
         max_connections=max_connections,
         registry_gate=None if gate is None else gate(log),
+        intercepts=intercepts or is_registry_name,
     ).start()
     return Running(server, log, lookups)
 

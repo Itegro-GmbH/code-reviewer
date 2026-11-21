@@ -17,6 +17,7 @@ import {
   WRITE,
 } from "../test-support/multi-repo-claim.ts";
 import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
+import type { NetworkRule } from "../network-rule/network.ts";
 import type {
   SplitClaimResponse,
   WorkerSubscriptionDetailsResponse,
@@ -278,6 +279,115 @@ describe("the claim of a turn on the harness claude-code", () => {
     expect(await turnInput(response)).toMatchObject({
       implementer: { startBranch: "feature/start" },
     });
+  });
+
+  // #1126-T40
+  it("hands a Worker that names implementer_subscription_setup the script and the network rule of the step, as a closed environment", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: {
+        ...RUNNER_ENV,
+        setupScript: "npm ci\n",
+        network: {
+          mode: "list",
+          hosts: ["fonts.googleapis.com", "lateinorum.de"],
+        },
+      },
+      profile: PROFILE,
+    });
+
+    const { response } = await fetchedTurn(h, runner.credential, [
+      ...NOW_FEATURES,
+      "implementer_subscription_setup",
+    ]);
+
+    const input = (await turnInput(response)) as unknown as {
+      implementer: Record<string, unknown>;
+    };
+    expect(input.implementer.environment).toEqual({
+      name: "My box",
+      setupScript: "npm ci\n",
+      network: {
+        mode: "list",
+        hosts: ["fonts.googleapis.com", "lateinorum.de"],
+      },
+    });
+  });
+
+  // #1126-T41
+  it("ends the turn, free, when the Worker does not name the feature, before a token exists: it would run without the script", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: { ...RUNNER_ENV, setupScript: "npm ci\n" },
+      profile: PROFILE,
+    });
+
+    const { response } = await fetchedTurn(h, runner.credential);
+
+    expect(response.status).toBe(409);
+    expect(h.issuedJobTokens()).toEqual([]);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+  });
+
+  // #1126-T54
+  it.each<[NetworkRule, string]>([
+    [{ mode: "open", hosts: [] }, "open network"],
+    [
+      { mode: "list", hosts: ["registry.npmjs.org", "*.github.io"] },
+      "wildcard",
+    ],
+    [{ mode: "list", hosts: ["*.co.uk"] }, "public suffix"],
+  ])(
+    "ends the turn, free, before a token exists, for a rule the runner would refuse (%j, %s)",
+    async (network) => {
+      const h = await start();
+      const runner = await h.registerRunner({
+        labels: ["box"],
+        manifest: BOTH,
+      });
+      const turn = await h.enqueueTurn({
+        modelChoice: CLAUDE_MODEL,
+        runnerEnvironment: { ...RUNNER_ENV, setupScript: "npm ci\n", network },
+        profile: PROFILE,
+      });
+
+      const { response } = await fetchedTurn(h, runner.credential, [
+        ...NOW_FEATURES,
+        "implementer_subscription_setup",
+      ]);
+
+      expect(response.status).toBe(409);
+      expect(h.issuedJobTokens()).toEqual([]);
+      expect(await h.queue.get(turn.job.id)).toMatchObject({
+        status: "failed",
+        errorCode: "implementer_config_invalid",
+      });
+    },
+  );
+
+  // #1126-T42
+  it("sends no environment, and needs no feature, for a step without a script or a rule", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
+    });
+
+    const { response } = await fetchedTurn(h, runner.credential);
+
+    const input = (await turnInput(response)) as unknown as {
+      implementer: Record<string, unknown>;
+    };
+    expect(input.implementer).not.toHaveProperty("environment");
   });
 
   // #856-T52

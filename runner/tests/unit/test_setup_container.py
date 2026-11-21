@@ -57,6 +57,11 @@ from code_reviewer_runner.implementer.setup_container import (
     Tail,
     setup_document,
 )
+from code_reviewer_runner.implementer.setup_leftovers import (
+    LEFTOVERS_CODE,
+    LEFTOVERS_SCRIPT,
+    SWEEP_SECONDS,
+)
 
 TOKEN = "ghs_dummy-token-0123456789"
 KEY = "sk-real-key-0123456789abcdef"
@@ -75,6 +80,12 @@ class Rig:
         # script runs wait for this, not for a time (a slow host starts the container later than
         # any timer).
         self.script_started = threading.Event()
+        # The sweep of the processes a script left (#1126): the modes it was run in, and what each
+        # pass of the kill finds.
+        self.sweeps: list[str] = []
+        self.leftover_passes: list[list[str]] = []
+        self.marker_ok = True
+        self.sweep_status = 0
         self.execs: list[tuple[list[str], dict[str, str], str | None]] = []
         # The VM's memory as `MemoryGuard` reads it: plenty, until a test says otherwise.
         self.meminfo = directory / "meminfo"
@@ -107,6 +118,8 @@ class Rig:
         if argv[:3] == ["/bin/sh", "-c", WRITE_FILE_SCRIPT]:
             self.script_text = stdin.read().decode()
             return 0
+        if argv[:3] == ["/bin/sh", "-c", LEFTOVERS_SCRIPT]:
+            return self.sweep(argv[5], stdout)
         if argv[:3] == ["/bin/sh", "-c", sc.RUN_SCRIPT]:
             self.script_started.set()
             stdout.write(self.script_output)
@@ -114,6 +127,19 @@ class Rig:
                 made.killed.wait(30)
                 return 137
             return self.script_exit
+        return 0
+
+    def sweep(self, mode: str, stdout: Any) -> int:
+        """The process sweep (#1126): the marker, and for each pass of the kill the names the test
+        queued (`leftover_passes`, one list per pass; none left after the last)."""
+        self.sweeps.append(mode)
+        if mode == "snapshot":
+            stdout.write("marker 4242\n" if self.marker_ok else "garbage\n")
+        elif self.sweep_status != 0:
+            return self.sweep_status
+        elif self.leftover_passes:
+            for name in self.leftover_passes.pop(0):
+                stdout.write(f"{900 + len(self.sweeps)} {name}\n")
         return 0
 
     def stop(self) -> None:
@@ -614,9 +640,8 @@ def test_a_container_that_cannot_leave_the_setup_network_is_not_handed_over_and_
 # #1009-T15
 def test_the_setup_container_can_be_made_with_no_new_privileges_like_the_agents_container() -> None:
     """The Claude Code agent's container is sealed (`no-new-privileges`); the setup container is the
-    agent's container, so it takes the same flag. `subscription_setup_script` refuses that harness
-    with a script today; the day it does not, the setup's definition already has the one change it
-    needs, and the agent's seal check refuses an adopted container that lacks it."""
+    agent's container, so it takes the same flag (`job_run.harness_setup_seams`, #1126), and the
+    agent's seal check refuses an adopted container that lacks it."""
     plain = setup_document("sha256:aa", "volume-1", 1_000_000)["HostConfig"]
     sealed = setup_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)
     sealed = sealed["HostConfig"]
@@ -660,11 +685,91 @@ def test_the_guard_is_closed_at_the_hand_over(rig: Rig) -> None:
 # #1009-T17
 def test_the_overhead_counts_the_rules_the_ready_wait_the_kill_steps_and_the_hand_over() -> None:
     parts = (
-        sc.RULES_SECONDS * 4 + sc.READY_SECONDS + sc.SCRIPT_WRITE_SECONDS + sc.HANDOVER_SECONDS * 4
+        sc.RULES_SECONDS * 4
+        + sc.READY_SECONDS
+        + sc.SCRIPT_WRITE_SECONDS
+        + sc.HANDOVER_SECONDS * 4
+        + SWEEP_SECONDS
     )
     # A script that has to be killed: the kill, the wait for its exec, and the kill of the clean-up.
     assert sc.KILL_STEPS_SECONDS == 3 * sc.KILL_SECONDS
     assert parts + 3 * sc.KILL_SECONDS == sc.SETUP_OVERHEAD_SECONDS
+
+
+# -- what the script left running, for a harness whose login lives in the container (#1126) -----
+
+
+def kill_run(made: Rig, **options: Any) -> sc.SetupRun:
+    return run(made, kill_leftovers=True, **options)
+
+
+# #1126-T47
+def test_a_turn_that_keeps_the_login_in_the_container_ends_what_the_script_left_before_the_freeze(
+    rig: Rig,
+) -> None:
+    rig.leftover_passes = [["postgres", "node"], ["node"]]
+    done = kill_run(rig)
+    assert done.outcome == OUTCOME_OK
+    assert rig.sweeps == ["snapshot", "kill", "kill", "kill"], "a pass until one finds nothing"
+    names = posted(rig.engine)
+    starts = [e[0][:3] for e in rig.execs]
+    marked = starts.index(["/bin/sh", "-c", LEFTOVERS_SCRIPT])
+    ran = starts.index(["/bin/sh", "-c", sc.RUN_SCRIPT])
+    swept = len(starts) - 1 - starts[::-1].index(["/bin/sh", "-c", LEFTOVERS_SCRIPT])
+    cleaned = starts.index(["/bin/sh", "-c", sc.CLEAN_SCRIPT])
+    assert marked < ran < cleaned < swept, "marker, script, clean-up, then the sweep"
+    assert names.index("POST networks/disconnect") < names.index("POST containers/pause")
+    notes = [n for n in done.notes if LEFTOVERS_CODE in n]
+    assert notes == [f"{LEFTOVERS_CODE}: ended processes the script left (postgres, node)"]
+    assert rig.engine.container(AGENT_CONTAINER_NAME).paused
+
+
+# #1126-T47
+def test_the_sweep_runs_as_the_marker_the_snapshot_gave(rig: Rig) -> None:
+    rig.leftover_passes = [["x"]]
+    kill_run(rig)
+    sweeps = [e[0] for e in rig.execs if e[0][:3] == ["/bin/sh", "-c", LEFTOVERS_SCRIPT]]
+    assert [argv[5:] for argv in sweeps] == [["snapshot", "0"], ["kill", "4242"], ["kill", "4242"]]
+
+
+# #1126-T48
+def test_without_the_seam_nothing_is_swept_and_a_daemon_of_the_script_survives(rig: Rig) -> None:
+    """Hosted and OpenCode turns keep behaving as before: the login is not in this container."""
+    rig.leftover_passes = [["postgres"]]
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK
+    assert rig.sweeps == [] and done.notes == ()
+
+
+# #1126-T49
+def test_a_leftover_that_cannot_be_ended_stops_the_turn_before_the_login_with_its_code(
+    rig: Rig,
+) -> None:
+    rig.leftover_passes = [["miner"]] * 10
+    done = kill_run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.container is None
+    assert done.adopted is None
+    assert done.detail.startswith(f"{LEFTOVERS_CODE}:") and "miner" in done.detail
+    assert all(c.removed for c in rig.engine.containers.values())
+    assert "POST containers/pause" not in posted(rig.engine), "never frozen, never handed over"
+
+
+# #1126-T49
+def test_a_sweep_that_cannot_run_stops_the_turn_with_its_code(rig: Rig) -> None:
+    rig.sweep_status = 3
+    done = kill_run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER
+    assert done.detail.startswith(f"{LEFTOVERS_CODE}:")
+    assert all(c.removed for c in rig.engine.containers.values())
+
+
+# #1126-T49
+def test_a_container_whose_processes_cannot_be_read_never_gets_the_script(rig: Rig) -> None:
+    rig.marker_ok = False
+    done = kill_run(rig)
+    assert done.outcome == OUTCOME_UNAVAILABLE and done.detail.startswith(f"{LEFTOVERS_CODE}:")
+    assert rig.script_text == "", "the script was never written"
+    assert all(c.removed for c in rig.engine.containers.values())
 
 
 # -- the script run for real: the shell around it (#1009) ------------------------------------------

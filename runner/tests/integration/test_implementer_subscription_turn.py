@@ -31,13 +31,22 @@ from code_reviewer_runner import runner
 from code_reviewer_runner.capabilities import ENGINE_IMPLEMENTER, ENGINES_VARIABLE
 from code_reviewer_runner.implementer import session as session_module
 from code_reviewer_runner.implementer.agent import CommandOutcome
+from code_reviewer_runner.implementer.agent_container import Adopted
 from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin
 from code_reviewer_runner.implementer.claude_code.readiness import HarnessNotReady, ReadyHarness
+from code_reviewer_runner.implementer.environment_setup import EnvironmentSetup
 from code_reviewer_runner.implementer.git_workspace import REASON_LOGIN_SECRET
-from code_reviewer_runner.implementer.job_run import JobSeams, TurnSetup, run_implementer_job
+from code_reviewer_runner.implementer.job_run import (
+    EnvironmentHost,
+    JobSeams,
+    TurnSetup,
+    run_implementer_job,
+)
 from code_reviewer_runner.implementer.network_rule import MODE_LIST, NetworkRule
 from code_reviewer_runner.implementer.session import SessionSeams
+from code_reviewer_runner.job import JobError
 from code_reviewer_runner.lease_check import LEASE_CHECK_FD_VARIABLE
+from code_reviewer_runner.result import ErrorCode
 
 LOGIN = "sk-" + "ant-" + "oat01-Zq9Lm3XvTn8Rk5Wc2-integrationtestintegrationtest"
 SESSION = "d847dcf5-e741-4252-98b0-d73cbc39f2c0"
@@ -98,9 +107,29 @@ class ClaudePlace(FakePlace):
 
 class FakeNetDoor:
     end = None
+    # The door's certificate authority, which a rule with read-only hosts has the container trust.
+    registry_ca = b"-----BEGIN CERTIFICATE-----\nZG9vcg==\n-----END CERTIFICATE-----\n"
 
     def stop(self) -> None:
         return None
+
+
+def setup_step(
+    played: "Played", outcome: EnvironmentSetup | None = None
+) -> Callable[..., EnvironmentSetup]:
+    """The script's phase (#1126): what it saw is recorded, and the events say what ran before it.
+    The login is handed to the agent's own exec, so the step is not given it; what proves the
+    order against the real containers is `tests/unit/test_subscription_login_order.py`."""
+
+    def run(job: Any, elapsed: Any, stop: Any, limit: float) -> EnvironmentSetup:
+        played.events.append("setup")
+        played.places_at_setup = len(played.places)
+        if outcome is not None:
+            return outcome
+        block = {"ok": True, "exitCode": 0, "timedOut": False, "durationSeconds": 3, "output": "ok"}
+        return EnvironmentSetup(Adopted("ab" * 32), block, None, ())
+
+    return run
 
 
 class Played:
@@ -112,6 +141,7 @@ class Played:
         self.rules: list[NetworkRule] = []
         self.setups = 0
         self.events: list[str] = []
+        self.places_at_setup = -1
 
     @property
     def result(self) -> dict[str, Any]:
@@ -140,6 +170,7 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
         subject: str = "Add it",
         form_rejected: tuple[str, str | None] | None = None,
         dirty: bool = False,
+        setup_outcome: EnvironmentSetup | None = None,
     ) -> Played:
         played = Played()
         lease = LeaseChannel(held)
@@ -171,10 +202,14 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
                 played.places.append(made)
                 return made
 
-            return TurnSetup(git, place, ("claude",))
+            host = None
+            if environment is not None and "setupScript" in environment:
+                host = EnvironmentHost(setup_step(played, setup_outcome), lambda adopted: place)
+            return TurnSetup(git, place, ("claude",), environment=host)
 
         def netdoor(rule: NetworkRule, **options: Any) -> FakeNetDoor:
             played.rules.append(rule)
+            played.events.append("door")
             return FakeNetDoor()
 
         def no_door(**options: Any) -> None:
@@ -186,7 +221,9 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
         seams = JobSeams(
             setup=setup,
             harness=lambda env: ready,
-            session_seams=SessionSeams(confirm_seconds=0.3, confirm_pause=0.05),
+            session_seams=SessionSeams(
+                confirm_seconds=0.3, confirm_pause=0.05, system_roots=lambda: b"roots\n"
+            ),
         )
         monkeypatch.setattr(
             runner, "run_implementer_job", partial(run_implementer_job, seams=seams)
@@ -303,26 +340,89 @@ def test_an_environment_that_lists_exactly_that_host_is_fine(play: Callable[...,
 
 
 # #856-N04
-@pytest.mark.parametrize(
-    ("network", "word"),
-    [
-        ({"mode": "open", "hosts": []}, "subscription_network_open"),
-        (
-            {"mode": "list", "hosts": ["api.anthropic.com", "registry.npmjs.org"]},
-            "subscription_network_hosts",
-        ),
-        ({"mode": "list", "hosts": ["*.example.org"]}, "subscription_network_hosts"),
-    ],
-)
-def test_an_environment_with_an_open_network_or_other_hosts_refuses_the_turn_free(
-    play: Callable[..., Played], network: dict[str, Any], word: str
+def test_an_environment_with_an_open_network_refuses_the_turn_free(
+    play: Callable[..., Played],
 ) -> None:
-    played = play(says("Done."), environment={"name": "wide", "network": network})
+    played = play(
+        says("Done."), environment={"name": "wide", "network": {"mode": "open", "hosts": []}}
+    )
 
     result = played.result
     assert result["ok"] is False and result["errorCode"] == "implementer_config_invalid"
-    assert word in result["logTail"]
+    assert "subscription_network_open" in result["logTail"]
     assert played.places == [] and played.rules == []
+    assert result["usage"] is None
+
+
+# #1126-T20
+def test_the_hosts_of_the_step_are_read_only_beside_the_api_host(
+    play: Callable[..., Played],
+) -> None:
+    played = play(
+        says("Done."),
+        environment={
+            "name": "build",
+            "network": {"mode": "list", "hosts": ["fonts.googleapis.com", "*.gstatic.com"]},
+        },
+    )
+
+    assert played.result["ok"] is True, played.output
+    assert played.rules == [
+        NetworkRule(
+            MODE_LIST,
+            ("api.anthropic.com", "fonts.googleapis.com", "*.gstatic.com"),
+            ports=(443,),
+            read_only=("fonts.googleapis.com", "*.gstatic.com"),
+        )
+    ]
+
+
+# #1126-T21
+def test_a_setup_script_runs_before_the_login_is_placed_and_the_agent_keeps_the_container(
+    play: Callable[..., Played],
+) -> None:
+    played = play(
+        says("Built it."),
+        environment={
+            "name": "build",
+            "setupScript": "npm ci\n",
+            "network": {"mode": "list", "hosts": ["lateinorum.de"]},
+        },
+    )
+
+    assert played.result["ok"] is True, played.output
+    assert [e for e in played.events if e in ("setup", "door", "claude")] == [
+        "setup",
+        "door",
+        "claude",
+    ], "the script ends, the door of the turn comes up, then the agent's exec has the login"
+    assert played.places_at_setup == 0, "no container of the agent had run anything at the setup"
+    [place] = played.places
+    [run] = place.runs
+    assert run["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == LOGIN, "the agent's exec has it"
+    assert played.result["implementer"]["setup"]["ok"] is True
+    assert played.rules[0].read_only == ("lateinorum.de",)
+
+
+# #1126-T22
+def test_a_script_that_fails_ends_a_subscription_turn_before_the_login_is_used(
+    play: Callable[..., Played],
+) -> None:
+    failed = EnvironmentSetup(
+        None,
+        {"ok": False, "exitCode": 1, "timedOut": False, "durationSeconds": 2, "output": "no"},
+        JobError(ErrorCode.ENVIRONMENT_SETUP_FAILED, "exit status 1"),
+        (),
+    )
+    played = play(
+        says("Done."),
+        environment={"name": "build", "setupScript": "false\n"},
+        setup_outcome=failed,
+    )
+
+    result = played.result
+    assert result["ok"] is False and result["errorCode"] == "environment_setup_failed"
+    assert played.places == [] and played.rules == [], "no network, no agent, no login handed out"
     assert result["usage"] is None
 
 

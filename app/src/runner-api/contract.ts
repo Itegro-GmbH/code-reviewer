@@ -82,6 +82,10 @@ export const CLAIM_FEATURES = [
   // #1091 (epic #1090, ADR 0006): the runner reads `implementer.repos`, `git.tokens` and `implementer.resume.repos` (several repositories in one
   // turn) and reports `implementer.repos`. The app will send `repos` only to a caller that named it (#1092); nothing sends it yet.
   "implementer_multi_repo",
+  // #1126 (ADR 0007, decision 11 as amended): the Worker runs the setup script of a turn on the harness `claude-code` before the login is
+  // handed to the agent, and reads the step's network rule for it (the listed hosts are read-only beside the model's own). Sent only to a
+  // caller that named it; a `claude-code` turn with a script or a rule is refused (`implementer_engine_unavailable`, free) for one that did not.
+  "implementer_subscription_setup",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
