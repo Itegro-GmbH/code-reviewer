@@ -62,6 +62,9 @@ export const BOARD_COPY = {
   readOnly:
     "Only an Admin or an Owner changes the board of a project; a Member sees it.",
   readOnlySet: "A board is set on this project.",
+  /** What the board says in the factory, where nobody picks it in the UI but the AI that configures the project (#1108). */
+  managed:
+    "An AI sets the board through the API: PUT /api/w/<workspace>/projects/<project id> with board: { projectV2Id } or board: null.",
 } as const;
 
 export const RESYNC_COPY = {

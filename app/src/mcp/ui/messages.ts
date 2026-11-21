@@ -23,7 +23,7 @@ import {
 } from "../oauth/errors.ts";
 
 export const PAGE_COPY = {
-  title: "MCP",
+  title: "MCP servers",
   description:
     "Remote MCP servers your agents may use. Add the address of a server, test the connection and see which tools it offers. The keys stay on the server: an agent never sees them.",
   loading: "Loading",

@@ -31,6 +31,7 @@ export function LlmSettingsPageContent({
   instanceAccess = null,
   showPlan = false,
   showBilling = false,
+  setup = false,
   api,
 }: {
   product: ProductIdentity;
@@ -52,6 +53,8 @@ export function LlmSettingsPageContent({
   showPlan?: boolean;
   /** Billing is on (#505): the settings navigation lists the Billing page instead of the Plan page. */
   showBilling?: boolean;
+  /** The page is a place of Setup (the factory's "LLM keys", #1108): its own header, without the settings tabs. */
+  setup?: boolean;
   /** Only tests pass this. */
   api?: LlmKeyApi;
 }) {
@@ -59,6 +62,7 @@ export function LlmSettingsPageContent({
     <SettingsScreen
       workspaceSlug={workspaceSlug}
       current="llm"
+      area={setup ? "setup" : "settings"}
       showPlan={showPlan}
       showBilling={showBilling}
     >

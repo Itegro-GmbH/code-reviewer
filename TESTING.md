@@ -668,8 +668,7 @@ that starts on an issue reads it there.
   still discarded after a reload); the run page of the waiting run (its question and options, pause and resume); the Answer link of the Issues
   tab (it opens the ToDos tab of the project on that question, `?run=`); the ToDos page (the question of the waiting run is answered from the
   panel and moves to Done); the lane page (read only: a new version needs a change description through the API, and the page lists the versions with it); the tabs
-  ToDos, Runs, Lanes and Setup of the project; the sidebar with Profiles, Runners and Settings (the Integrations and Members tabs that moved
-  there). All of them are tagged `@smoke` (the journey takes about twenty seconds) and so run on the pull requests into `development`; they
+  ToDos, Runs, Lanes and Setup of the project; the sidebar with its three groups (Control panel, Setup, Workspace), the Setup pages with the titles of their links and no Settings tabs, and Settings with its General and Members tabs and the read only Review defaults page. All of them are tagged `@smoke` (the journey takes about twenty seconds) and so run on the pull requests into `development`; they
   depend on each other, so no one is tagged alone.
 - **Not covered:** what the engine does after the answer or after the start (a turn on a runner: the harness of the engine and the privileged
   lane), the sync of the ticket source (`Resync`), the review actions of the ToDos page and the creation of a project in the dialog.
