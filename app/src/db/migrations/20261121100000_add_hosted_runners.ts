@@ -13,7 +13,9 @@
 //    (`support/hosted-runner-rules.ts`, a frozen copy of `environmentVcpus` of `contracts/environment-sizes.v1.json`), with the concurrency the
 //    operator set (`HOSTED_RUNNER_DEFAULT_CONCURRENCY`, else 2). Asked again it makes nothing (one row for each type and workspace). A name
 //    that is taken in the workspace (an environment of its own, or a runner that is not revoked, named "Vercel Sandbox 4 vCPU") is
-//    not taken from its owner: the hosted runner then gets " (hosted)" after it. A workspace made later gets its rows with the workspace;
+//    not taken from its owner: the hosted runner then gets " (hosted)" after it, or " (hosted " and the first eight characters of the workspace id ")"
+//    if that is taken too, so one workspace's name can never fail the batch of all). A workspace made later gets its rows with the workspace;
+//    a workspace that lacks one (see "The rollout window") gets it when its runners are read (`NamedRunnersRepository.list`);
 //  - the names of the runners that are not revoked are made unique within a workspace, without regard to case (ADR 0007, "Names of
 //    runners"): the older runner keeps its name, each later one with the same name gets " (" and the first eight characters of its id
 //    ")" after it, and the runner is named in a notice of the migration. A revoked runner's name is free;
@@ -21,6 +23,11 @@
 //    non-revoked runner and workspace. Both are built on small tables (a row for each environment or runner).
 //  - `alter table` takes a short exclusive lock. The wait is bounded: after `LOCK_TIMEOUT` the migration gives up, the whole batch is
 //    rolled back (`MIGRATION_FAILED`) and the deployment can simply be run again.
+// The rollout window: the release that is still running while this one starts does not know the hosted rows. Until it is replaced it lists
+// them as environments, counts them against its environment bound and lets `DELETE /environments/:id` remove one; a workspace it makes has
+// none. That is accepted for the minutes of a rollout, because the hosted runners repair themselves: `NamedRunnersRepository.list` (read by
+// the validator and the Setup page) makes a missing type again, under the workspace's lock. A type that was deleted gets a new id, so a
+// step that named the old id is `runner_unknown` at the next save, as ADR 0007 decision 14 says for a runner that is gone.
 // The name of a hosted runner is unique across both tables only in the service (a database cannot say it without a third table): this
 // migration and the service that makes a runner or renames one take the same lock of the workspace.
 import { sql } from "kysely";
@@ -88,9 +95,13 @@ export const migration: Migration = {
       await sql`insert into implementer_environments
           (id, workspace_id, name, vcpus, setup_script, network_mode, network_hosts, kind, labels, created_by, created_at, updated_at, concurrency)
         select gen_random_uuid()::text, w.id,
-               case when exists (select 1 from implementer_environments e where e.workspace_id = w.id and lower(e.name) = lower(${name}))
-                      or exists (select 1 from runners r where r.workspace_id = w.id and r.revoked_at is null and lower(r.name) = lower(${name}))
-                    then ${`${name} (hosted)`} else ${name} end,
+               case when not exists (select 1 from implementer_environments e where e.workspace_id = w.id and lower(e.name) = lower(${name}))
+                     and not exists (select 1 from runners r where r.workspace_id = w.id and r.revoked_at is null and lower(r.name) = lower(${name}))
+                    then ${name}
+                    when not exists (select 1 from implementer_environments e where e.workspace_id = w.id and lower(e.name) = lower(${`${name} (hosted)`}))
+                     and not exists (select 1 from runners r where r.workspace_id = w.id and r.revoked_at is null and lower(r.name) = lower(${`${name} (hosted)`}))
+                    then ${`${name} (hosted)`}
+                    else ${`${name} (hosted `} || left(w.id, 8) || ')' end,
                ${vcpus}, '', 'off', '', 'hosted', '', null,
                to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),

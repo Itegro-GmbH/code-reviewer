@@ -125,14 +125,16 @@ export function hasAllLabels(
  */
 export function requiredLabelsOfTurn(environments: {
   environment?: { vcpus: number } | null;
-  runnerEnvironment?: { labels: readonly string[] } | null;
+  runnerEnvironment?: { id: string; labels: readonly string[] } | null;
 }): string[] {
   if (environments.runnerEnvironment) {
     const [only] = environments.runnerEnvironment.labels;
     if (
       environments.runnerEnvironment.labels.length === 1 &&
       only !== undefined &&
-      runnerIdOfLabel(only) !== undefined
+      runnerIdOfLabel(only) !== undefined &&
+      // The label must name the runner the copy is of: a stored copy that merely has the shape of one is not trusted.
+      runnerIdOfLabel(only) === environments.runnerEnvironment.id
     )
       return [only];
     return environments.runnerEnvironment.labels.filter(

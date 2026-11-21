@@ -115,10 +115,25 @@ describe("the labels a turn requires", () => {
     expect(
       requiredLabelsOfTurn({
         runnerEnvironment: {
+          id: "env-1",
           labels: ["cr:managed", "gpu", "CR:size-8", "linux", " cr:size-2"],
         },
       }),
     ).toEqual(["gpu", "linux"]);
+  });
+
+  // #1114-review-4
+  it("keep `cr:runner:<id>` only for the copy of that very runner, so a stored copy with the shape of one cannot route to another runner", () => {
+    expect(
+      requiredLabelsOfTurn({
+        runnerEnvironment: { id: "r-1", labels: ["cr:runner:r-1"] },
+      }),
+    ).toEqual(["cr:runner:r-1"]);
+    expect(
+      requiredLabelsOfTurn({
+        runnerEnvironment: { id: "env-9", labels: ["cr:runner:r-1"] },
+      }),
+    ).toEqual([]);
   });
 
   it("are `cr:managed` and the size of a hosted environment, or the size of the kind without one", () => {
@@ -166,18 +181,18 @@ describe("the label of a concrete runner (#1105, ADR 0007, decision 10)", () => 
   it("is what a turn of a self-hosted runner requires, alone; any other reserved label of a runner environment is still dropped", () => {
     expect(
       requiredLabelsOfTurn({
-        runnerEnvironment: { labels: [runnerLabel("abc")] },
+        runnerEnvironment: { id: "abc", labels: [runnerLabel("abc")] },
       }),
     ).toEqual(["cr:runner:abc"]);
     // Not exactly that one label: an environment stored before the namespace was reserved keeps losing its `cr:` labels.
     expect(
       requiredLabelsOfTurn({
-        runnerEnvironment: { labels: [runnerLabel("abc"), "linux"] },
+        runnerEnvironment: { id: "abc", labels: [runnerLabel("abc"), "linux"] },
       }),
     ).toEqual(["linux"]);
     expect(
       requiredLabelsOfTurn({
-        runnerEnvironment: { labels: ["cr:managed", "linux"] },
+        runnerEnvironment: { id: "abc", labels: ["cr:managed", "linux"] },
       }),
     ).toEqual(["linux"]);
     // A hosted runner's turn is a hosted job of its size.

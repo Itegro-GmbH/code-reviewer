@@ -245,7 +245,10 @@ export function createRunnerDispatchesRepository(
       where j.status = 'queued'
         and j.command = 'review'
         and cardinality(${REQUIRED}) > 0
-        and ${REQUIRED} <@ (string_to_array(r.labels, E'\n') || array[${RUNNER_LABEL_PREFIX} || r.id])
+        and ${REQUIRED} <@ (array(
+          select announced_label
+            from unnest(string_to_array(r.labels, E'\n')) as announced_label
+           where lower(btrim(announced_label)) not like 'cr:%') || array[${RUNNER_LABEL_PREFIX} || r.id])
         and ${accessRule(sql`coalesce(${announced} -> r.id, '[]'::jsonb)`, "t")}
         and ${where}
       order by j.run_after, j.id, r.id

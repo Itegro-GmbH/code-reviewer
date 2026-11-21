@@ -6,7 +6,6 @@
 // announces, last seen and state, a button that revokes one, and "Connect your own runner", which makes a registration token. The token is
 // shown once, in a dialog, with the command to register a runner; the page keeps it only in memory. It talks to the routes of #854 only (`api.ts`), and shows
 // no text from an answer: every refusal is a fixed sentence for its code (`messages.ts`).
-import Link from "next/link";
 import { useState } from "react";
 import { Button } from "../../components/button.tsx";
 import { CopyButton } from "../../components/copy-button.tsx";
@@ -34,7 +33,6 @@ import { useCapabilities } from "../../capabilities/context.tsx";
 import { useProductIdentity } from "../../product-identity/context.tsx";
 import { useRequest } from "../../implementer/ui/use-request.ts";
 import { formatUtc } from "../../ui/format-time.ts";
-import { workspacePath } from "../../workspaces/paths.ts";
 import type { NewTokenView, RunnerList, RunnerView } from "../service.ts";
 import { browserRunnerFleetApi, type RunnerFleetApi } from "./api.ts";
 import {
@@ -111,7 +109,6 @@ export function RunnersPanel({
       api={api}
       canManage={canManage}
       initial={loaded.data}
-      workspaceSlug={workspaceSlug}
     />
   );
 }
@@ -120,12 +117,10 @@ function Runners({
   api,
   canManage,
   initial,
-  workspaceSlug,
 }: {
   api: RunnerFleetApi;
   canManage: boolean;
   initial: RunnerList;
-  workspaceSlug: string;
 }) {
   const product = useProductIdentity();
   const billing = useCapabilities().has("billing");
@@ -230,10 +225,7 @@ function Runners({
           ))}
         </ul>
         <p className="text-sm text-muted-foreground">
-          {PAGE_COPY.environmentsNote}{" "}
-          <Link href={workspacePath(workspaceSlug, "/environments")}>
-            {PAGE_COPY.environmentsLink}
-          </Link>
+          {PAGE_COPY.environmentsNote}
         </p>
       </section>
 

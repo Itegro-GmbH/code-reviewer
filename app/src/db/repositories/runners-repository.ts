@@ -138,7 +138,7 @@ export function createRunnersRepository(
     },
 
     rename(id, name) {
-      return db.transaction().execute(async (trx) => {
+      const run = async (trx: Kysely<Database>) => {
         // Everything that makes or renames a runner of the workspace takes turns: two of them cannot both find a name free.
         await lockRunnerNames(trx, workspaceId);
         const own = await trx
@@ -158,7 +158,8 @@ export function createRunnersRepository(
           .where("id", "=", id)
           .execute();
         return "renamed" as const;
-      });
+      };
+      return db.isTransaction ? run(db) : db.transaction().execute(run);
     },
 
     async revoke(id) {

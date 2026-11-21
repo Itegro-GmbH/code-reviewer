@@ -32,7 +32,11 @@ import type {
 } from "../../named-runners/types.ts";
 
 export type NamedRunnersRepository = {
-  /** The hosted runners (smallest first), then the self-hosted ones that are not revoked (by name, case ignored). */
+  /**
+   * The hosted runners (smallest first), then the self-hosted ones that are not revoked (by name, case ignored). A workspace that lacks a
+   * hosted runner (the previous release deleted one through its environments, or made the workspace after the migration) gets it here,
+   * under the workspace's lock (`ensureHostedRunners`): the hosted runners repair themselves where they are read.
+   */
   list(): Promise<NamedRunner[]>;
   /** One runner by its id, a revoked one too (it is the answer "revoked", not "unknown"); undefined for an id of no runner of the workspace. */
   find(id: string): Promise<NamedRunner | undefined>;
@@ -77,17 +81,30 @@ function isUsableId(id: string): boolean {
 export function createNamedRunnersRepository(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
+  repair: HostedRunnerOptions = {},
 ): NamedRunnersRepository {
+  const readHosted = () =>
+    db
+      .selectFrom("implementer_environments")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .where("concurrency", "is not", null)
+      .orderBy("vcpus")
+      .orderBy("id")
+      .execute();
   return {
     async list() {
-      const hosted = await db
-        .selectFrom("implementer_environments")
-        .selectAll()
-        .where("workspace_id", "=", workspaceId)
-        .where("concurrency", "is not", null)
-        .orderBy("vcpus")
-        .orderBy("id")
-        .execute();
+      let hosted = await readHosted();
+      if (hosted.length < HOSTED_RUNNER_VCPUS.length) {
+        // A type is missing. Make it under the workspace's lock (another reader may be doing the same: the second finds it made), then read again.
+        const run = async (trx: Kysely<Database>) => {
+          await lockRunnerNames(trx, workspaceId);
+          await ensureHostedRunners(trx, workspaceId, repair);
+        };
+        if (db.isTransaction) await run(db);
+        else await db.transaction().execute(run);
+        hosted = await readHosted();
+      }
       const own = await db
         .selectFrom("runners")
         .selectAll()
@@ -177,19 +194,27 @@ export async function nameTaken(
   return hosted !== undefined;
 }
 
+export type HostedRunnerOptions = {
+  now?: () => Date;
+  newId?: () => string;
+  env?: Record<string, string | undefined>;
+};
+
+/** How many names " (hosted)", " (hosted 2)", ... are tried before the name clash is raised. */
+const HOSTED_NAME_TRIES = 50;
+
 /**
  * Makes the hosted runner of every type the workspace does not have yet, each with the concurrency the operator set (a workspace made
- * later gets them with it; the migration made them for the workspaces that existed). Asked again it makes nothing. A name that an
- * environment of a person or a runner that is not revoked has is not taken from it: the hosted runner then gets " (hosted)" after it.
+ * later gets them with it; the migration made them for the workspaces that existed; `NamedRunnersRepository.list` repairs a workspace that
+ * lacks one). Asked again it makes nothing. A name that an environment of a person or a runner that is not revoked has is not taken from it:
+ * the hosted runner then gets " (hosted)" after it, or " (hosted 2)" and so on if that is taken too. Only a second hosted runner of the
+ * same type is ignored (the conflict target below); any other clash of names is an error, never a silently missing type. Asked under
+ * `lockRunnerNames` where it matters (`list` does).
  */
 export async function ensureHostedRunners(
   executor: Kysely<Database>,
   workspaceId: WorkspaceId,
-  options: {
-    now?: () => Date;
-    newId?: () => string;
-    env?: Record<string, string | undefined>;
-  } = {},
+  options: HostedRunnerOptions = {},
 ): Promise<void> {
   const now = options.now ?? (() => new Date());
   const newId = options.newId ?? (() => crypto.randomUUID());
@@ -204,23 +229,29 @@ export async function ensureHostedRunners(
     .where("concurrency", "is not", null)
     .execute();
   const present = new Set(have.map((row) => row.vcpus));
+  const nameInUse = async (name: string) =>
+    (await executor
+      .selectFrom("implementer_environments")
+      .select("id")
+      .where("workspace_id", "=", workspaceId)
+      .where(sql<boolean>`lower(name) = lower(${name})`)
+      .executeTakeFirst()) !== undefined ||
+    (await nameTaken(executor, workspaceId, name));
   for (const vcpus of HOSTED_RUNNER_VCPUS) {
     if (present.has(vcpus)) continue;
     const base = hostedRunnerName(vcpus);
-    const taken =
-      (await executor
-        .selectFrom("implementer_environments")
-        .select("id")
-        .where("workspace_id", "=", workspaceId)
-        .where(sql<boolean>`lower(name) = lower(${base})`)
-        .executeTakeFirst()) !== undefined ||
-      (await nameTaken(executor, workspaceId, base));
+    let name = base;
+    for (let attempt = 0; await nameInUse(name); attempt += 1) {
+      // After the tries the last name is used as it is: the insert then raises the clash on the name index.
+      if (attempt >= HOSTED_NAME_TRIES) break;
+      name = `${base} (hosted${attempt === 0 ? "" : ` ${String(attempt + 1)}`})`;
+    }
     await executor
       .insertInto("implementer_environments")
       .values({
         id: newId(),
         workspace_id: workspaceId,
-        name: taken ? `${base} (hosted)` : base,
+        name,
         vcpus,
         setup_script: "",
         kind: "hosted",
@@ -230,7 +261,12 @@ export async function ensureHostedRunners(
         created_at: timestamp,
         updated_at: timestamp,
       })
-      .onConflict((conflict) => conflict.doNothing())
+      .onConflict((conflict) =>
+        conflict
+          .columns(["workspace_id", "vcpus"])
+          .where("concurrency", "is not", null)
+          .doNothing(),
+      )
       .execute();
   }
 }
