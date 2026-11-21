@@ -845,6 +845,38 @@ describe("the settings form", () => {
   });
 });
 
+describe("a read only form (#1108)", () => {
+  // #1108: in the factory nobody edits the review settings in the UI; the form says who sets them instead of naming a role.
+  it("shows the note it is given in place of the save button, and the default note names the role", () => {
+    const { rerender } = render(
+      <SettingsForm
+        product={getProductIdentity()}
+        workspaceSlug="acme"
+        initial={projectModel()}
+        readOnly
+        readOnlyNote="An AI sets these through the API."
+        api={fakeApi().api}
+      />,
+    );
+
+    expect(screen.getByText("An AI sets these through the API.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Save/ })).toBeNull();
+
+    rerender(
+      <SettingsForm
+        product={getProductIdentity()}
+        workspaceSlug="acme"
+        initial={projectModel()}
+        readOnly
+        api={fakeApi().api}
+      />,
+    );
+    expect(
+      screen.getByText("Only Admins and Owners can change these values."),
+    ).toBeTruthy();
+  });
+});
+
 describe("the LLM section follows the provider (#656)", () => {
   // #656-T03
   it("lists only the models of the chosen provider, and takes the default model of that provider with it", async () => {

@@ -299,6 +299,7 @@ export function SettingsForm({
   initial,
   repositoryId,
   readOnly = false,
+  readOnlyNote = "Only Admins and Owners can change these values.",
   dynamicReviewEnabled = false,
   keyedProviders,
   nativeCatalog,
@@ -320,6 +321,8 @@ export function SettingsForm({
    * save in any case, src/workspaces/permissions.ts).
    */
   readOnly?: boolean;
+  /** What the form says in place of the save button while it is read only. */
+  readOnlyNote?: string;
   /**
    * Whether the instance has turned Dynamic Review on (the #195 gate). Unknown counts as off: the card
    * never implies that Dynamic Review works when it may not.
@@ -977,9 +980,7 @@ export function SettingsForm({
 
         <div className="flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between">
           {readOnly ? (
-            <p className="text-sm text-muted-foreground">
-              Only Admins and Owners can change these values.
-            </p>
+            <p className="text-sm text-muted-foreground">{readOnlyNote}</p>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               <Button

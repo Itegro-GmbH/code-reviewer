@@ -298,8 +298,8 @@ test.describe("the pages of the factory", () => {
     ).toBeVisible();
   });
 
-  // #951
-  test("@smoke Profiles, Runners, MCP and Settings open from the sidebar", async ({
+  // #951, #1108
+  test("@smoke the sidebar is the control panel, Setup and Settings, and the Setup places open", async ({
     page,
   }) => {
     await signInAsFactoryAdmin(page);
@@ -309,26 +309,42 @@ test.describe("the pages of the factory", () => {
       /^ToDos/,
       "Projects",
       "Runs",
-      "Profiles",
+      "GitHub and Jira",
+      "MCP servers",
       "Runners",
-      "MCP",
+      "LLM keys",
       "Settings",
     ]);
+    // Nothing to configure by hand: no Profiles, no Environments.
+    await expect(nav.getByRole("link", { name: "Profiles" })).toHaveCount(0);
+    await expect(nav.getByRole("link", { name: "Environments" })).toHaveCount(
+      0,
+    );
 
-    await nav.getByRole("link", { name: "Profiles" }).click();
+    await nav.getByRole("link", { name: "GitHub and Jira" }).click();
     await expect(
-      page.getByRole("heading", { level: 1, name: "Profiles" }),
+      page.getByRole("heading", { level: 1, name: "Integrations" }),
     ).toBeVisible();
+    await expect(
+      nav.getByRole("link", { name: "GitHub and Jira" }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(
+      nav.getByRole("link", { name: "Settings" }),
+    ).not.toHaveAttribute("aria-current", "page");
     await nav.getByRole("link", { name: "Runners" }).click();
     await expect(
       page.getByRole("heading", { level: 1, name: "Runners" }),
     ).toBeVisible();
     // #1050: the MCP servers of the workspace.
-    await nav.getByRole("link", { name: "MCP" }).click();
+    await nav.getByRole("link", { name: "MCP servers" }).click();
     await expect(
       page.getByRole("heading", { level: 1, name: "MCP" }),
     ).toBeVisible();
     await expect(page.getByText("No MCP server yet")).toBeVisible();
+    await nav.getByRole("link", { name: "LLM keys" }).click();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "LLM" }),
+    ).toBeVisible();
     await nav.getByRole("link", { name: "Settings" }).click();
     const sections = page.getByRole("navigation", {
       name: "Settings sections",

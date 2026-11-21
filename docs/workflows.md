@@ -1484,6 +1484,18 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
 | `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
 
+## Setup and the control panel
+
+*#1108 of epic #1103 ([ADR 0007](decisions/0007-ai-configured-factory.md), decisions 7 to 9); the code is `app/src/shell/nav-items.ts`. Only the factory (the capability `implementer`) has this navigation; code-review.com keeps its own.*
+
+A person has two areas in the web app and configures nothing by hand: lanes are written through the API by an AI (decision 8), and the server's validator and the linked integrations are the only guard (decision 9). The sidebar of the factory has three groups:
+
+- **Control panel**: **ToDos** (what waits for an answer, with the count), **Projects** (the cockpit of a project; its **Lanes** tab lists the lanes read only, each opens its [lane page](#the-lane-page) with the **Start** form generated from the manual trigger's `input`, or only a button for a lane without input) and **Runs** (the [lane runs](#the-run-page), live; the run page answers a question and cancels).
+- **Setup**: only the integrations a person links. **GitHub and Jira** (`/w/<slug>/settings/integrations`), **MCP servers** (`/w/<slug>/mcp`, #1050), **Runners** (`/w/<slug>/runners`) and **LLM keys** (`/w/<slug>/settings/llm`). Nothing else is configured here.
+- **Workspace**: **Settings** with its tabs General, Members, Billing and the integration pages. The two integration pages that Setup lists are marked as Setup, not as Settings, while they are open.
+
+What left the navigation, and the UI, with this change: the **Profiles** page and the **Environments** page (their routes and API stay until release B, ADR 0007 "Migration path"; the page `/w/<slug>/environments` is no longer linked from the Implementer form, and the Runners page keeps one note that links to it until the runner work of #1105 is done), and the **review settings** of the workspace (`/settings/review-defaults`) and of a project (`/projects/<id>/review`), which an AI sets through the API: both pages show the values and no form to save them. The **Implementer** page (`/w/<slug>/implementer`) is no longer a place of the sidebar (since #925); it stays reachable from the note on a project's Lanes tab ("send a task") until the one-off lane "Einmalige Aufgabe" of decision 15 replaces it.
+
 ## The run page
 
 *Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*

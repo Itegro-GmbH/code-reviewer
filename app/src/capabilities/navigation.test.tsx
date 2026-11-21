@@ -179,23 +179,53 @@ describe("the sidebar of the factory (#925)", () => {
     "implementer",
   ]);
 
-  // #925: the sidebar of the factory is the prototype's: ToDos, Projects, Runs, Profiles, Runners, Settings, in that order; #1050 adds MCP
-  // after Runners (the servers an agent may use, as the runners are the machines it runs on).
-  // #1050
-  it("is ToDos, Projects, Runs, Profiles, Runners, MCP and Settings for the factory, with the addresses of the pages", () => {
+  // #925, #1050, #1108: the factory has two areas and nothing else to configure (ADR 0007, decision 7): the control panel (ToDos, Projects,
+  // Runs), Setup (the integrations: GitHub and Jira, MCP servers, Runners, LLM keys) and the workspace's Settings; no Profiles.
+  // #1108
+  it("is the control panel, Setup and Settings for the factory, in three groups, with the addresses of the pages", () => {
+    const groups = navGroupsFor(
+      "/w/acme",
+      identityFor("factory"),
+      WITH_IMPLEMENTER,
+    );
+
     expect(
-      navItemsFor("/w/acme", identityFor("factory"), WITH_IMPLEMENTER).map(
-        (item) => [item.label, item.href],
-      ),
+      groups.map((group) => [
+        group.label,
+        group.items.map((item) => [item.label, item.href]),
+      ]),
     ).toEqual([
-      ["ToDos", "/w/acme/todos"],
-      ["Projects", "/w/acme/projects"],
-      ["Runs", "/w/acme/runs"],
-      ["Profiles", "/w/acme/profiles"],
-      ["Runners", "/w/acme/runners"],
-      ["MCP", "/w/acme/mcp"],
-      ["Settings", "/w/acme/settings"],
+      [
+        "Control panel",
+        [
+          ["ToDos", "/w/acme/todos"],
+          ["Projects", "/w/acme/projects"],
+          ["Runs", "/w/acme/runs"],
+        ],
+      ],
+      [
+        "Setup",
+        [
+          ["GitHub and Jira", "/w/acme/settings/integrations"],
+          ["MCP servers", "/w/acme/mcp"],
+          ["Runners", "/w/acme/runners"],
+          ["LLM keys", "/w/acme/settings/llm"],
+        ],
+      ],
+      ["Workspace", [["Settings", "/w/acme/settings"]]],
     ]);
+  });
+
+  // #1108
+  it("has no place for Profiles, Environments or the Implementer: an AI configures the lanes through the API", () => {
+    const names = navItemsFor(
+      "/w/acme",
+      identityFor("factory"),
+      WITH_IMPLEMENTER,
+    ).map((item) => item.label);
+
+    for (const gone of ["Profiles", "Environments", "Implementer", "MCP"])
+      expect(names).not.toContain(gone);
   });
 
   // #1050
@@ -249,7 +279,7 @@ describe("the sidebar of the factory (#925)", () => {
 
   // #925
   it("is what the rendered sidebar shows with the capability, marked as the current page on its page", () => {
-    navigation.pathname = "/w/acme/profiles";
+    navigation.pathname = "/w/acme/runners";
     const { rerender } = render(
       <CapabilitiesProvider
         capabilities={[...FACTORY, "implementer" satisfies Capability]}
@@ -261,18 +291,21 @@ describe("the sidebar of the factory (#925)", () => {
     );
 
     expect(labels()).toEqual(
-      expect.arrayContaining(["ToDos", "Projects", "Profiles", "Runners"]),
+      expect.arrayContaining(["ToDos", "Projects", "Runners", "MCP servers"]),
     );
-    expect(
-      screen
-        .getByRole("link", { name: "Profiles" })
-        .getAttribute("aria-current"),
-    ).toBe("page");
     expect(
       screen
         .getByRole("link", { name: "Runners" })
         .getAttribute("aria-current"),
+    ).toBe("page");
+    expect(
+      screen
+        .getByRole("link", { name: "MCP servers" })
+        .getAttribute("aria-current"),
     ).toBeNull();
+    // The two groups of the factory have a heading.
+    expect(screen.getByText("Control panel")).toBeTruthy();
+    expect(screen.getByText("Setup")).toBeTruthy();
 
     rerender(
       <CapabilitiesProvider capabilities={FACTORY}>
@@ -281,7 +314,7 @@ describe("the sidebar of the factory (#925)", () => {
         </AppShell>
       </CapabilitiesProvider>,
     );
-    expect(labels()).not.toContain("Profiles");
+    expect(labels()).not.toContain("Runners");
   });
 
   // #925: Settings is the current place on every page of its tabs.
@@ -300,6 +333,30 @@ describe("the sidebar of the factory (#925)", () => {
         .getByRole("link", { name: "Settings" })
         .getAttribute("aria-current"),
     ).toBe("page");
+  });
+
+  // #1108: the pages that Setup lists sit below /settings, and Settings is not current on them.
+  it.each([
+    ["/w/acme/settings/integrations", "GitHub and Jira"],
+    ["/w/acme/settings/llm", "LLM keys"],
+  ])("marks Setup, not Settings, as the current place on %s", (path, place) => {
+    navigation.pathname = path;
+    render(
+      <CapabilitiesProvider capabilities={[...FACTORY, "implementer"]}>
+        <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
+          <h1>Page</h1>
+        </AppShell>
+      </CapabilitiesProvider>,
+    );
+
+    expect(
+      screen.getByRole("link", { name: place }).getAttribute("aria-current"),
+    ).toBe("page");
+    expect(
+      screen
+        .getByRole("link", { name: "Settings" })
+        .getAttribute("aria-current"),
+    ).toBeNull();
   });
 });
 

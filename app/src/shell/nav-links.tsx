@@ -14,6 +14,7 @@ import {
   SidebarContent,
   SidebarGroup,
   SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -26,7 +27,7 @@ import type { ProductIdentity } from "@/product-identity/identity";
 import { workspaceSlugOfPath } from "@/workspaces/paths";
 import { TodoCount } from "../todo-badges/badges.tsx";
 import {
-  isCurrentPage,
+  isCurrentItem,
   navGroupsFor,
   SIDEBAR_LINK_CLASS,
   type NavItem,
@@ -54,6 +55,9 @@ export function NavLinks({
         <Fragment key={index}>
           {index > 0 ? <SidebarSeparator /> : null}
           <SidebarGroup>
+            {group.label === undefined ? null : (
+              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+            )}
             <SidebarGroupContent>
               <SidebarMenu className="m-0 list-none p-0">
                 {group.items.map((item) => (
@@ -76,7 +80,7 @@ function NavLink({
   pathname: string | null;
 }) {
   const { setOpenMobile } = useSidebar();
-  const current = isCurrentPage(pathname, item.href);
+  const current = isCurrentItem(pathname, item);
   const slug = pathname === null ? undefined : workspaceSlugOfPath(pathname);
   return (
     <SidebarMenuItem>

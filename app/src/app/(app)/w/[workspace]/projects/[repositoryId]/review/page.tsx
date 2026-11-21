@@ -23,6 +23,8 @@ import { reviewSettingsServiceFor } from "@/review-settings/shared";
 import { requireWorkspace } from "@/workspaces/access-runtime";
 import { can } from "@/workspaces/permissions";
 import { getProductIdentity } from "@/product-identity/current";
+import { getCapabilities } from "@/capabilities/shared";
+import { FACTORY_READ_ONLY_NOTE } from "@/review-settings/ui/read-only-note";
 
 export const metadata: Metadata = { title: "Review settings" };
 
@@ -114,6 +116,10 @@ async function ProjectSettingsContent({
       {...(nativeCatalog === undefined ? {} : { nativeCatalog })}
       billingOn={billingOn}
       canConfirmProviderAddress={canManageLlmKey}
+      // The factory shows the review settings and an AI changes them through the API (#1108); the review product keeps its form.
+      {...(getCapabilities().has("implementer")
+        ? { readOnly: true, readOnlyNote: FACTORY_READ_ONLY_NOTE }
+        : {})}
       data={data}
     />
   );

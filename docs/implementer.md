@@ -1597,7 +1597,7 @@ first ran into it).
 > **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. A lane step will name one concrete runner (a hosted runner, one per sandbox type with a fixed size and its own concurrency, or a self-hosted runner) instead of an environment and labels, and the setup script and network rule move into the agent step; tasks started by hand are replaced by a one-off lane; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs" and decisions 11, 15 and 16.
 
 An environment is a start configuration for a task: a **name**, a **size**, a **setup script** and (step 7) a **network** setting. They are kept per workspace on
-the page `/w/<slug>/environments` (navigation entry "Environments", between Implementer and Runs; only in a deployment with the
+the page `/w/<slug>/environments` (no navigation entry since #1108: the navigation of the factory has no place for environments, ADR 0007; the page and its routes stay until release B; only in a deployment with the
 capability `implementer`, anywhere else the path is a 404 like an unknown one).
 
 - **Who:** every member sees the list and the scripts, because every member may use one. Owners and Admins create, change and
