@@ -123,6 +123,10 @@ const STEP_FAILURE_TEXT: Record<
   template_too_large: "The text of the step is too long.",
   profile_not_found:
     "The profile of the step no longer exists, is archived, or has no such version.",
+  agent_settings_invalid:
+    "The settings written in the step (model, canPush, harness, instructions, setup script or network rule) cannot be used.",
+  runner_not_found:
+    "The runner of the step is not one of the workspace any more, or it was revoked. Save a new version of the lane that names a runner that exists.",
   environment_not_found: "The environment of the step does not exist.",
   environment_mismatch:
     "The step names another environment than its profile runs in.",
@@ -371,7 +375,7 @@ export const LANE_RUNS_COPY = {
   emptyFiltered: "No lane run matches this filter.",
   emptyInLane: "This lane has not run yet. Wait for its trigger.",
   emptyInLaneStartable:
-    "This lane has not run yet. Start it with Run now, or wait for its trigger.",
+    "This lane has not run yet. Start it with the form on this page, or wait for its trigger.",
   columnTrigger: "Trigger",
   invalidFilterTitle: "This filter is not valid",
   invalidFilterDescription:
@@ -391,6 +395,23 @@ export const PAGE_COPY = {
   columnVersion: "Version",
   of: "of",
   breadcrumbRoot: "Projects",
+  laneHeading: "The lane",
+  laneDescription: "Description",
+  laneNoDescription: "This lane has no description.",
+  laneProject: "Project",
+  laneTriggers: "Triggers",
+  laneNoTriggers: "none",
+  laneUnreadable: "The saved lane cannot be read.",
+  laneArchived: "Archived",
+  versionsHeading: "Versions",
+  versionCurrent: "current",
+  versionFirst: "The lane as first saved. Its description:",
+  versionSavedBy: "by",
+  versionUnknownAuthor: "a former member",
+  versionNoChangeDescription:
+    "No change description: this version was saved before every version had to say what it changes.",
+  versionsAskAi:
+    "A lane is changed by an AI through the API, never in this page. Every new version says what it changes.",
   allRuns: "All runs of this workflow",
   runTitle: "Run",
   runStartedAt: "Started",
@@ -429,7 +450,8 @@ export const PAGE_COPY = {
   stepNumber: "Number",
   stepExisting: "This already existed, so nothing new was created.",
   stepCreated: "This was created by the step.",
-  profile: "Profile",
+  /** A run that started before the settings moved into the steps recorded the profile it ran with: shown as history, never for a new run. */
+  profileRecorded: "profile recorded then:",
   openRun: "Open the run",
   askHeading: "The agent asks",
   askChoose: "Answer",
@@ -506,7 +528,7 @@ export const FLOW_COPY = {
   finishedAt: "Finished",
   duration: "Took",
   cost: "Cost",
-  profile: "Profile",
+  profileRecorded: "Profile recorded then",
   rounds: "Rounds",
   roundsHeading: "All rounds",
   roundsEarlier: "Earlier rounds",
@@ -581,6 +603,10 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
     "That ticket is not of the ticket source of this lane's project: name a GitHub issue or a Jira issue the way the project's tickets are.",
   WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT:
     "That repository is not the one this project takes its tickets from.",
+  WORKFLOW_RUN_PROJECT_INACTIVE:
+    "The project of this lane is switched off. Switch it on to start this lane.",
+  WORKFLOW_RUN_PROJECT_REQUIRED:
+    "This lane has no project, and its trigger names no repository or ticket, so there is no repository to work on. Put the lane in a project.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
     "The workflow has a step of a kind the engine does not run (a reserved one), so it cannot be started.",
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,

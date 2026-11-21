@@ -65,6 +65,8 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
 
 ### Environments of the kind `runner`
 
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Since #1105 (release A) a lane step names one concrete runner instead of an environment, and the Environments page is gone (its routes stay until release B); see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
+
 An environment is either `hosted` (a VM of the platform: a size, a setup script and a network rule, as before) or `runner`: **labels instead of all
 three**. A runner environment names at least one and at most twenty labels (lower case, `[a-z0-9][a-z0-9._:-]{0,39}`); a size, a script or a network
 rule in its body is refused with the field's name, not silently dropped. Size, script and network are the runner's own business (decision 8). Hosted
@@ -129,6 +131,66 @@ a stored row says). The database only matches the entries it is given. A row tha
 matches nothing and never fails the query for the other jobs.
 
 ### Routing
+
+> **Amended in part (ADR 0007, epic #1103; #1105, release A).** A lane step no longer reaches a runner by the labels it announced: an agent step with settings of its own
+> names **one concrete runner** by its id ([`workflows.md`](workflows.md#settings-in-the-step-1105)). Its job reaches that runner by the **reserved label `cr:runner:<id>`**,
+> which only that runner's own credential carries; this amends [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md) §1 (below, "Named runners"). The rest of this
+> section is how a turn in an **environment** (the old form, which stays accepted in release A) is routed, and it is unchanged: the one rule still is "a job requires labels,
+> a dispatcher takes it when it has all of them".
+
+#### Named runners (#1105, ADR 0007, decisions 10, 14 and 16)
+
+A **runner** is whatever runs an agent turn, and a step names one by its id. Two kinds, both listed by the validator (`runner_unknown` has their ids in `available`):
+
+- A **self-hosted runner** is a row of `runners` (a machine the customer registered). Its **name is unique** in the workspace among the runners that are not revoked **and the hosted
+  runners**, without regard to case (a partial unique index on `(workspace_id, lower(name)) where revoked_at is null`; the service that registers a runner or renames one takes the
+  workspace's lock and checks both tables). A registration with a name that is taken is `400 RUNNER_REQUEST_INVALID` with `fields: [{"field": "name", "code": "invalid"}]` and the
+  token is **not** used, so it registers again with another name; a DevBox that was revoked registers again under its name, as a **new id**. Existing duplicates were made unique
+  by the migration (the oldest keeps its name, a later one gets ` (` and the first eight characters of its id `)`). **A runner can be renamed** (`RunnerFleetService.rename`, name
+  rules of the registration): lanes store the id, so a rename changes no lane. (No route or Setup page calls it yet: #1116.)
+- A **hosted runner** is one **type** of the provided Vercel Sandbox: a row of `implementer_environments` of the kind `hosted` that has a `concurrency`, one for each size
+  an environment may name (`environmentVcpus` of `contracts/environment-sizes.v1.json`: **2, 4, 6 and 8 vCPU**; 1 vCPU is a size of the platform that leaves the agent no memory),
+  named "Vercel Sandbox 4 vCPU" and so on, in **every workspace**: the migration made them for the workspaces that exist, and the creation of a workspace (the three places that
+  make one) makes them for a new one. The **size is fixed per type** (a database index holds one hosted runner for each type and workspace); only the `concurrency` is set
+  (`HOSTED_RUNNER_DEFAULT_CONCURRENCY`, a whole number from 1 to 100 set by the operator, 2 when it is not set, is what the first rows get). A hosted runner is not an environment
+  of a person: the environments page and its routes do not list it, count it, change it or delete it. A name that a person's environment or a runner already had is not taken from
+  it: the hosted runner then is "Vercel Sandbox 4 vCPU (hosted)" (or "(hosted 2)" and so on). **The hosted runners repair themselves**: reading a workspace's runners
+  (`NamedRunnersRepository.list`, which the validator and the Setup page use) makes a missing type again under the workspace's lock, so a type that the release that was still
+  running during a rollout deleted, or a workspace it made, is whole again at the next read (a made-again type has a new id, so a step that named the old id is `runner_unknown`
+  at the next save). The `concurrency` is stored from #1114 and enforced in the claim from #1115; setting it has no route yet (#1116).
+
+**The label.** The claim of a customer's runner has the labels it announced (never one in `cr:`) **and `cr:runner:<its own id>`**, taken from the credential's row (`customer.runner.id`),
+never from what the runner announced. A runner that announces a `cr:` label is still refused at registration (`RUNNER_LABEL_RESERVED`); the one exception to "only the platform identity
+carries a `cr:` label" is this label, and only on the runner it names. A turn of a step that names a self-hosted runner is written with a **runner copy that holds exactly that label**
+(`requiredLabelsOfTurn`), so the job requires `cr:runner:<id>` and nothing else: **no other runner of the workspace takes it, however alike their labels are, the platform identity
+does not have it, and a runner of another workspace cannot** (its claim is held to its own workspace as before). A copy that holds that label **and others** is a legacy
+environment and keeps losing its `cr:` labels. The **doorbell** matches it by the same rule: a customer's dispatcher has the labels it announced plus `cr:runner:<its id>` in the
+pairing of the rings (`runner-dispatches-repository.ts`), so the named runner is rung and no other. The Dispatcher itself (`dispatcher/src`) forwards labels and does not change.
+
+**Concurrency per named runner** (ADR 0007, "Concurrency"; the claim counts, the app decides, not what the caller sends):
+
+- A **self-hosted runner** may hold as many running jobs as its `parallelRuns` (announced in `limits`), **held within the operator's maximum** `RUNNER_MAX_PARALLEL_RUNS` (a whole number
+  from 1 to 1000, **default 16**; anything else is 16): **a runner that announces 50 runs at most 16 at once unless the operator raises the variable**, and a runner that announced none gets the maximum.
+  This is a change for runners that had no app-side cap before part 2 (a release note for operators): their other jobs wait, and the run page says "Waiting for a free place on the runner X (16 of 16 in use)". Showing the effective limit next to the runner is #1116. The claim counts the running jobs of that runner (by its id in `jobs.runner_id`) and answers **`204`**
+  at or above the limit, so the job waits. It counts every job the runner holds, whatever form its step is in.
+- A **hosted runner** may run as many turns as its stored `concurrency`. The claim of the platform identity does not take a job whose turn copied a hosted runner that already runs that
+  many (the running jobs whose turn copied the same row): **per hosted runner, that is per type and workspace**, so a workspace's four 2 vCPU turns do not use its 8 vCPU allowance, and
+  another workspace's runner is another row. A turn of an environment of a person has no such limit. The Dispatcher's `maxRunning` stays the **pool-wide** cap above all workspaces
+  and types.
+- Claims run under the exclusive gate lock of the queue, so two claims cannot both count below a limit.
+
+**Waiting (decision 13).** A job that waits **only because its runner is at its concurrency** keeps waiting until a place is free or a person cancels the run; there is no age at which it fails. (Checked for decision 13's open
+point: **a lane has no run-level time limit** (the budget is spent by running turns only and a turn's time limit starts when the turn does), so the cancel by a person is the limit.) The run page says why, for both kinds of runner:
+"Waiting for a free place on Vercel Sandbox 4 vCPU (2 of 2 in use). The run starts when a place is free; cancel it to stop waiting." (a hosted runner), and for a self-hosted one **busy** ("Waiting for a free place on the runner DevBox (3 of 3 in use)…"),
+**offline or revoked** (it ends after the deadline) or **online but unable to take the step** (it ends after the deadline). The `no_runner_available` deadline (`RUNNER_WAIT_DEADLINE_MINUTES`, 30 minutes) applies to a self-hosted runner that **cannot serve the
+step**: it is revoked, or was **not heard from for the whole deadline** (`last_seen_at` is strictly after the deadline ago, so a runner last heard from exactly 30:00 ago is offline), or is **below `RUNNER_MIN_BASE_VERSION`** (it gets `426` at every claim), or **announces no OpenCode**, or **no entry of its manifest can run the turn** (the harness, auth and model the step asks for). A busy
+runner that asks for a job every 30 seconds and can serve the step is reachable and keeps its jobs. For a **hosted** runner a job that waits because its runner is full is not given up as `dispatch_unavailable` either, **and not for the give-up time after a place of its
+runner was freed** (a job that waited hours is not failed between the end of the job that freed the place and its own claim); a hosted job that waits for any other reason still is. The **Dispatcher's rings** skip a job whose hosted runner is full, so one workspace's backlog cannot fill
+every batch of the sweep and the job-end reaction: a job is a candidate again as soon as its runner has a place. A job of a step in the old form (labels) waits as before.
+
+A turn of a step that names a **hosted runner** is a hosted job of the size of its type, as before: `cr:managed` and `cr:size-<n>`, the platform identity takes it. The turn copies the
+hosted runner's id and size; the step's own `setupScript` and `network` apply (the hosted runner has neither). The record of which hosted runner the job was enqueued for is the id of
+that copy.
 
 One rule routes every job to every dispatcher (Runner v2, #971, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)): **a job requires labels
 and a dispatcher takes it only when it has all of them.** There is no special case for hosted jobs or for runner turns; the two that existed
@@ -246,7 +308,14 @@ lease token (`/api/runners/v1/jobs/{id}/session`, `/resume-session`), their cont
 
 ### Validator rules
 
-The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment and, for each profile version it runs, whether
+> **Amended in part (ADR 0007, epic #1103; #1105, release A).** For an agent step with settings of its own the rules `runner_needs_own_key`, `harness_needs_runner` and
+> `no_runner_announces` are checked **at the runner the step names**: a managed model on a self-hosted runner is `runner_needs_own_key`; a harness other than OpenCode on a
+> hosted runner is `harness_needs_runner`; `no_runner_announces` is a warning over **that runner's own announcement** (only when it is online). Besides them `runner_unknown` (an id
+> of no runner of the workspace, or of a revoked one, with the ids in `available`; a revoked runner is never offered), `runner_required`, `runner_with_environment` and
+> `hosted_only_setting` (`setupScript` and `network` only on a hosted runner) are the validator's; see [`workflows.md`](workflows.md#settings-in-the-step-1105). A step saved with a runner
+> that is revoked afterwards ends `runner_not_found` when it starts, free, and does not wait. The table below is the rule at an environment, which stays for the old form.
+
+The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment (the **old form**: a step in the profile form; the Profiles and Environments pages are gone since #1105) and, for each profile version it runs, whether
 its model is managed and which harness it runs with. Since #919 the environment is part of the profile, so the same two rules are checked when a **profile** is saved
 (`POST .../profiles`, at `/environment`), and again for a step at its `/profile` (at its `/environment` for a profile version saved before #919, whose step names the environment):
 
@@ -256,7 +325,7 @@ its model is managed and which harness it runs with. Since #919 the environment 
 | `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's.                            |
 | `no_runner_announces`  | A profile (or an agent step) in a runner environment asks for a harness, auth and model that **no online runner of the workspace with the environment's labels announces** (#973). A **warning**, not an error (`severity: "warning"`, listed in `warnings`; the save goes through): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. With no such runner online nothing is said: the turn waits for one. |
 
-A profile names its harness (`opencode` or `claude-code`, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
+An agent step names its harness (`harness`: `opencode` or `claude-code`, [`workflows.md`](workflows.md#settings-in-the-step-1105); a profile of the old form did, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
 
 The validator says which combinations no online runner of the workspace announces (#973, as a warning that never stops a save): it asks the runners that are online (heard from within two minutes, base at the minimum) and have
 every label of the environment whether one has an entry for the profile's harness, auth and model (the claim's rule, `accessMatches`). A managed model is `runner_needs_own_key` and is not

@@ -5,6 +5,7 @@
 // version stays readable, and a workspace never sees the workflows of another.
 import { describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createNamedRunnersRepository } from "../db/repositories/named-runners-repository.ts";
 import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -19,10 +20,24 @@ import {
   addWorkspace,
   defaultWorkspaceId,
 } from "../test-support/workspaces.ts";
-import { WorkflowError } from "./errors.ts";
+import { WORKFLOW_ERROR_STATUS, WorkflowError } from "./errors.ts";
 import { createWorkflowService, type WorkflowService } from "./service.ts";
 import { effectiveMcpServers } from "./mcp.ts";
-import { tiny } from "./test-fixtures.ts";
+import { tiny as bareTiny } from "./test-fixtures.ts";
+
+/** The lane the tests save: a new lane has a description of its own (#1107). */
+const tiny = (): ReturnType<typeof bareTiny> => ({
+  ...bareTiny(),
+  description: "A tiny lane.",
+});
+/** A save of a new version says what it changes (#1107). */
+const change = (
+  document: Record<string, unknown>,
+  text = "Changed in the test.",
+) => ({
+  ...document,
+  changeDescription: text,
+});
 
 const USER = { id: "u-1" };
 const PROFILE_CONTENT = {
@@ -62,6 +77,7 @@ async function setup() {
       profiles: createProfilesRepository(db, workspaceId),
       mcpServers: createMcpServersRepository(db, workspaceId),
       mcpOAuth: createMcpOAuthRepository(db, workspaceId),
+      runners: createNamedRunnersRepository(db, workspaceId),
       ...options,
     });
   /** The service with the project of the workspace filled in for `create` and `list`, as the tests below read. */
@@ -269,11 +285,12 @@ describe("the workflow service", () => {
     const created = await a.create(USER, tiny());
 
     const changed = { ...tiny(), description: "second" };
-    const second = await a.update(USER, created.id, changed);
-    const third = await a.update(USER, created.id, {
-      ...changed,
-      description: "third",
-    });
+    const second = await a.update(USER, created.id, change(changed));
+    const third = await a.update(
+      USER,
+      created.id,
+      change({ ...changed, description: "third" }),
+    );
 
     expect(second).toMatchObject({ version: 2, documentVersion: 2 });
     expect(third.versions.map((v) => v.version)).toEqual([3, 2, 1]);
@@ -297,7 +314,7 @@ describe("the workflow service", () => {
     const created = await a.create(USER, tiny());
 
     const failure = await failureOf(
-      a.update(USER, created.id, { ...tiny(), steps: [] }),
+      a.update(USER, created.id, change({ ...tiny(), steps: [] })),
     );
 
     expect(failure.code).toBe("WORKFLOW_INVALID");
@@ -310,12 +327,13 @@ describe("the workflow service", () => {
     const one = await a.create(USER, tiny());
     await a.create(USER, { ...tiny(), name: "Other" });
 
-    const renamed = await a.update(USER, one.id, {
-      ...tiny(),
-      name: "Renamed",
-    });
+    const renamed = await a.update(
+      USER,
+      one.id,
+      change({ ...tiny(), name: "Renamed" }),
+    );
     const clash = await failureOf(
-      a.update(USER, one.id, { ...tiny(), name: "other" }),
+      a.update(USER, one.id, change({ ...tiny(), name: "other" })),
     );
     const twice = await failureOf(
       a.create(USER, { ...tiny(), name: "RENAMED" }),
@@ -330,13 +348,17 @@ describe("the workflow service", () => {
   it("saves over an expected version only if it is still current", async () => {
     const { a } = await setup();
     const created = await a.create(USER, tiny());
-    await a.update(USER, created.id, tiny());
+    await a.update(USER, created.id, change(tiny()));
 
-    const stale = await failureOf(a.update(USER, created.id, tiny(), 1));
+    const stale = await failureOf(
+      a.update(USER, created.id, change(tiny()), 1),
+    );
 
     expect(stale.code).toBe("WORKFLOW_VERSION_CONFLICT");
     expect(stale.current).toBe(2);
-    expect((await a.update(USER, created.id, tiny(), 2)).version).toBe(3);
+    expect((await a.update(USER, created.id, change(tiny()), 2)).version).toBe(
+      3,
+    );
   });
 
   // #833-M1-T208
@@ -345,7 +367,7 @@ describe("the workflow service", () => {
 
     for (const id of ["nope", "", "x".repeat(200)]) {
       expect((await failureOf(a.get(id))).code).toBe("WORKFLOW_NOT_FOUND");
-      expect((await failureOf(a.update(USER, id, tiny()))).code).toBe(
+      expect((await failureOf(a.update(USER, id, change(tiny())))).code).toBe(
         "WORKFLOW_NOT_FOUND",
       );
     }
@@ -355,7 +377,7 @@ describe("the workflow service", () => {
   it("archives a workflow: not listed, still readable with its versions, no new version, and its name is free", async () => {
     const { a } = await setup();
     const created = await a.create(USER, tiny());
-    await a.update(USER, created.id, tiny());
+    await a.update(USER, created.id, change(tiny()));
 
     const archived = await a.archive(created.id);
     const again = await a.archive(created.id);
@@ -366,7 +388,7 @@ describe("the workflow service", () => {
     const read = await a.get(created.id);
     expect(read.archivedAt).toBe(archived.archivedAt);
     expect(read.versions.map((v) => v.version)).toEqual([2, 1]);
-    const refused = await failureOf(a.update(USER, created.id, tiny()));
+    const refused = await failureOf(a.update(USER, created.id, change(tiny())));
     expect(refused.code).toBe("WORKFLOW_ARCHIVED");
     const fresh = await a.create(USER, tiny());
     expect(fresh.id).not.toBe(created.id);
@@ -388,7 +410,7 @@ describe("the workflow service", () => {
     expect(refused.maximum).toBe(2);
     expect((await a.get(third.id)).archivedAt).toBeNull();
     // What is archived stays archived when it is asked again, and the live workflow still takes versions and a neighbour.
-    expect((await a.update(USER, third.id, tiny())).version).toBe(2);
+    expect((await a.update(USER, third.id, change(tiny()))).version).toBe(2);
     expect((await a.create(USER, { ...tiny(), name: "Next" })).version).toBe(1);
   });
 
@@ -433,9 +455,9 @@ describe("the workflow service", () => {
     expect(theirs.id).not.toBe(mine.id);
     expect((await a.list()).workflows.map((w) => w.id)).toEqual([mine.id]);
     expect((await failureOf(a.get(theirs.id))).code).toBe("WORKFLOW_NOT_FOUND");
-    expect((await failureOf(a.update(USER, theirs.id, tiny()))).code).toBe(
-      "WORKFLOW_NOT_FOUND",
-    );
+    expect(
+      (await failureOf(a.update(USER, theirs.id, change(tiny())))).code,
+    ).toBe("WORKFLOW_NOT_FOUND");
     expect((await b.get(theirs.id)).version).toBe(1);
   });
 
@@ -556,6 +578,28 @@ describe("the workflow service", () => {
     expect((await service.list(second.id)).workflows).toHaveLength(1);
   });
 
+  // #1105-T412 (ADR 0007 decision 15)
+  it("copies the one-off lane with the implementer's settings alone, on the hosted runner, and reports a second copy as taken", async () => {
+    const { rawServiceFor, projectIds, db, idA } = await setup();
+    const service = rawServiceFor(idA);
+    const mine = projectIds.get(idA)!;
+
+    // `reviewer` does not exist in this workspace: the one-off lane has no reviewer.
+    const first = await service.copyBuiltIn(USER, mine, ["one-off-task"]);
+    const again = await service.copyBuiltIn(USER, mine, ["one-off-task"]);
+
+    expect(first.map((r) => [r.key, r.ok])).toEqual([["one-off-task", true]]);
+    expect(again[0]).toMatchObject({ ok: false, code: "WORKFLOW_NAME_TAKEN" });
+    const lanes = (await service.list(mine)).workflows;
+    expect(lanes.map((w) => w.name)).toEqual(["One-off task"]);
+    const view = await service.get(lanes[0]!.id);
+    const hosted = (await createNamedRunnersRepository(db, idA).list()).find(
+      (runner) => runner.kind === "hosted" && runner.vcpus === 4,
+    );
+    expect(JSON.stringify(view.document)).toContain(`"runner":"${hosted!.id}"`);
+    expect(JSON.stringify(view.document)).not.toContain('"profile"');
+  });
+
   // #922-T13
   it("copies built-in lanes into a project and reports the ones that do not pass", async () => {
     const { rawServiceFor, projectIds, db, idA } = await setup();
@@ -593,6 +637,69 @@ describe("the workflow service", () => {
       (await service.list(mine)).workflows.map((w) => w.name).sort(),
     ).toEqual(["Issue to PR", "Review a pull request"]);
     expect(twice[0]).toMatchObject({ ok: false, code: "WORKFLOW_NAME_TAKEN" });
+
+    // #1105-T401: the copies carry the profiles' settings and the hosted runner of 4 vCPU inline, and name no profile or environment.
+    const hosted = (await createNamedRunnersRepository(db, idA).list()).find(
+      (runner) => runner.kind === "hosted" && runner.vcpus === 4,
+    );
+    const review = copied[1];
+    if (!review?.ok) throw new Error("the review lane was not copied");
+    const lane = await service.get(review.workflow.id);
+    expect(
+      (lane.document as { steps: Record<string, unknown>[] }).steps[0],
+    ).toMatchObject({
+      kind: "agent",
+      harness: "opencode",
+      model: PROFILE_CONTENT.model,
+      canPush: PROFILE_CONTENT.canPush,
+      runner: hosted?.id,
+    });
+    expect(JSON.stringify(lane.document)).not.toContain('"profile"');
+    expect(JSON.stringify(lane.document)).not.toContain('"environment"');
+  });
+
+  // #1105-T402
+  it("reports a built-in lane whose profile model the workspace cannot run any more as a refused lane, the way a missing profile is, and still copies the others", async () => {
+    const { db, idA, projectIds } = await setup();
+    await createProfilesRepository(db, idA).create(
+      {
+        name: "reviewer",
+        content: { ...PROFILE_CONTENT, model: { entryId: "gone" } },
+        createdBy: USER.id,
+      },
+      100,
+    );
+    const service = createWorkflowService({
+      workflows: createWorkflowsRepository(db, idA),
+      projects: createProjectsRepository(db, idA),
+      environments: createImplementerEnvironmentsRepository(db, idA),
+      profiles: createProfilesRepository(db, idA),
+      runners: createNamedRunnersRepository(db, idA),
+      // The rule of the workspace today: the entry the reviewer profile names is not enabled.
+      models: {
+        check: async (model) => ("entryId" in model ? "not_enabled" : null),
+      },
+    });
+    const mine = projectIds.get(idA)!;
+
+    const results = await service.copyBuiltIn(USER, mine, [
+      "issue-to-pr",
+      "review-a-pull-request",
+    ]);
+
+    // Both lanes carry a reviewer, and the implementer profile of `setup` names the same kind of model: both are refused, with the code
+    // `profile_unknown` has (`WORKFLOW_INVALID`) and the issue `model_not_allowed`, and nothing is saved.
+    expect(results.map((r) => [r.key, r.ok])).toEqual([
+      ["issue-to-pr", false],
+      ["review-a-pull-request", false],
+    ]);
+    for (const result of results) {
+      expect(result).toMatchObject({ ok: false, code: "WORKFLOW_INVALID" });
+      expect(
+        result.ok ? [] : result.errors.map((error) => error.code),
+      ).toContain("model_not_allowed");
+    }
+    expect((await service.list(mine)).workflows).toEqual([]);
   });
 
   // #937 (from the re-review of #936)
@@ -619,6 +726,7 @@ describe("the workflow service", () => {
       projects: createProjectsRepository(db, idA),
       environments: createImplementerEnvironmentsRepository(db, idA),
       profiles: createProfilesRepository(db, idA),
+      runners: createNamedRunnersRepository(db, idA),
     });
     const mine = projectIds.get(idA)!;
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -692,7 +800,7 @@ describe("a lane that names MCP servers (#1052)", () => {
     const next = await a.update(
       USER,
       saved.id,
-      withMcp(["srv-github", "srv-linear"], []),
+      change(withMcp(["srv-github", "srv-linear"], [])),
       1,
     );
     expect(effectiveMcpServers(next.document, "work")).toEqual([]);
@@ -727,7 +835,12 @@ describe("a lane that names MCP servers (#1052)", () => {
     const saved = await a.create(USER, withMcp(["srv-github"]));
 
     const refused = await failureOf(
-      a.update(USER, saved.id, withMcp(["srv-github"], ["srv-linear"]), 1),
+      a.update(
+        USER,
+        saved.id,
+        change(withMcp(["srv-github"], ["srv-linear"])),
+        1,
+      ),
     );
 
     expect(refused.errors).toEqual([
@@ -864,5 +977,152 @@ describe("a lane that names MCP servers (#1052)", () => {
     expect((await bare.validate(withMcp(["srv-github"]))).errors).toEqual([
       expect.objectContaining({ code: "mcp_server_unknown" }),
     ]);
+  });
+});
+
+describe("the change description of a version (#1107)", () => {
+  // #1107-T01
+  it("refuses a new version without a change description, with 422, and writes no version", async () => {
+    const { a } = await setup();
+    const created = await a.create(USER, tiny());
+
+    const failure = await failureOf(a.update(USER, created.id, tiny()));
+
+    expect(failure.code).toBe("WORKFLOW_CHANGE_DESCRIPTION_REQUIRED");
+    expect(WORKFLOW_ERROR_STATUS[failure.code]).toBe(422);
+    expect((await a.get(created.id)).version).toBe(1);
+  });
+
+  // #1107-T02
+  it("refuses a change description that is blank, not a text or longer than 1,000 characters", async () => {
+    const { a } = await setup();
+    const created = await a.create(USER, tiny());
+
+    for (const bad of [
+      "",
+      "   \n\t ",
+      7,
+      null,
+      ["x"],
+      "x".repeat(1001),
+      "fixed\u0000",
+    ]) {
+      const failure = await failureOf(
+        a.update(USER, created.id, { ...tiny(), changeDescription: bad }),
+      );
+      expect(failure.code).toBe("WORKFLOW_CHANGE_DESCRIPTION_REQUIRED");
+    }
+    // A body that is not an object is refused for its missing change description, before the document is read.
+    for (const body of [null, [], "text"]) {
+      const failure = await failureOf(a.update(USER, created.id, body));
+      expect(failure.code).toBe("WORKFLOW_CHANGE_DESCRIPTION_REQUIRED");
+    }
+    expect((await a.get(created.id)).version).toBe(1);
+    // The longest allowed text is saved.
+    const longest = await a.update(
+      USER,
+      created.id,
+      change(tiny(), "x".repeat(1000)),
+    );
+    expect(longest.versions[0]?.changeDescription).toBe("x".repeat(1000));
+  });
+
+  // #1107-T03
+  it("stores the change description with the version and lists it with the author, and keeps it out of the document", async () => {
+    const { a } = await setup();
+    const created = await a.create(USER, tiny());
+
+    const second = await a.update(
+      USER,
+      created.id,
+      change(
+        { ...tiny(), description: "Second." },
+        "  Reworded the description.  ",
+      ),
+    );
+
+    expect(second.versions).toEqual([
+      expect.objectContaining({
+        version: 2,
+        savedBy: USER.id,
+        changeDescription: "Reworded the description.",
+      }),
+      expect.objectContaining({
+        version: 1,
+        savedBy: USER.id,
+        changeDescription: null,
+      }),
+    ]);
+    expect(second.document).not.toHaveProperty("changeDescription");
+    expect((await a.get(created.id, 2)).document).not.toHaveProperty(
+      "changeDescription",
+    );
+    expect((await a.get(created.id)).versions[0]?.changeDescription).toBe(
+      "Reworded the description.",
+    );
+  });
+
+  // #1107-T04
+  it("still refuses an invalid document first by its own errors when the change description is there", async () => {
+    const { a } = await setup();
+    const created = await a.create(USER, tiny());
+
+    const failure = await failureOf(
+      a.update(USER, created.id, change({ ...tiny(), steps: [] })),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_INVALID");
+  });
+
+  // #1107-T05
+  it("does not take a change description on create: version 1 has the lane's description", async () => {
+    const { a } = await setup();
+
+    const failure = await failureOf(
+      a.create(USER, { ...tiny(), changeDescription: "First." }),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_INVALID");
+    expect(failure.errors).toEqual([
+      expect.objectContaining({
+        path: "/changeDescription",
+        code: "unknown_field",
+      }),
+    ]);
+  });
+
+  // #1107-T06
+  it("refuses a new lane without a description, or with a blank one, and names the field", async () => {
+    const { a } = await setup();
+    const without: Record<string, unknown> = { ...tiny() };
+    delete without.description;
+
+    for (const document of [without, { ...tiny(), description: "  " }]) {
+      const failure = await failureOf(a.create(USER, document));
+      expect(failure.code).toBe("WORKFLOW_INVALID");
+      expect(failure.errors).toEqual([
+        expect.objectContaining({
+          path: "/description",
+          code: "missing_field",
+        }),
+      ]);
+    }
+    expect((await a.list()).workflows).toEqual([]);
+  });
+
+  // #1107-T07
+  it("refuses a new lane without a project and one for another workspace's project", async () => {
+    const { rawServiceFor, idA, projectIds, idB } = await setup();
+    const service = rawServiceFor(idA);
+
+    const none = await failureOf(service.create(USER, undefined, tiny()));
+    const blank = await failureOf(service.create(USER, "", tiny()));
+    const foreign = await failureOf(
+      service.create(USER, projectIds.get(idB), tiny()),
+    );
+
+    expect(none.code).toBe("WORKFLOW_PROJECT_REQUIRED");
+    expect(blank.code).toBe("WORKFLOW_PROJECT_REQUIRED");
+    expect(foreign.code).toBe("WORKFLOW_PROJECT_NOT_FOUND");
   });
 });

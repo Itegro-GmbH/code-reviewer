@@ -12,6 +12,7 @@
     "format:check": "prettier --check . ../fakes",
     "setup-code": "node --conditions=react-server --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/setup/setup-code-cli.ts",
     "migrate": "node --conditions=react-server --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/db/migrate-cli.ts",
+    "lanes:convert": "node --conditions=react-server --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/lane-conversion/cli.ts",
     "typecheck": "next typegen && tsc --noEmit --pretty false",
     "test": "vitest run --project unit",
     "test:watch": "vitest --project unit",

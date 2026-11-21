@@ -6,11 +6,12 @@
 // stages the shipped skill again (stored by the next Save, never before). The size limit is in UTF-8
 // bytes, so the counter counts bytes, not characters. The text is rendered as the value of a textarea:
 // a skill is untrusted data and never becomes markup.
-import { useId, useRef } from "react";
+import { useContext, useId, useRef } from "react";
 import { Badge } from "../../components/ui/badge.tsx";
 import { Button } from "../../components/button.tsx";
 import { FieldDescription, FieldLabel } from "../../components/ui/field.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
+import { FieldsDisabledContext } from "./settings-fields.tsx";
 import type { ProjectDynamicView } from "../service.ts";
 import {
   skillByteLength,
@@ -39,6 +40,8 @@ export function SkillEditor({
   onChange: (text: string) => void;
   onReset: () => void;
 }) {
+  // Read only (or busy): the card is disabled, and neither button starts or drops an override.
+  const disabled = useContext(FieldsDisabledContext);
   const id = useId();
   const area = useRef<HTMLTextAreaElement>(null);
   const metaId = `${id}-meta`;
@@ -65,7 +68,9 @@ export function SkillEditor({
               variant="ghost"
               size="sm"
               className={buttonClass}
+              disabled={disabled}
               onClick={() => {
+                if (disabled) return;
                 onReset();
                 area.current?.focus();
               }}
@@ -77,7 +82,9 @@ export function SkillEditor({
               variant="secondary"
               size="sm"
               className={buttonClass}
+              disabled={disabled}
               onClick={() => {
+                if (disabled) return;
                 onEdit();
                 area.current?.focus();
               }}
@@ -91,7 +98,7 @@ export function SkillEditor({
         id={id}
         ref={area}
         rows={14}
-        readOnly={!custom}
+        readOnly={!custom || disabled}
         spellCheck={false}
         value={values.skillText}
         aria-invalid={error !== undefined}

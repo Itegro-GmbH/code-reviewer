@@ -17,6 +17,7 @@ import { jobKindOf, type JobKind } from "../../job-kind/job-kind.ts";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
 import type { ExpressionBuilder } from "kysely";
+import { hostedRunnerAtConcurrency } from "./jobs-claim.ts";
 
 export type DispatchRow = {
   jobId: string;
@@ -304,6 +305,9 @@ export function createJobDispatchesRepository(
         ])
         .where("jobs.status", "=", "queued")
         .where(notARunnerTurn)
+        // A job whose hosted runner is at its concurrency is not a candidate: it would fill the batch for every workspace behind it
+        // (#1105, review of part 2). It is one again as soon as a place is free.
+        .where(sql<boolean>`not ${hostedRunnerAtConcurrency("jobs.id")}`)
         .where("jobs.run_after", "<=", timestamp)
         .where("job_dispatches.state", "=", "pending")
         .where("job_dispatches.attempts", ">", 0)
@@ -404,6 +408,7 @@ export function createJobDispatchesRepository(
         ])
         .where("jobs.status", "=", "queued")
         .where(notARunnerTurn)
+        .where(sql<boolean>`not ${hostedRunnerAtConcurrency("jobs.id")}`)
         .where("jobs.run_after", "<=", timestamp)
         .where(
           "jobs.updated_at",

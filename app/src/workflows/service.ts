@@ -7,7 +7,9 @@
 import type { McpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import type { McpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import type { NamedRunnersRepository } from "../db/repositories/named-runners-repository.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type { ProjectsRepository } from "../db/repositories/projects-repository.ts";
 import type {
   StoredWorkflow,
@@ -15,9 +17,13 @@ import type {
   WorkflowsRepository,
 } from "../db/repositories/workflows-repository.ts";
 import {
+  BUILT_IN_ROLES,
+  BUILT_IN_RUNNER_VCPUS,
   builtInLaneDocument,
   LANE_COPY_FAILED,
+  type BuiltInAgentSettings,
   type BuiltInLaneKey,
+  type BuiltInRole,
   type LaneStatuses,
 } from "./built-in-lanes.ts";
 import {
@@ -26,17 +32,21 @@ import {
   type WorkflowRequestIssue,
 } from "./errors.ts";
 import type { OnlineRunner } from "../runner-identity/announced.ts";
-import type { Issue } from "./issues.ts";
+import { issue, type Issue } from "./issues.ts";
 import {
   ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
   BUDGET_OPERATOR_MAX_USD,
+  CHANGE_DESCRIPTION_MAX_LENGTH,
   DOCUMENT_MAX_BYTES,
+  STEPS_MAX,
   VERSIONS_PER_WORKFLOW_MAX,
   WORKFLOW_ID_MAX_LENGTH,
   WORKFLOWS_PER_PROJECT_MAX,
 } from "./limits.ts";
 import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
-import { isRecord } from "./json.ts";
+import { isRevoked } from "../named-runners/types.ts";
+import { inlineModelsIn, runnerIdsIn } from "./agent-settings.ts";
+import { isRecord, textLength } from "./json.ts";
 import { mcpServersNamedBy } from "./mcp.ts";
 import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
 import {
@@ -49,6 +59,7 @@ import {
 import {
   createResolver,
   type McpServerInfo,
+  type RunnerInfo,
   type WorkflowResolver,
 } from "./resolver.ts";
 import { validateWorkflow, type ValidationResult } from "./validate.ts";
@@ -83,7 +94,17 @@ export type BuiltInLaneResult =
       errors: readonly Issue[];
     };
 
-export type WorkflowVersionInfo = { version: number; savedAt: string };
+export type WorkflowVersionInfo = {
+  version: number;
+  savedAt: string;
+  /** Who saved it: the id of the user. */
+  savedBy: string;
+  /**
+   * What it changed against the version before (#1107). Null for version 1, whose text is the lane's description, and for a version
+   * saved before change descriptions existed.
+   */
+  changeDescription: string | null;
+};
 
 export type WorkflowView = WorkflowSummaryView & {
   /** The version the `document` is: the current one unless an older was asked for. */
@@ -113,9 +134,10 @@ export type WorkflowService = {
     body: unknown,
   ): Promise<WorkflowView>;
   /**
-   * Copies built-in lanes into a project (#922), each as a lane like any other: validated against the workspace's profiles and
-   * environments (the first environment by name is the one the agent steps run in), then saved as version 1. A lane that does not pass
-   * (a profile or an environment is missing) or whose name the project has is reported and the others are still copied.
+   * Copies built-in lanes into a project (#922), each as a lane like any other: its agent steps carry their settings inline (#1105, ADR 0007),
+   * taken from the profiles `implementer@1` and `reviewer@1` of the workspace, on the workspace's hosted runner of 4 vCPU; validated, then saved
+   * as version 1. A lane that does not pass (a profile or the runner is missing) or whose name the project has is reported and the others
+   * are still copied.
    */
   copyBuiltIn(
     user: { id: string },
@@ -125,7 +147,11 @@ export type WorkflowService = {
     /** The provider of the project's ticket source (#1040): the lanes word their pull request for it. Left out: `github`. */
     provider?: string,
   ): Promise<BuiltInLaneResult[]>;
-  /** Saves `body` as the next version. `expectedVersion`: only if that is still the current one. */
+  /**
+   * Saves `body` as the next version. `expectedVersion`: only if that is still the current one. `body` is the document plus a root key
+   * `changeDescription` (#1107): 1 to 1,000 characters saying what this version changes against the one before, not only white space;
+   * without it the save is `WORKFLOW_CHANGE_DESCRIPTION_REQUIRED`. It is stored with the version, not in the document.
+   */
   update(
     user: { id: string },
     id: string,
@@ -146,7 +172,10 @@ export type WorkflowServiceDependencies = {
   projects: Pick<ProjectsRepository, "getById" | "list">;
   environments: ImplementerEnvironmentsRepository;
   /** The profiles of the workspace (#843): the names and versions a step may run, and what a version is (may it push, its default result). */
-  profiles: Pick<ProfilesRepository, "list" | "versionFacts" | "archivedNames">;
+  profiles: Pick<
+    ProfilesRepository,
+    "list" | "versionFacts" | "archivedNames" | "findByName"
+  >;
   /**
    * #1052: the MCP servers of the workspace, so a lane can name only those and the validator can say which are broken. Left out: the
    * workspace has none, and a lane that names a server is refused (it fails closed).
@@ -159,6 +188,16 @@ export type WorkflowServiceDependencies = {
    * announces (`no_runner_announces`). Left out: the validator does not ask.
    */
   onlineRunners?: () => Promise<readonly OnlineRunner[]>;
+  /**
+   * #1105 (ADR 0007): the concrete runners of the workspace, so a step can name only one of them (`runner_unknown`) and the rules of a
+   * runner are judged at the one it names. Left out: the workspace's runners are not known, and a step that names one is refused.
+   */
+  runners?: Pick<NamedRunnersRepository, "list" | "find">;
+  /**
+   * #1105: the rule of the Implementer form for a model, as the claim applies it, so the model of a step with settings of its own is held to
+   * what a profile's model is held to when it is saved (`model_not_allowed`). Left out: such a model is not checked against the workspace.
+   */
+  models?: { check(choice: ModelChoice): Promise<string | null> };
   /** The most a workflow may be given to spend. Until the operator can set it: `BUDGET_OPERATOR_MAX_USD`. */
   maxBudgetUsd?: number;
   /** The most archived workflows a workspace may hold: `ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX`. */
@@ -201,6 +240,103 @@ async function mcpServerInfos(
   }));
 }
 
+/** The most distinct runner ids of a document that are looked up one by one (a revoked runner is no part of the list). */
+const RUNNER_LOOKUPS_MAX = STEPS_MAX + 1;
+
+/**
+ * The runners of the workspace as the validator sees them: the list (hosted runners, then the self-hosted ones that are not revoked), and
+ * a revoked runner the document names (found by its id, so the answer is "revoked" and not "unknown").
+ */
+async function runnerInfos(
+  runners: Pick<NamedRunnersRepository, "list" | "find">,
+  document: unknown,
+): Promise<RunnerInfo[]> {
+  const listed = await runners.list();
+  const known = new Set(listed.map((runner) => runner.id));
+  const infos: RunnerInfo[] = listed.map((runner) => ({
+    id: runner.id,
+    name: runner.name,
+    kind: runner.kind,
+  }));
+  for (const id of runnerIdsIn(document, RUNNER_LOOKUPS_MAX)) {
+    if (known.has(id)) continue;
+    const found = await runners.find(id);
+    if (found !== undefined && isRevoked(found))
+      infos.push({
+        id: found.id,
+        name: found.name,
+        kind: found.kind,
+        revoked: true,
+      });
+  }
+  return infos;
+}
+
+type AgentSettingsOutcome =
+  { ok: true; settings: BuiltInAgentSettings } | { ok: false; issue: Issue };
+
+/** The profile each built-in role copies its settings from, at the version the built-in lanes have always named. */
+const BUILT_IN_PROFILES: Record<BuiltInRole, string> = {
+  implementer: "implementer",
+  reviewer: "reviewer",
+};
+
+/**
+ * The settings of a built-in agent (#1105, ADR 0007): what the profile `implementer@1` or `reviewer@1` of the workspace holds (the harness,
+ * the model, the push right, the instructions) and the id of the workspace's hosted runner of 4 vCPU. The profile and the runner are
+ * what the built-in lanes needed before, so a workspace that could copy them can still; a missing one is the validator's own answer.
+ *
+ * RELEASE B FOLLOW-UP (ADR 0007): the profile pages and routes go away in release B, and then `implementer@1` / `reviewer@1` can no longer be
+ * made, so this copy can never succeed for a workspace that lacks them (`profile_unknown` at `/steps`). Release B must first give the built-in
+ * lanes another source of settings (instance-level defaults, or settings stored with the built-in lane). Until then this is the source.
+ *
+ * A built-in lane goes through `createLane`, so it also meets the model rule of a save (`model_not_allowed`): a profile's model that the
+ * workspace cannot run any more refuses the copy of the lane, which the profile form did not (its rule ran when the profile was saved).
+ * Project creation reports it per lane exactly like `profile_unknown`: `{ key, ok: false, code: "WORKFLOW_INVALID" }`, and the others
+ * are still copied.
+ */
+async function builtInSettings(
+  role: BuiltInRole,
+  profiles: Pick<ProfilesRepository, "findByName">,
+  runners: Pick<NamedRunnersRepository, "list"> | undefined,
+): Promise<AgentSettingsOutcome> {
+  const name = BUILT_IN_PROFILES[role];
+  const found = await profiles.findByName(name, 1);
+  if (found === undefined)
+    return {
+      ok: false,
+      issue: issue(
+        "/steps",
+        "profile_unknown",
+        `The built-in lanes take the settings of their agents from the profile '${name}@1' of the workspace, and there is none (an archived profile does not count). Create it, or write the lane yourself.`,
+      ),
+    };
+  const hosted = (await runners?.list())?.find(
+    (runner) =>
+      runner.kind === "hosted" && runner.vcpus === BUILT_IN_RUNNER_VCPUS,
+  );
+  if (hosted === undefined)
+    return {
+      ok: false,
+      issue: issue(
+        "/steps",
+        "runner_unknown",
+        `The built-in lanes run on the hosted runner of ${String(BUILT_IN_RUNNER_VCPUS)} vCPU, and the workspace has none.`,
+      ),
+    };
+  const { content } = found.version;
+  return {
+    ok: true,
+    settings: {
+      harness: content.harness ?? "opencode",
+      model: content.model,
+      canPush: content.canPush,
+      instructions: content.instructions,
+      runner: hosted.id,
+    },
+  };
+}
+
 export function createWorkflowService({
   workflows,
   projects,
@@ -209,6 +345,8 @@ export function createWorkflowService({
   mcpServers,
   mcpOAuth,
   onlineRunners,
+  runners,
+  models,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
   archivedMax = ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
   samples,
@@ -224,7 +362,20 @@ export function createWorkflowService({
     }));
     const { wanted, build } = profileInfosOf(live, profileRefsIn(body));
     const facts = await profiles.versionFacts(wanted);
+    // #1105: the models the steps name themselves, each asked once in this one pass (the checker behind `models` is built once per
+    // service). More than `STEPS_MAX` distinct models means more steps than a document may have: the validator refuses it for that, so
+    // nothing is looked up and nothing is accepted that should not be.
+    const verdicts = new Map<string, string | null>();
+    if (models !== undefined) {
+      const named = inlineModelsIn(body, STEPS_MAX + 1);
+      if (named.length <= STEPS_MAX)
+        for (const model of named)
+          verdicts.set(JSON.stringify(model), await models.check(model));
+    }
     return createResolver({
+      ...(models === undefined
+        ? {}
+        : { modelCheck: (model) => verdicts.get(JSON.stringify(model)) }),
       environments: known,
       profiles: build(facts),
       archivedProfiles: await profiles.archivedNames(),
@@ -236,6 +387,9 @@ export function createWorkflowService({
       ...(onlineRunners === undefined
         ? {}
         : { onlineRunners: await onlineRunners() }),
+      ...(runners === undefined
+        ? {}
+        : { runners: await runnerInfos(runners, body) }),
     });
   }
 
@@ -343,6 +497,8 @@ export function createWorkflowService({
       versions: versions.map((v) => ({
         version: v.version,
         savedAt: v.createdAt,
+        savedBy: v.createdBy,
+        changeDescription: v.changeDescription,
       })),
     };
   }
@@ -397,6 +553,54 @@ export function createWorkflowService({
         );
       },
     };
+  }
+
+  /**
+   * A lane is created with a description of its own (#1107): it is what version 1 says. The schema leaves it optional (a lane saved
+   * before has none), so the rule is the save's, not the validator's.
+   */
+  function requireDescription(body: unknown): void {
+    const description = isRecord(body) ? body.description : undefined;
+    if (typeof description === "string" && description.trim() !== "") return;
+    throw new WorkflowError(
+      "WORKFLOW_INVALID",
+      "The workflow does not pass the validator.",
+      {
+        errors: [
+          issue(
+            "/description",
+            "missing_field",
+            "A new lane needs a 'description': what the lane does, in a sentence or two. It is what version 1 says.",
+          ),
+        ],
+        truncated: false,
+      },
+    );
+  }
+
+  const changeDescriptionRequired = (): WorkflowError =>
+    new WorkflowError(
+      "WORKFLOW_CHANGE_DESCRIPTION_REQUIRED",
+      `A new version needs 'changeDescription' next to the document: 1 to ${CHANGE_DESCRIPTION_MAX_LENGTH} characters saying what changed against the version before, not only white space.`,
+    );
+
+  /** Takes the root key `changeDescription` off the body of a save (#1107): the document is what the validator and the engine read. */
+  function splitChangeDescription(body: unknown): {
+    document: unknown;
+    changeDescription: string;
+  } {
+    if (!isRecord(body)) throw changeDescriptionRequired();
+    const { changeDescription, ...document } = body;
+    const text =
+      typeof changeDescription === "string" ? changeDescription.trim() : "";
+    // Postgres refuses NUL in a text column; refusing it here keeps the answer a 422 instead of a failed insert.
+    if (
+      text === "" ||
+      text.includes("\u0000") ||
+      textLength(text) > CHANGE_DESCRIPTION_MAX_LENGTH
+    )
+      throw changeDescriptionRequired();
+    return { document, changeDescription: text };
   }
 
   const notFound = (): WorkflowError =>
@@ -454,6 +658,7 @@ export function createWorkflowService({
         "The project is switched off and takes no new lane.",
       );
     const { name, text, mcpServerIds, refusedWithout } = await acceptable(body);
+    requireDescription(body);
     const created = await workflows.create(
       {
         name,
@@ -530,17 +735,56 @@ export function createWorkflowService({
     create: createLane,
 
     async copyBuiltIn(user, projectId, keys, statuses, provider) {
-      const [first] = [...(await environments.listSummaries())].sort((a, b) =>
-        a.name.localeCompare(b.name),
-      );
-      const environment = first?.name ?? "node";
+      const roles = new Map<BuiltInRole, Promise<AgentSettingsOutcome>>();
+      const agentOf = (role: BuiltInRole): Promise<AgentSettingsOutcome> => {
+        let found = roles.get(role);
+        if (found === undefined) {
+          found = builtInSettings(role, profiles, runners);
+          roles.set(role, found);
+        }
+        return found;
+      };
       const results: BuiltInLaneResult[] = [];
       for (const key of keys) {
         try {
+          const needed = await Promise.all(
+            BUILT_IN_ROLES[key].map(
+              async (role) => [role, await agentOf(role)] as const,
+            ),
+          );
+          const failed = needed.flatMap(([, outcome]) =>
+            outcome.ok ? [] : [outcome.issue],
+          );
+          if (failed.length > 0) {
+            results.push({
+              key,
+              ok: false,
+              code: "WORKFLOW_INVALID",
+              errors: failed,
+            });
+            continue;
+          }
+          const settings = Object.fromEntries(
+            needed.map(([role, outcome]) => [
+              role,
+              outcome.ok ? outcome.settings : undefined,
+            ]),
+          ) as Partial<Record<BuiltInRole, BuiltInAgentSettings>>;
+          // A lane without an agent of one role (the review lane has no implementer) is not given that role's settings.
+          const fallback = (settings.implementer ??
+            settings.reviewer) as BuiltInAgentSettings;
           const view = await createLane(
             user,
             projectId,
-            builtInLaneDocument(key, environment, statuses, provider),
+            builtInLaneDocument(
+              key,
+              {
+                implementer: settings.implementer ?? fallback,
+                reviewer: settings.reviewer ?? fallback,
+              },
+              statuses,
+              provider,
+            ),
           );
           results.push({
             key,
@@ -606,13 +850,15 @@ export function createWorkflowService({
 
     async update(user, id, body, expectedVersion) {
       checkId(id);
+      const { document, changeDescription } = splitChangeDescription(body);
       const { name, text, mcpServerIds, refusedWithout } =
-        await acceptable(body);
+        await acceptable(document);
       const saved = await workflows.saveVersion(
         id,
         {
           name,
           document: text,
+          changeDescription,
           createdBy: user.id,
           mcpServerIds,
           ...(expectedVersion === undefined ? {} : { expectedVersion }),

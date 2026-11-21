@@ -15,6 +15,7 @@
 import type { Kysely } from "kysely";
 import { lockWorkspaceCreation } from "../db/workspace-creation-lock.ts";
 import { createInstanceSettingsRepository } from "../db/repositories/instance-settings-repository.ts";
+import { ensureHostedRunners } from "../db/repositories/named-runners-repository.ts";
 import { createWorkspacesRepository } from "../db/repositories/workspaces-repository.ts";
 import type { Database } from "../db/schema.ts";
 
@@ -65,6 +66,7 @@ export async function changeTenancy(
           createdBy: actorId,
         });
         await workspaces.addMember(workspace.id, actorId, "owner");
+        await ensureHostedRunners(trx, workspace.id, { now });
       }
     }
 

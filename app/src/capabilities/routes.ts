@@ -281,7 +281,6 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/todos", class: "implementer" },
-  { route: "/w/[workspace]/profiles", class: "implementer" },
   {
     route: "/w/[workspace]/projects/[repositoryId]/lanes",
     class: "implementer",
@@ -322,21 +321,17 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/w/[workspace]/jira/choose", class: "implementer" },
-  // The page of the form (#756).
-  { route: "/w/[workspace]/implementer", class: "implementer" },
-  // The environments of the Implementer, a size and a setup script (#818): the routes and their page, in the navigation between
-  // Implementer and Runs.
+  // The environments of the Implementer, a size and a setup script (#818): the routes stay until release B (ADR 0007); their page is gone (#1105).
   { route: "/api/w/[workspace]/environments", class: "implementer" },
   {
     route: "/api/w/[workspace]/environments/[environmentId]",
     class: "implementer",
   },
-  { route: "/w/[workspace]/environments", class: "implementer" },
   // The agent workflows, written through the API (#833, milestone 1): the list and the save, the check without storing, one
-  // workflow with its versions. The lane builder and the pages below edit, show and start them.
+  // workflow with its versions. The pages below show and start them; lanes are written through the API only (#1107).
   { route: "/api/w/[workspace]/workflows", class: "implementer" },
   { route: "/api/w/[workspace]/workflows/validate", class: "implementer" },
-  // The values a step can reach, for the picker of the lane builder (#927).
+  // The values a step can reach (#927); the lane builder that used it is gone (#1107), the route stays for the API.
   { route: "/api/w/[workspace]/workflows/scope", class: "implementer" },
   {
     route: "/api/w/[workspace]/workflows/[workflowId]",

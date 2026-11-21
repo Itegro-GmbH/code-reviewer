@@ -407,7 +407,7 @@ Worker's input carries `implementer.profile {name, version, instructions?, canPu
 **only to a caller that names the claim feature `implementer_profile`**: for any other the job ends `implementer_engine_unavailable` (free) before any
 credential exists, since a Worker that did not read it would push the work of a profile that may not push, and would run the agent without the
 instructions the person chose. A turn without a profile carries nothing and is the turn of before. What the runner does with it:
-[`docs/profiles.md`](../../../docs/profiles.md#the-push-right). A profile that may not push also gets a token that can only read the
+[`docs/workflows.md`](../../../docs/workflows.md#settings-in-the-step-1105). A profile that may not push also gets a token that can only read the
 contents (`implementerAccess(..., { readOnly: true })`, `contents: read`), so the Worker could not push even with a bug; the token is kept in the same
 ledger and ends with the turn like the write token.
 

@@ -68,8 +68,21 @@ import {
   type CapOutcome,
 } from "../../billing/claim-caps.ts";
 import { headNoticeKey } from "../refusal-notice-key.ts";
-import { claimOldestDueJob } from "./jobs-claim.ts";
-import type { HarnessAccess } from "../../runner-identity/access.ts";
+import {
+  claimOldestDueJob,
+  hostedRunnerAtConcurrency,
+  hostedRunnerFreedSince,
+} from "./jobs-claim.ts";
+import { RUNNER_LABEL_PREFIX } from "../../runner-identity/labels.ts";
+import {
+  accessRule,
+  announcesHarness,
+  customerAccess,
+  type HarnessAccess,
+} from "../../runner-identity/access.ts";
+import { manifestFromText } from "../../runner-identity/announcement.ts";
+import { minimumBaseVersion } from "../../runner-identity/config.ts";
+import { meetsMinimum } from "../../runner-identity/versions.ts";
 import { toJob } from "./jobs-repository.ts";
 import { createUsageRecordsRepository } from "./usage-records-repository.ts";
 import { agentResultOf, turnResultOf } from "../implementer-turn-result.ts";
@@ -88,7 +101,10 @@ import {
   type SettlementTrust,
   type UnknownCostSettlement,
 } from "../../usage/usage-records.ts";
-import { CLAUDE_CODE_HARNESS } from "../../runner-identity/harness.ts";
+import {
+  CLAUDE_CODE_HARNESS,
+  OPENCODE_HARNESS,
+} from "../../runner-identity/harness.ts";
 import { customerRunnerId } from "../../runner-identity/tokens.ts";
 
 /**
@@ -170,6 +186,11 @@ export type RunnerJobsRepositoryOptions = {
   /** #320: the per-job credential of a claim made with `workerCredential`; tests only. */
   newCredential?: () => string;
   limits?: Partial<JobQueueLimits>;
+  /**
+   * The oldest base version a customer's runner may have and still get jobs (`RUNNER_MIN_BASE_VERSION`; null: no minimum). Defaults to the
+   * setting of the running server. A turn waiting for a runner below it is not kept waiting for that runner (#1105).
+   */
+  minBaseVersion?: string | null;
   /**
    * #277: called for every job a claim refused for the entitlements of its workspace (suspended, a limit used
    * up, entitlements that cannot be read), after the transaction of the claim committed. The job is `failed`
@@ -372,11 +393,13 @@ export type ClaimOptions = {
   acceptsMultiRepo?: boolean;
   /**
    * #854: the claim is a customer's runner's. It takes only the jobs of `workspaceId` whose required labels are all in `labels` (#971: the
-   * labels of a customer's runner never include the reserved namespace `cr:`), and never a job of another kind. Without it the claim is
+   * labels of a customer's runner never include the reserved namespace `cr:`, except the label of its own id, `cr:runner:<runnerId>`,
+   * ADR 0007 decision 10), and never a job of another kind. Without it the claim is
    * the platform identity's: its labels are the reserved ones, so it takes the hosted jobs and never a turn of a runner environment. #856: and whose
    * turn is one an entry of `access` (the entries of the runner's manifest) can run (#973).
    */
   customerRunner?: {
+    runnerId: string;
     workspaceId: string;
     labels: readonly string[];
     access: readonly HarnessAccess[];
@@ -449,6 +472,10 @@ export function createRunnerJobsRepository(
   const newToken = options.newToken ?? newLeaseToken;
   const newCredential = options.newCredential ?? newWorkerCredential;
   const limits = { ...DEFAULT_JOB_QUEUE_LIMITS, ...options.limits };
+  const minBaseVersion =
+    options.minBaseVersion === undefined
+      ? minimumBaseVersion(process.env)
+      : options.minBaseVersion;
   /**
    * Whether a running job was claimed longer ago than its hard limit allows (#752): a turn of the Implementer has its own,
    * longer one (`implementerMaxRuntimeMs`), every other kind keeps `maxRuntimeMs`. A turn that carries a time limit of its own
@@ -763,6 +790,74 @@ export function createRunnerJobsRepository(
     return Number(result.numUpdatedRows);
   }
 
+  /**
+   * The runners that can take a turn at all, with the entries of their manifests a turn may use (`customerAccess`): a named runner that is not
+   * revoked, was heard from after `seenAfter`, is not below the minimum base version (it would get 426 at every claim), and announces OpenCode
+   * (the claim answers 204 to one that does not). A jsonb object `{ "<runner id>": [entries] }` for `waitsOnServingRunner`. Only the runners of
+   * a workspace that has a queued turn of a runner environment are read.
+   */
+  async function servingRunnerEntries(
+    executor: Kysely<Database>,
+    seenAfter: string,
+  ) {
+    const rows = await executor
+      .selectFrom("runners")
+      .select(["id", "base_version", "manifest"])
+      .where("revoked_at", "is", null)
+      .where("last_seen_at", ">", seenAfter)
+      .where((eb) =>
+        eb.exists(
+          eb
+            .selectFrom("jobs as queued")
+            .select("queued.id")
+            .whereRef("queued.workspace_id", "=", "runners.workspace_id")
+            .where("queued.status", "=", "queued")
+            .where("queued.review_kind", "=", "implementer")
+            .where(
+              sql<boolean>`${RUNNER_LABEL_PREFIX} || runners.id = any(string_to_array(queued.required_labels, E'\n'))`,
+            ),
+        ),
+      )
+      .execute();
+    const entries: Record<string, HarnessAccess[]> = {};
+    for (const row of rows) {
+      if (
+        minBaseVersion !== null &&
+        !meetsMinimum(row.base_version, minBaseVersion)
+      )
+        continue;
+      const harnesses = manifestFromText(row.manifest).harnesses;
+      if (!announcesHarness(harnesses, OPENCODE_HARNESS)) continue;
+      entries[row.id] = customerAccess(harnesses);
+    }
+    return sql`${JSON.stringify(entries)}::jsonb`;
+  }
+
+  /**
+   * #1105 (ADR 0007, decision 13): the job requires `cr:runner:<id>` (a step that names a self-hosted runner) and that runner **serves**: it is in
+   * `servable` (heard from after the deadline, not revoked, new enough, announces OpenCode: `servingRunnerEntries`) and an entry of its
+   * manifest can run this turn (the harness, auth and model it asks for, `accessRule`). A job waiting for such a runner keeps waiting, however
+   * long it is busy; only the lane's own limits or a cancel end it. A runner that is revoked, not heard from for the whole deadline, or that
+   * could never take this turn (manifest, version) is as good as offline, and its job goes the old way (`no_runner_available`). "Serves" is
+   * a statement about the runner and the turn, not only "heard from".
+   */
+  function waitsOnServingRunner(
+    seenAfter: string,
+    servable: ReturnType<typeof sql>,
+  ) {
+    return sql<boolean>`exists (
+      select 1 from runners as named
+       where named.workspace_id = jobs.workspace_id
+         and named.revoked_at is null
+         and named.last_seen_at > ${seenAfter}
+         and (${RUNNER_LABEL_PREFIX} || named.id) = any(string_to_array(jobs.required_labels, E'\n'))
+         and exists (
+           select 1 from implementer_turns as demanded
+            where demanded.job_id = jobs.id
+              and ${accessRule(sql`coalesce(${servable} -> named.id, '[]'::jsonb)`, "demanded")})
+    )`;
+  }
+
   /** #854: the job is not the turn of a runner environment. */
   function notARunnerTurn(eb: ExpressionBuilder<Database, "jobs">) {
     return eb.not(isARunnerTurn(eb));
@@ -819,6 +914,10 @@ export function createRunnerJobsRepository(
       .where("created_at", "<=", waitedBefore)
       .where("run_after", "<=", waitedBefore)
       .where(isARunnerTurn)
+      // #1105 (ADR 0007, decision 13): a turn of a step that names a self-hosted runner waits while that runner is reachable, busy or not.
+      .where(
+        sql<boolean>`not ${waitsOnServingRunner(waitedBefore, await servingRunnerEntries(executor, waitedBefore))}`,
+      )
       .executeTakeFirst();
     const cancelled = Number(result.numUpdatedRows);
     if (cancelled > 0) await idleSessionsOfEndedTurns(executor, timestamp);
@@ -1045,6 +1144,11 @@ export function createRunnerJobsRepository(
         eb("updated_at", "<=", waitedBefore),
         // A turn of a runner environment is not dispatched to a VM: it waits for a runner and ends as `no_runner_available`.
         notARunnerTurn(eb),
+        // #1105 (ADR 0007, decision 13): a hosted job that waits only because its hosted runner is at its concurrency keeps waiting.
+        sql<boolean>`not ${hostedRunnerAtConcurrency("jobs.id")}`,
+        // ... and for the give-up time after a place of its hosted runner was freed, so a job that waited hours is not failed between
+        // the end of the job that freed the place and its own claim (#1105, review of part 2, finding 4).
+        sql<boolean>`not ${hostedRunnerFreedSince("jobs.id", waitedBefore)}`,
         eb.not(
           eb.exists(
             eb

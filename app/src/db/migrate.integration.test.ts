@@ -170,6 +170,8 @@ describe("the migrations of both epics", () => {
       "20261118120000_workflow_runs_workspace_list_indexes",
       "20261118140000_workflow_step_runs_turn_index",
       "20261118160000_add_implementer_session_repos",
+      "20261120200000_add_workflow_version_change_description",
+      "20261121100000_add_hosted_runners",
     ]);
   });
 

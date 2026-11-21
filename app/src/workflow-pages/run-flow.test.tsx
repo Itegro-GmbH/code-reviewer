@@ -19,8 +19,8 @@ import type { RunsApi } from "../runs/ui/api.ts";
 import type { McpCallsSnapshot } from "../runs/mcp-calls-view.ts";
 import type { RunView, StepView } from "../workflow-runs/service.ts";
 import type { WorkflowRunsApi } from "./api.ts";
-import { setAt } from "./builder/document.ts";
-import { shippedLane } from "./builder/test-fixtures.ts";
+import { setAt } from "./flow/document.ts";
+import { shippedLane } from "./flow/test-fixtures.ts";
 import { WorkflowRunDetail } from "./run-detail.tsx";
 import { JOB_ID, run, step } from "./test-fixtures.ts";
 

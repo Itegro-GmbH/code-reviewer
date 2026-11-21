@@ -39,7 +39,7 @@ import {
   WORKFLOW_RUN_POLL_MS,
   type WorkflowRunsApi,
 } from "./api.ts";
-import { normalise, type Doc } from "./builder/document.ts";
+import { normalise, type Doc } from "./flow/document.ts";
 import {
   costBasisCopy,
   COST_COPY,
@@ -193,7 +193,7 @@ function Step({
             : ""}
           {step.profile === null
             ? ""
-            : `, ${PAGE_COPY.profile.toLowerCase()} ${step.profile.name} version ${String(step.profile.version)}`}
+            : `, ${PAGE_COPY.profileRecorded} ${step.profile.name} version ${String(step.profile.version)}`}
         </span>
       </div>
       <p className="text-xs text-muted-foreground">
@@ -400,6 +400,7 @@ function RunFlowView({
   repository,
   api,
   runsApi,
+  runnerNames,
 }: {
   doc: Doc;
   run: RunView;
@@ -409,6 +410,7 @@ function RunFlowView({
   repository: string | undefined;
   api: WorkflowRunsApi;
   runsApi: RunsApi;
+  runnerNames: Readonly<Record<string, string>>;
 }) {
   const headingId = useId();
   const narrow = useIsNarrow();
@@ -474,6 +476,7 @@ function RunFlowView({
         repository={repository}
         api={api}
         runsApi={runsApi}
+        runnerNames={runnerNames}
         headingId={headingId}
         inSheet={narrow}
       />
@@ -576,12 +579,15 @@ function FlatSteps({
   );
 }
 
+const NO_RUNNER_NAMES: Readonly<Record<string, string>> = {};
+
 export function WorkflowRunDetail({
   workspaceSlug,
   workflowId,
   initial,
   laneName,
   document,
+  runnerNames,
   api: apiProp,
   runsApi: runsApiProp,
 }: {
@@ -593,6 +599,8 @@ export function WorkflowRunDetail({
   laneName?: string;
   /** The lane document of the version the run uses: what the flow draws. Left out or unusable, the steps are listed. */
   document?: unknown;
+  /** The names of the workspace's runners by id, for the steps that name one. Left out: the id is shown. */
+  runnerNames?: Readonly<Record<string, string>>;
   /** Only tests pass this: a server component cannot hand functions to the client component. */
   api?: WorkflowRunsApi;
   /** Only tests pass this, for the same reason: the MCP calls of an agent step's job. */
@@ -735,6 +743,7 @@ export function WorkflowRunDetail({
           repository={repository}
           api={api}
           runsApi={runsApi}
+          runnerNames={runnerNames ?? NO_RUNNER_NAMES}
         />
       )}
     </div>

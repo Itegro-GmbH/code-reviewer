@@ -16,6 +16,7 @@ import {
   repositoryIdOf,
   seedWaitingRun,
   signInAsFactoryAdmin,
+  TASK_LANE_DOCUMENT,
 } from "../helpers/factory";
 import {
   addGithubInstallation,
@@ -32,6 +33,7 @@ test.describe.configure({ mode: "serial" });
 test.describe("the pages of the factory", () => {
   let repositoryId = "";
   let laneId = "";
+  let projectId = "";
   let waitingRunId = "";
   // The address of the run the lane made on the first issue.
   let startedRunPath = "";
@@ -77,6 +79,7 @@ test.describe("the pages of the factory", () => {
     const { project: made } = (await project.json()) as {
       project: { id: string };
     };
+    projectId = made.id;
     const lane = await request.post(
       `/api/w/default/workflows?projectId=${made.id}`,
       { data: LANE_DOCUMENT },
@@ -232,41 +235,48 @@ test.describe("the pages of the factory", () => {
     await expect(page.getByText("Done · 1")).toBeVisible();
   });
 
-  // #951
-  test("@smoke the lane builder saves a version with one value from the picker", async ({
+  // #951, #1107
+  test("@smoke the lane page is read only and lists the versions with their change descriptions", async ({
     page,
   }) => {
     await openProject(page, "lanes");
+    // A new version through the API: it needs a change description, and the page shows it (#1107).
+    const refused = await page.request.put(
+      `/api/w/default/workflows/${laneId}`,
+      {
+        data: { ...LANE_DOCUMENT, description: "Writes a note on the issue." },
+      },
+    );
+    expect(refused.status()).toBe(422);
+    expect(((await refused.json()) as { error: string }).error).toBe(
+      "WORKFLOW_CHANGE_DESCRIPTION_REQUIRED",
+    );
+    const saved = await page.request.put(`/api/w/default/workflows/${laneId}`, {
+      data: {
+        ...LANE_DOCUMENT,
+        description: "Writes a note on the issue.",
+        changeDescription: "Shortened the description.",
+      },
+    });
+    expect(saved.status()).toBe(200);
     await page
       .getByRole("table", { name: "Lanes" })
       .getByRole("link", { name: LANE_DOCUMENT.name })
       .click();
-    // The only step of the lane is open in the inspector.
-    await expect(page.getByRole("region", { name: "Inspector" })).toBeVisible();
-    await page
-      .getByRole("button", { name: "Insert a value into body" })
-      .click();
-    const picker = page.getByRole("dialog", { name: "Values for body" });
-    await picker
-      .getByRole("option")
-      .and(page.locator('[data-reference="trigger.ticket.title"]'))
-      .click();
-    await page.getByRole("button", { name: "Save as v2" }).click();
-    await expect(page.getByText("Saved.")).toBeVisible();
 
-    // The version is the one the route holds now: the picker's value is in the saved text.
-    const saved = await page.request.get(`/api/w/default/workflows/${laneId}`);
-    expect(saved.status()).toBe(200);
-    const { workflow } = (await saved.json()) as {
-      workflow: {
-        version: number;
-        document: { steps: Array<{ body?: string }> };
-      };
-    };
-    expect(workflow.version).toBe(2);
-    expect(workflow.document.steps[0]?.body).toContain(
-      "{{trigger.ticket.title}}",
+    await expect(
+      page.getByRole("heading", { name: LANE_DOCUMENT.name }),
+    ).toBeVisible();
+    await expect(page.getByText("Writes a note on the issue.")).toBeVisible();
+    const versions = page.getByRole("list", { name: "Versions" });
+    await expect(versions.getByRole("listitem")).toHaveCount(2);
+    await expect(versions).toContainText("Shortened the description.");
+    await expect(versions).toContainText(LANE_DOCUMENT.description);
+    // Nothing to edit: no inspector, no save, no JSON.
+    await expect(page.getByRole("region", { name: "Inspector" })).toHaveCount(
+      0,
     );
+    await expect(page.getByRole("button", { name: /Save as/ })).toHaveCount(0);
   });
 
   // #951
@@ -291,8 +301,42 @@ test.describe("the pages of the factory", () => {
     ).toBeVisible();
   });
 
-  // #951
-  test("@smoke Profiles, Runners, MCP and Settings open from the sidebar", async ({
+  // #1105: a task started by hand is a run of the one-off lane; the pages of the hand-started task, profiles and environments are gone.
+  test("@smoke a lane whose only input is a text starts from its page on the project's repository, and the old pages are gone", async ({
+    page,
+  }) => {
+    await openProject(page, "lanes");
+    // The Lanes tab no longer sends a person to a page of its own for a task.
+    await expect(page.getByRole("link", { name: "send a task" })).toHaveCount(
+      0,
+    );
+    await expect(page.locator('a[href$="/implementer"]')).toHaveCount(0);
+
+    const made = await page.request.post(
+      `/api/w/default/workflows?projectId=${projectId}`,
+      { data: TASK_LANE_DOCUMENT },
+    );
+    expect(made.status(), await made.text()).toBe(201);
+    const taskLaneId = ((await made.json()) as { workflow: { id: string } })
+      .workflow.id;
+    await page.goto(`/w/default/workflows/${taskLaneId}`);
+    const task = page.getByLabel("task");
+    await expect(task).toBeVisible();
+    expect(await task.evaluate((element) => element.tagName)).toBe("TEXTAREA");
+    await task.fill("Rename the helper");
+    await page.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/w/default/workflows/${taskLaneId}/runs/[^/]+$`),
+    );
+
+    for (const gone of ["implementer", "profiles", "environments"]) {
+      const response = await page.goto(`/w/default/${gone}`);
+      expect(response?.status(), gone).toBe(404);
+    }
+  });
+
+  // #951, #1108
+  test("@smoke the sidebar is the control panel, Setup and Settings, and the Setup places open", async ({
     page,
   }) => {
     await signInAsFactoryAdmin(page);
@@ -302,35 +346,84 @@ test.describe("the pages of the factory", () => {
       /^ToDos/,
       "Projects",
       "Runs",
-      "Profiles",
+      "GitHub and Jira",
+      "MCP servers",
       "Runners",
-      "MCP",
+      "LLM keys",
       "Settings",
     ]);
+    // Nothing to configure by hand: no Profiles, no Environments.
+    await expect(nav.getByRole("link", { name: "Profiles" })).toHaveCount(0);
+    await expect(nav.getByRole("link", { name: "Environments" })).toHaveCount(
+      0,
+    );
 
-    await nav.getByRole("link", { name: "Profiles" }).click();
+    // The pages of Setup have the title of their sidebar link and none of the tabs of the settings (#1108).
+    const settingsTabs = page.getByRole("navigation", {
+      name: "Settings sections",
+    });
+    await nav.getByRole("link", { name: "GitHub and Jira" }).click();
     await expect(
-      page.getByRole("heading", { level: 1, name: "Profiles" }),
+      page.getByRole("heading", { level: 1, name: "GitHub and Jira" }),
     ).toBeVisible();
+    await expect(
+      nav.getByRole("link", { name: "GitHub and Jira" }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(
+      nav.getByRole("link", { name: "Settings" }),
+    ).not.toHaveAttribute("aria-current", "page");
+    await expect(settingsTabs).toHaveCount(0);
     await nav.getByRole("link", { name: "Runners" }).click();
     await expect(
       page.getByRole("heading", { level: 1, name: "Runners" }),
     ).toBeVisible();
     // #1050: the MCP servers of the workspace.
-    await nav.getByRole("link", { name: "MCP" }).click();
+    await nav.getByRole("link", { name: "MCP servers" }).click();
     await expect(
-      page.getByRole("heading", { level: 1, name: "MCP" }),
+      page.getByRole("heading", { level: 1, name: "MCP servers" }),
     ).toBeVisible();
     await expect(page.getByText("No MCP server yet")).toBeVisible();
+    await nav.getByRole("link", { name: "LLM keys" }).click();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "LLM keys" }),
+    ).toBeVisible();
+    await expect(nav.getByRole("link", { name: "LLM keys" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await expect(settingsTabs).toHaveCount(0);
+    // The groups of the sidebar are named for assistive technology.
+    await expect(
+      nav.getByRole("group", { name: "Setup" }).getByRole("link"),
+    ).toHaveCount(4);
+
+    // Settings is the workspace itself: General (with its pages) and Members, and no Integrations tab any more.
     await nav.getByRole("link", { name: "Settings" }).click();
-    const sections = page.getByRole("navigation", {
-      name: "Settings sections",
-    });
-    for (const name of ["Integrations", "Members"]) {
-      await sections.getByRole("link", { name, exact: true }).click();
-      await expect(
-        sections.getByRole("link", { name, exact: true }),
-      ).toHaveAttribute("aria-current", "page");
-    }
+    await expect(
+      page.getByRole("heading", { level: 1, name: "General" }),
+    ).toBeVisible();
+    await expect(settingsTabs.getByRole("link")).toHaveText([
+      "General",
+      "Members",
+    ]);
+    await settingsTabs
+      .getByRole("link", { name: "Members", exact: true })
+      .click();
+    await expect(
+      settingsTabs.getByRole("link", { name: "Members", exact: true }),
+    ).toHaveAttribute("aria-current", "page");
+    await settingsTabs
+      .getByRole("link", { name: "General", exact: true })
+      .click();
+    // Review defaults is a page of General and read only: an AI sets it through the API, so there is nothing to save.
+    await page
+      .getByRole("navigation", { name: "General pages" })
+      .getByRole("link", { name: "Review defaults", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Review defaults" }),
+    ).toBeVisible();
+    await expect(page.getByText(/set through the API/)).toBeVisible();
+    await expect(page.getByRole("button", { name: /Save/ })).toHaveCount(0);
   });
 });

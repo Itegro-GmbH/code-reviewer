@@ -58,7 +58,7 @@ export function boardsFor(
 }
 
 /**
- * The status names of the board of a project (#1036), for the lane builder's status trigger: the options of the Status field of the board the
+ * The status names of the board of a project (#1036), for a lane's status trigger: the options of the Status field of the board the
  * project chose. Empty when the project has no board, or GitHub cannot be asked: the page still loads and the names are typed. Never throws.
  */
 export function boardStatusNamesFor(

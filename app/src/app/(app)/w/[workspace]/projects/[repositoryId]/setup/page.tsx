@@ -8,6 +8,7 @@ import { requireImplementerCapability } from "@/implementer/shared";
 import { jiraSetupFor } from "@/jira/source-setup";
 import { projectServiceFor } from "@/projects/shared";
 import { SETUP_COPY } from "@/projects/ui/cockpit-messages";
+import { BOARD_COPY } from "@/projects/ui/setup-messages";
 import { loadProjectRow } from "@/projects/ui/list-view";
 import { projectPath } from "@/projects/ui/project-cards";
 import { ProjectToggle } from "@/projects/ui/project-toggle";
@@ -137,7 +138,9 @@ async function SetupContent({
               projectId={project.id}
               repositoryId={row.repositoryId}
               board={project.ticketSource.board?.projectV2Id ?? null}
-              canChange={canManage}
+              // The board is a setting of the project and an AI sets it through the API (ADR 0007, decision 8, #1108): shown, not picked.
+              canChange={false}
+              readOnlyNote={BOARD_COPY.managed}
               showResync={canChangeSettings && row.switchedOn}
               switchedOn={row.switchedOn}
               staleness={syncStaleness(sync, new Date())}

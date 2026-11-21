@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // GET and POST /api/w/:workspace/workflows (#833): the workflows of the workspace, and saving a new one (the body is the workflow
-// document; it is validated first and refused with the full list of errors when it does not pass). Every member may do both
-// (`start_implementer_task`, the right to use the factory). Only in a deployment with the capability `implementer`. The logic is in
+// document; it is validated first and refused with the full list of errors when it does not pass). Every member may list
+// (`start_implementer_task`, the right to use the factory); saving is for Owners and Admins (`manage_workflows`, ADR 0007 decision 12). Only in a deployment with the capability `implementer`. The logic is in
 // src/workflows/.
 import { connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
@@ -34,7 +34,7 @@ export async function POST(
   await connection();
   requireImplementerCapability();
   const { workspace } = await context.params;
-  return withWorkspace(workspace, "start_implementer_task", (access) =>
+  return withWorkspace(workspace, "manage_workflows", (access) =>
     createWorkflowRouteHandlers({
       requireUser: () => Promise.resolve(access.user),
       service: workflowServiceFor(access.workspace.id),

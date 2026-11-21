@@ -12,7 +12,7 @@ import { isRecord } from "../workflows/json.ts";
 import { canonicalTriggerKind, TRIGGER_KINDS } from "../workflows/triggers.ts";
 import type { TriggerKind } from "../workflows/triggers.ts";
 import type { RunView, StepView } from "../workflow-runs/service.ts";
-import { nodesOf, normalise, type NodeKind } from "./builder/document.ts";
+import { nodesOf, normalise, type NodeKind } from "./flow/document.ts";
 import { controlResultOf } from "./view.ts";
 
 /** Where a node stands: it ran, it runs, it waits for an answer, it failed, it was passed over, or the run did not get there. */

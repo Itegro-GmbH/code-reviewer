@@ -76,6 +76,22 @@ export const SEMANTIC_ISSUE_CODES = [
   "repo_duplicate",
   /** #1092: the mount names of two repositories of `repos` (`app` or `<owner>__<name>`) are equal without regard to case. */
   "repo_name_clash",
+  /** #1105: a step names a profile and also has settings of its own (`harness`, `model`, `canPush`, `instructions`, `setupScript`, `network`). */
+  "profile_with_inline_settings",
+  /** #1105: a step names no profile and has no settings of its own. */
+  "agent_settings_required",
+  /** #1105: the workspace cannot run the model of a step's own settings (the rule of the Implementer form, as for a profile). */
+  "model_not_allowed",
+  /** #1105: a host of the `network` rule of a step is no host name the rule can hold (an address, a port, a scheme; only the validator knows). */
+  "network_host_invalid",
+  /** #1105: `setupScript` or `network` in a step whose environment or runner is a self-hosted one (ADR 0007, decision 11). */
+  "hosted_only_setting",
+  /** #1105: a step with settings of its own names neither a `runner` nor an `environment`. `available` lists the ids of the runners. */
+  "runner_required",
+  /** #1105: a step names a `runner` and an `environment`; a step runs in one place (`environment` is for steps written before the runner). */
+  "runner_with_environment",
+  /** #1105: no runner with that id in this workspace, or it was revoked (ADR 0007, decision 14: a revoked runner registered again has a new id). `available` lists the ids. */
+  "runner_unknown",
   /** The profile does not exist (`available` names those that do). */
   "profile_unknown",
   /** The profile was archived (`available` names those that can be run). */
@@ -106,7 +122,7 @@ export const SEMANTIC_ISSUE_CODES = [
   "mcp_server_broken",
   /** The result of the step names a field the platform fills in itself. */
   "result_field_reserved",
-  /** The run has no repository: a manual trigger must declare the input `repo` (a required text). */
+  /** The input of a manual or api trigger declares a `ticket` or a `repo` that cannot name the run's repository (not required, or not a text). */
   "repo_required",
   /** An input that decides a target (an issue, a branch, a label, the environment) holds a value that is not a literal or one reference to the trigger or to the branch of an agent step. */
   "target_from_untrusted_value",

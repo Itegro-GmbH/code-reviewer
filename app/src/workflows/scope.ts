@@ -43,8 +43,23 @@ export type Binding = {
   open?: boolean;
   /** Of an action: the connector it names, so a reference to its output can tell what produced the value (#917). */
   connector?: string;
-  /** Of an agent step: the profile name and the environment (lower case) it is written with, for the steps that continue its session. */
-  agent?: { profile?: string; environment?: string };
+  /**
+   * Of an agent step: the profile name and the environment (lower case) it is written with, for the steps that continue its session. A
+   * step with settings of its own (#1105) has no profile; `settings` is what it runs with, canonical, so a step that continues its session
+   * can be held to repeat them.
+   */
+  agent?: {
+    profile?: string;
+    environment?: string;
+    /** #1105: the id of the runner a step with settings of its own names (ADR 0007); a session goes on only on the runner it started on. */
+    runner?: string;
+    settings?: {
+      harness: string;
+      model: string;
+      canPush: string;
+      instructions: string;
+    };
+  };
   /** Of an agent step (#1092): it works on several repositories (its own `repos`, or those of the session it continues), so it yields the fact `repos`. */
   repos?: true;
   /**

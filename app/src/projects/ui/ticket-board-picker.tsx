@@ -34,6 +34,7 @@ export function TicketBoardPicker({
   board,
   canChange,
   resync = "offered",
+  readOnlyNote,
   onSaved,
   api: apiProp,
 }: {
@@ -46,6 +47,8 @@ export function TicketBoardPicker({
   canChange: boolean;
   /** Whether a Resync button is next to the picker; default: it is. */
   resync?: ResyncOffer;
+  /** What the read only picker says instead of the sentence about roles (the factory: an AI sets the board, #1108). */
+  readOnlyNote?: string;
   /** Called after a board was saved or removed: the tickets still carry the old board's statuses. */
   onSaved?: () => void;
   /** Only tests pass this. */
@@ -115,7 +118,7 @@ export function TicketBoardPicker({
     return (
       <p className="text-sm text-muted-foreground">
         {board === null ? BOARD_COPY.noneSet : BOARD_COPY.readOnlySet}{" "}
-        {BOARD_COPY.readOnly}
+        {readOnlyNote ?? BOARD_COPY.readOnly}
       </p>
     );
 

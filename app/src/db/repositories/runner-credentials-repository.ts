@@ -14,6 +14,7 @@ import {
   labelsToText,
   type Announcement,
 } from "../../runner-identity/announcement.ts";
+import { lockRunnerNames, nameTaken } from "./named-runners-repository.ts";
 import { runnerFrom, type StoredRunner } from "./runners-repository.ts";
 
 /** #972: a key the app made for the delivery of one runner: the secret is shown once, the database keeps only `sealed`. */
@@ -50,7 +51,15 @@ export type NewRunner = Announcement & {
 };
 
 export type RedeemOutcome =
-  { ok: true; runner: StoredRunner } | { ok: false; reason: "invalid_token" };
+  | { ok: true; runner: StoredRunner }
+  | {
+      ok: false;
+      /**
+       * `name_taken` (#1105, ADR 0007): a runner that is not revoked, or a hosted runner ("Vercel Sandbox 4 vCPU"), has the name in the
+       * workspace, without regard to case. Nothing was written: the token is not used and can register the runner again with another name.
+       */
+      reason: "invalid_token" | "name_taken";
+    };
 
 export type RunnerCredentialsRepository = {
   /** Uses the token (once) and makes the runner of its workspace. */
@@ -91,6 +100,20 @@ export function createRunnerCredentialsRepository(
       return db.transaction().execute(async (trx): Promise<RedeemOutcome> => {
         const timestamp = formatTimestamp(now());
         const id = runner.id ?? newId();
+        // #1105: the name is unique among the runners that are not revoked and the hosted runners of the workspace. The workspace is the
+        // token's, so the lock waits on the token first; a token that is no good is the same refusal as before and takes no lock.
+        const pending = await trx
+          .selectFrom("runner_registration_tokens")
+          .select("workspace_id")
+          .where("token_hash", "=", tokenHash)
+          .where("used_at", "is", null)
+          .where("expires_at", ">", timestamp)
+          .executeTakeFirst();
+        if (pending === undefined)
+          return { ok: false, reason: "invalid_token" };
+        await lockRunnerNames(trx, pending.workspace_id);
+        if (await nameTaken(trx, pending.workspace_id, runner.name))
+          return { ok: false, reason: "name_taken" };
         const used = await trx
           .updateTable("runner_registration_tokens")
           .set({ used_at: timestamp, runner_id: id })

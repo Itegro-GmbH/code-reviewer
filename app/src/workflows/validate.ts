@@ -175,8 +175,10 @@ const CRON = /^[^\s]+( [^\s]+){4}$/;
 const CRON_MAX_LENGTH = 100;
 
 /**
- * A run works on one repository. A label trigger brings it (the ticket's); a manual or api one gets it from its input: a required
- * `ticket` (the run works in the repository of the ticket) or, as before #916, a required text `repo` (owner/name).
+ * A run works on one repository. A label trigger brings it (the ticket's); a manual or api one that declares `input` gets it from it: a
+ * required `ticket` (the run works in the repository of the ticket) or, as before #916, a required text `repo` (owner/name). A manual or
+ * api trigger without `input` (#1106), or with an input that declares neither (the one-off lane's text, ADR 0007 decision 15), works on
+ * the repository of the project of its lane: a `ticket` or a `repo` that is declared is held to its rules, nothing else is asked.
  */
 function checkRepositoryInput(
   schema: ResultSchema,
@@ -194,18 +196,21 @@ function checkRepositoryInput(
       );
     return;
   }
-  const repo = Object.hasOwn(schema.properties, "repo")
-    ? schema.properties.repo
-    : undefined;
-  if (repo === undefined)
+  // `ticket` is reserved: the run splits it off the input and reads it as the ticket the run is about, so a text field of that name would break.
+  if (Object.hasOwn(schema.properties, TICKET_INPUT)) {
     report(
       issue(
-        where,
+        pointer(where, "properties", TICKET_INPUT),
         "repo_required",
-        "A run works on one repository. Declare the input 'ticket' (type ticket, in required): the run works in the repository of the ticket. Or declare the input 'repo' (a text, owner/name) in properties and in required: the caller names the repository.",
+        `The input '${TICKET_INPUT}' is reserved for the ticket the run is about: type it \`ticket\` or rename it.`,
       ),
     );
-  else if (repo.type !== "string")
+    return;
+  }
+  // Neither a ticket nor a `repo`: the run works on the repository of the lane's project, on its default branch.
+  if (!Object.hasOwn(schema.properties, "repo")) return;
+  const repo = schema.properties.repo;
+  if (repo?.type !== "string")
     report(
       issue(
         pointer(where, "properties", "repo"),
@@ -420,16 +425,8 @@ function checkTrigger(
   }
   if (trigger === "manual" || trigger === "api") {
     const where = pointer(path, "input");
-    if (value.input === undefined) {
-      report(
-        issue(
-          path,
-          "repo_required",
-          `A ${trigger} trigger needs 'input', a result schema for what the caller hands in. It must declare 'ticket' (type ticket, required: the run works in the repository of the ticket) or 'repo' (a required text, owner/name): the repository the run works on.`,
-        ),
-      );
-      return checked;
-    }
+    // #1106: without `input` the trigger takes no fields and its run works on the repository of the lane's project.
+    if (value.input === undefined) return checked;
     const result = validateResultSchema(value.input, where, {
       allowTicket: true,
     });

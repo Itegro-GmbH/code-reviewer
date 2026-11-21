@@ -35,7 +35,8 @@ describe("docs/profiles.md", () => {
   it("holds example profiles that pass the validator", () => {
     const blocks = jsonBlocks(docs);
 
-    expect(blocks).toHaveLength(2);
+    // The page is a redirect since #1105: one example of the old form is left.
+    expect(blocks).toHaveLength(1);
     for (const block of blocks) {
       const result = validateProfile(block);
       expect(result.errors).toEqual([]);

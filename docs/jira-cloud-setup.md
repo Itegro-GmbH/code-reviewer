@@ -3,7 +3,7 @@
 The factory connects a workspace to **Jira Cloud** with one **OAuth 2.0 (3LO) app of its own** at Atlassian (epic #1034,
 issue #1037). The owner of the deployment registers that app once per environment in the Atlassian developer console and
 puts its client id and secret into the deployment's settings. After that, an Owner or Admin of a workspace presses
-**Connect Jira** under **Settings, Integrations**, signs in at Atlassian, and the factory keeps the access for that site.
+**Connect Jira** under **Setup, GitHub and Jira**, signs in at Atlassian, and the factory keeps the access for that site.
 There is no API-token way: the connection is always the person's consent at Atlassian.
 
 Plan for about ten minutes. What you need:

@@ -272,13 +272,17 @@ describe("the two kinds of environment", () => {
   });
 
   // #919
-  it("says that a profile picks its runner, with its Runs on field", async () => {
+  it("says that an agent step names its runner and links no environments page", async () => {
     show(fakeApi().api, false);
     await screen.findByText("Hosted sandbox");
 
     expect(
-      screen.getByText(/A profile says on which of them it runs/),
+      screen.getByText(/An agent step of a lane names the runner it runs on/),
     ).toBeTruthy();
+    expect(
+      screen.getByText(/The size of a hosted sandbox is its type/),
+    ).toBeTruthy();
+    expect(document.querySelector('a[href$="/environments"]')).toBeNull();
     expect(screen.queryByText(/#919/)).toBeNull();
   });
 });

@@ -8,10 +8,18 @@ import { describe, expect, it, vi } from "vitest";
 import type { ReactElement } from "react";
 
 const state = vi.hoisted(() => ({
+  factory: false,
   managed: false,
   statusAll: vi.fn(),
 }));
 
+vi.mock("@/capabilities/shared", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/capabilities/shared")>()),
+  getCapabilities: () => ({
+    has: (capability: string) =>
+      capability === "implementer" ? state.factory : true,
+  }),
+}));
 vi.mock("@/workspaces/access-runtime", () => ({
   requireWorkspace: async () => ({
     workspace: { id: "workspace-1", slug: "acme" },
@@ -37,6 +45,7 @@ vi.mock("@/review-settings/ui/global-settings-page", () => ({
   GlobalSettingsPageContent: () => null,
 }));
 
+import { FACTORY_READ_ONLY_NOTE } from "@/review-settings/ui/read-only-note";
 import ReviewDefaultsSettingsPage from "./page.tsx";
 
 const OWN_OPENROUTER_KEY = [
@@ -78,5 +87,30 @@ describe("the Review defaults page", () => {
     state.statusAll.mockResolvedValue(OWN_OPENROUTER_KEY);
 
     expect((await renderedProps()).keyedProviders).toEqual(["openrouter"]);
+  });
+
+  // #1108: the factory shows the defaults and an AI sets them through the API, even for the Owner who could save them elsewhere
+  it("is read only in the factory, with the note, whatever the role", async () => {
+    state.factory = true;
+    state.managed = false;
+    state.statusAll.mockResolvedValue([]);
+
+    const props = await renderedProps();
+
+    expect(props.canEdit).toBe(false);
+    expect(props.readOnlyNote).toBe(FACTORY_READ_ONLY_NOTE);
+    state.factory = false;
+  });
+
+  // #1108: the guard of code-review.com
+  it("stays editable for an Owner without the capability implementer, with no note", async () => {
+    state.factory = false;
+    state.managed = false;
+    state.statusAll.mockResolvedValue([]);
+
+    const props = await renderedProps();
+
+    expect(props.canEdit).toBe(true);
+    expect(props).not.toHaveProperty("readOnlyNote");
   });
 });

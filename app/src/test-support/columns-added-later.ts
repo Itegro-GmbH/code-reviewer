@@ -49,7 +49,14 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   // #854: the kind (`hosted`) and the labels (none) of every environment that exists.
-  implementer_environments: ["network_mode", "network_hosts", "kind", "labels"],
+  // #1105: how many turns a hosted runner may run at the same time; null for every environment of a person (only the rows the platform made have one).
+  implementer_environments: [
+    "network_mode",
+    "network_hosts",
+    "kind",
+    "labels",
+    "concurrency",
+  ],
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
   job_vm_runs: ["vcpus"],
   // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
@@ -70,6 +77,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   // (the migration places the lanes that exist, but not at the time an older migration's test seeds them); null for every row that exists.
   projects: ["ticket_source"],
   workflows: ["project_id"],
+  // #1107: what a version changed against the one before; null for every version that exists.
+  workflow_versions: ["change_description"],
   // #924: who a review of a pull request is asked from, and who acted on it while the request stood; null for every row that exists.
   tracker_items: ["review_requested_from", "review_acted_by"],
   // #920: the question a step ended with and the comment that carries it; null for every step that exists.
@@ -89,6 +98,18 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "delivery_key_id",
     "delivery_secret",
   ],
+};
+
+/**
+ * Rows a migration after the one under test made itself, which are no change to a row that exists: the hosted runners (#1105) that the
+ * migration of ADR 0007 makes for every workspace, recognised by what only they have, a `concurrency` and no maker.
+ */
+const ROWS_ADDED_LATER: Record<
+  string,
+  (row: Record<string, unknown>) => boolean
+> = {
+  implementer_environments: (row) =>
+    row.concurrency != null && row.created_by === null,
 };
 
 /** What a column added later holds on an existing row when it is not null: a constant default. */
@@ -115,8 +136,13 @@ export function withoutColumnsAddedLater(
   rows: readonly unknown[],
 ): unknown[] {
   const added = COLUMNS_ADDED_LATER[table] ?? [];
-  if (added.length === 0) return [...rows];
-  return rows.map((row) => {
+  const madeLater = ROWS_ADDED_LATER[table];
+  const kept =
+    madeLater === undefined
+      ? rows
+      : rows.filter((row) => !madeLater(row as Record<string, unknown>));
+  if (added.length === 0) return [...kept];
+  return kept.map((row) => {
     const copy = { ...(row as Record<string, unknown>) };
     for (const column of added) {
       const expected = DEFAULTS_OF_COLUMNS[table]?.[column] ?? null;

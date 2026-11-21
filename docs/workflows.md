@@ -2,26 +2,26 @@
 
 A **workflow** is a JSON document that says what the factory does when something happens: a trigger, and a list of steps that
 run in order. A GitHub issue gets a label, an agent implements it, another reviews, the first fixes what the review found, and a pull
-request is opened. Workflows are written by an AI through the API or edited in the [lane builder](#the-lane-builder), checked by a strict validator, and saved per
-workspace with versions.
+request is opened. Workflows are written by an AI through the API (there is no editor in the web app, ADR 0007), checked by a strict validator, and saved per
+workspace with versions. Every version from the second on says in words what it changed ([the change description](#versions-and-the-change-description)); the [lane page](#the-lane-page) shows the lane and that history, and nothing to edit.
 
-**Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
+**Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they referred to (superseded, ADR 0007: the settings are written in the step), the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
 workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger)), and one with a `ticket.statusChanged` trigger (#1036) starts when a ticket is moved into its status on the project's board ([The status trigger](#the-status-trigger));
-either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926) reads and edits a workflow and saves versions.
+either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane page](#the-lane-page) (#1107) shows a workflow, its versions and their change descriptions.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
-a deployment with the capability `implementer` (the factory); the routes below, the [lane builder](#the-lane-builder) and, for the runs, [pages](#the-run-page). Every member of a workspace may
-use them (the permission `start_implementer_task`).
+a deployment with the capability `implementer` (the factory); the routes below, the [lane page](#the-lane-page) and, for the runs, [pages](#the-run-page). Every member of a workspace may
+read, validate, start and watch them (the permission `start_implementer_task`); **saving a lane** (create, a new version, archive) is for Owners and Admins (`manage_workflows`, ADR 0007 decision 12, #1105).
 
 The format is described by two JSON Schemas, [`contracts/workflow.v1.json`](../contracts/workflow.v1.json) and
 [`contracts/result-schema.v1.json`](../contracts/result-schema.v1.json). The validator
 ([`app/src/workflows/`](../app/src/workflows/README.md)) checks everything the schemas say and what they cannot: that every reference points
-at a step that ran before on every path, the types of the values that flow, the limits, and that the [profiles](profiles.md) and environments of the workspace exist.
+at a step that ran before on every path, the types of the values that flow, the limits, and that the runners, models and MCP servers a step names exist (and, for a step still in the old form, the [profiles](profiles.md) and environments).
 
 ## How an AI should use it: validate, fix, save
 
 1. Write the document.
-2. `POST /api/w/<slug>/workflows/validate` with the document as the body. The answer is `200` with `{"valid": false, "errors": [...]}` or
+2. `POST /api/w/<slug>/workflows/validate` with the document as the body (the document alone: `changeDescription` belongs only to the `PUT` of a new version, and `validate` refuses it as `unknown_field`). The answer is `200` with `{"valid": false, "errors": [...]}` or
    `{"valid": true, "errors": [], "truncated": false, "budgetUsd": 20, "turnTimeLimitMinutes": 60, "steps": 6}`. Nothing is stored.
 3. Read **every** error. Each has a `path` (a JSON pointer into your document), a `code` (stable: branch on it), a `message` (the cause in a
    sentence) and, where a name was wrong, `available`: the names that exist at that point (steps in reach, fields of a step, profiles,
@@ -33,6 +33,7 @@ at a step that ran before on every path, the types of the values that flow, the 
    name that is refused nothing is checked: fix the name, validate again.
 4. When it is valid, `POST /api/w/<slug>/workflows?projectId=<project id>` saves it as version 1 in that project (a lane belongs to exactly one project, see [Lanes belong to a project](#lanes-belong-to-a-project)), or `PUT /api/w/<slug>/workflows/<id>` saves the next version.
    Saving runs the same validator and refuses an invalid document with the same list (`422`, `WORKFLOW_INVALID`).
+   A new lane needs a `description` (what the lane does; it is what version 1 says). A **new version needs a `changeDescription`** next to the document: one to 1,000 characters on what changed against the version before, written for the people who read the lane page ([Versions and the change description](#versions-and-the-change-description)).
 
 An answer you will see while fixing:
 
@@ -105,7 +106,7 @@ may only read what **every** trigger yields.
 | --- | --- | --- |
 | `ticket.labeled` | `label` (needed, not only spaces): the label that starts the workflow | `trigger.ticket` (below), and, as workflows written before #916 read them, `trigger.issue.number` (an integer), `.title`, `.body`, `.url`, `.labels` and `trigger.repo.fullName`, `.owner`, `.name`, `.defaultBranch`. `github.issueLabeled` is the old name of this kind and is accepted wherever it was |
 | `ticket.statusChanged` | `to` (needed, 1 to 100 characters, not only spaces, none at either end: a name with spaces around it would never match, so it is refused with `invalid_value`): the status a ticket must be moved into; `from` (optional, same rules): only a move out of that status starts it. The names are the provider's own: for GitHub the options of the Status field of the project's board, spelled as the board spells them (case counts); for a Jira project the names of its workflow statuses, spelled as Jira spells them. **A lane must not move a ticket into its own `to`** ([The status trigger](#the-status-trigger)) | `trigger.ticket` (as for `ticket.labeled`; for a Jira project `key` is `PROJ-12`, `number` is 0, and `status` is the status name) and `trigger.status.from`, `trigger.status.to` (texts; `from` is empty when the item had no status). It has no `trigger.issue` or `trigger.repo`: the old fields are for lanes written before #916 |
-| `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`ticket`** (type `ticket`, required: the run works in the repository of the ticket) or **`repo`**, a required text (`owner/name`) (`repo_required`) | `trigger.input.<field>` (without `ticket`), and `trigger.ticket` when the input requires one |
+| `manual` | `input` (optional): a [result schema](#result-schemas) that declares what the caller hands in. **Without `input`** (#1106) the trigger takes no fields: its run works on the repository of the lane's project and that repository's default branch. **With `input`** it may declare **`ticket`** (type `ticket`, required: the run works in the repository of the ticket) or **`repo`**, a required text (`owner/name`) (`repo_required` when one of them is declared and cannot name the repository). An input that declares **neither** (#1105, the one-off lane's text) works, like a trigger without `input`, on the repository of the lane's project and its default branch | `trigger.input.<field>` (without `ticket`; none without `input`), and `trigger.ticket` when the input requires one |
 | `api` | the same as `manual` | the same. It is started through the API only; the start form of the web app offers `manual` triggers |
 | `pullRequest.pushed` | none | reserved: the format validates it, the engine starts no run from it yet |
 | `schedule` | `cron` (needed): five fields separated by one space | reserved, like `pullRequest.pushed` |
@@ -160,7 +161,7 @@ Other triggers (Jira) come later. Who may set the label is decided by GitHub, no
 
 ### One repository per run, and targets
 
-**A run works on one repository** in version 1: the one of the ticket (`trigger.ticket.repo` of a label trigger and of a trigger with a `ticket` input), or the input `repo` of a manual one. No agent step and
+**A run works on one repository** in version 1: the one of the ticket (`trigger.ticket.repo` of a label trigger and of a trigger with a `ticket` input), or the input `repo` of a manual one. A manual or api trigger **without `input`** (#1106), or **with an input that declares neither `ticket` nor `repo`** (#1105, the one-off lane's `task`), has neither: its run works on the repository of the project of the lane, on that repository's default branch (a lane without a project cannot be started that way: `422 WORKFLOW_RUN_PROJECT_REQUIRED`, nor one whose project is switched off: `409 WORKFLOW_RUN_PROJECT_INACTIVE`). No agent step and
 no action names a repository (a `repo` field is `unknown_field`); they all work on the run's. **The one exception is the `repos` of an agent step**
 (#1090, [ADR 0006](decisions/0006-multi-repo-agent-steps.md)): a step that names its repositories works on those, whatever the run's is, and the pull request step
 opens a pull request in each ([Several repositories in one step](#several-repositories-in-one-step)).
@@ -198,13 +199,43 @@ again when it runs**.
 
 ### The agent step (`"kind": "agent"`)
 
-A run of an agent step gets a **profile**, and the profile says who works **and where** (#919): its harness, model, rights and its environment. The step names no environment.
+> **Superseded in part (ADR 0007, epic #1103; #1105, release A, step 1).** An agent step now has **two forms**: the settings **written in the step** (below,
+> "Settings in the step") and the old one that names a **profile**. The profile form keeps working exactly as before and is removed in release B after
+> every lane has been rewritten into the new form; the step names one **concrete runner** by its id (`runner`, below: a hosted runner of one sandbox type,
+> which has a fixed size and states only its concurrency, or a self-hosted runner), see [ADR 0007](decisions/0007-ai-configured-factory.md), "Migration path".
+> `environment` stays accepted in release A for documents written before the runner. Done in release A (#1105): the inline settings, the runners, the conversion job (`pnpm lanes:convert`), the built-in lanes in the new form, and the removal of the Profiles, Environments and Implementer pages. Left for release B: the profile and environment routes and tables, the validator's refusal of `profile` and `environment`, and the source of the built-in lanes' settings (#1118).
+
+A step gets its settings from **one of two places**: a **profile** (the old form: the profile says who works **and where**, #919: its harness, model, rights and its environment) or the step itself (the new form).
+**Exactly one**: both is `profile_with_inline_settings`, neither is `agent_settings_required`. The document stays version 1: the new keys are optional properties of the schema, and
+the validator, not the schema, requires one of the two.
+
+### Settings in the step (#1105)
+
+Instead of `profile` the step carries what a profile held. The server stays the only guard: the validator holds these settings to the same rules a profile gets when it is saved, against what the workspace allows.
 
 | Field | Needed | What |
 | --- | --- | --- |
+| `model` | yes | The model, in the shape of a profile's model: `{"entryId": "<id>"}` (a released catalog entry, on the platform's key) or `{"provider": "<slug>", "model": "<id>"}` (a model of the workspace's own key, or `{"provider": "claude-code", "model": "<name>"}` with the harness `claude-code`). `GET /api/w/<slug>/implementer/models` lists what the workspace can run; a model it cannot is `model_not_allowed` (with the harness `claude-code` nothing is asked: its login is the runner's). |
+| `canPush` | yes | `true` or `false`: decide it. Whether the step may push branches, which decides whether it yields `branch`, `commits`, `headCommit` and `pushed` (`false`: none of them, and `reference_fact_unavailable` for a reference to one) and whether its token can write. |
+| `harness` | no | `opencode` (the default) or `claude-code`, which exists only on a runner (`harness_needs_runner` in an environment that is not a runner's) and takes the model above. |
+| `instructions` | no | The standing system-level text of the agent, 1 to 20,000 characters, appended last and unchanged, so the prompt cache hits across the turns of one step. **Not** `instruction`, which is the task of this round. |
+| `setupScript` | no | The script a hosted runner runs once before the agent starts (at most 64 KB of UTF-8, kept as written). Moved here from the hosted environment (ADR 0007, decision 11). Only for a step on a **hosted** runner (or in a hosted environment): on a self-hosted runner it is `hosted_only_setting` (that machine's setup is its owner's). |
+| `network` | no | The rule for the agent's network, as the hosted environment held it: `{"mode": "off" \| "list" \| "open", "hosts": [...]}`, where `hosts` (exact names or `*.suffix`, one to 100) belong to `list` only. `off` is the default. Only for a step on a hosted runner (`hosted_only_setting` on a self-hosted one). |
+| `runner` | one of `runner` and `environment` | The **id** of the concrete runner the step runs on: a **hosted runner** (one sandbox type of the platform, "Vercel Sandbox 2 vCPU", "… 4 vCPU", "… 6 vCPU" or "… 8 vCPU": its size is the type's and is not configured, it states only how many turns it may run at the same time) or a **self-hosted runner** of the workspace (a machine the customer registered). A literal: where an agent works is a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). **The id, not the name** (decision 14: a rename changes the name and no id, so no lane): a name is `runner_unknown`, the message says which id to write. An id of no runner of the workspace, or of a **revoked** runner, is `runner_unknown` and `available` lists the ids there are, hosted runners first; the message pairs each id with its name. A runner that was revoked and registered again has a **new id**: the old id is `runner_unknown` at the next save and, for a version that is already saved, the step ends `runner_not_found` when it starts. `GET /api/w/<slug>/runners` lists the self-hosted runners; the hosted ones are in `available`. |
+| `environment` | one of `runner` and `environment` | **Release A only**, for documents written before the runner: the name of an environment of the workspace, a literal (see below). A step names a `runner` **or** an `environment`, never both (`runner_with_environment`) and never neither (`runner_required`). The environment gives a hosted step its **size**; its own setup script and network rule are **not read** for such a step: the step's `setupScript` and `network` apply, and none given is none (`off`). A runner environment (labels) works as before. |
+
+A step in this form has the same rules as one with a profile for the rest, **judged at the runner the step names**: a managed model on a self-hosted runner is `runner_needs_own_key` (a self-hosted runner works with the workspace's own key); `harness: "claude-code"` on a hosted runner is `harness_needs_runner` (that harness exists only on a self-hosted runner); a self-hosted runner that is online and announces nothing that fits (the harness, the auth and the model of the step, over **its own** announcement) is the warning `no_runner_announces`. A step that **continues a session** (`session.continue`) of a step in this form
+**repeats the same `harness`, `model`, `canPush`, `instructions` and runner** (a session keeps the settings of its last turn, and a `canPush` that differed would be the write token of a step that never asked for it):
+a difference is `session_target_invalid`, the message names the setting. A step that names another `runner` than the one it continues is `session_target_invalid` too (the session's files live on that machine). The cost limit is not a setting of the step yet (the budget of the lane caps each turn).
+
+**How many turns run at once, and what waiting costs.** A runner runs a bounded number of turns at the same time: a hosted runner its stored `concurrency`, a self-hosted one the `parallelRuns` it announced within the operator's maximum ([`runner.md`](runner.md#named-runners-1105-adr-0007-decisions-10-14-and-16)). A step whose runner is full **waits** (it does not fail) until a place is free or a person cancels the run: **a lane has no run-level time limit** (the budget is spent by running turns only, and a turn's time limit starts when it does), so a cancel is the limit of a long wait (ADR 0007, open point of decision 13). Only a self-hosted runner that cannot serve the step (revoked, not heard from for 30 minutes, below the minimum base version, or with no manifest entry that can run it) ends the step `no_runner_available`. The run page says why a step waits (a free place, offline, unable).
+
+The run of such a step builds the same internal profile copy the engine used for a profile, with the **name and version of the lane** where a profile's would be (the name as a slug, because the job's `ImplementerProfile.name` takes `^[a-z0-9][a-z0-9_-]{0,63}$`: "Issue to PR" is sent as `issue-to-pr`, a name with nothing usable as `lane`; it is for the run's log line only), and the turn is written with it; the step's run
+records **no profile** (`profile_name`, `profile_version` stay empty), so the run page shows none. The wire contract of the job (`ImplementerProfile`) is unchanged.
+
 | `id` | yes | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops. |
-| `profile` | yes | `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`; `profile_archived` for one that was archived) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema. |
-| `environment` | no, deprecated (#919) | The name of an environment of the workspace (case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). **Leave it out**: the engine runs the step in the environment of its profile version ([`profiles.md`](profiles.md#where-profiles-meet-workflows)). When it is written next to a profile that names one it must be that one (`environment_mismatch`). Only a profile version saved before #919, which names no environment, needs it here (`environment_required` without it). Documents that name it keep validating and running. |
+| `profile` | one of the two | **The old form, removed in release B.** `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. Its page is gone; the routes stay until then. A step takes this or [the settings written in the step](#settings-in-the-step-1105) (`model`, `canPush`, `harness`, `instructions`, `setupScript`, `network`), never both. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`; `profile_archived` for one that was archived) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema. |
+| `environment` | no, deprecated (#919) | The name of an environment of the workspace (case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). **Leave it out**: the engine runs the step in the environment of its profile version (the old form, [`profiles.md`](profiles.md)). When it is written next to a profile that names one it must be that one (`environment_mismatch`). Only a profile version saved before #919, which names no environment, needs it here (`environment_required` without it). Documents that name it keep validating and running. |
 | `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
 | `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
 | `branch` | no | The branch a session of its own **starts from**, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger, or `{{<agent step>.branch}}`, the branch of an earlier agent step that may push (it ran before on every path; a profile that may not push yields no branch, `reference_fact_unavailable`). It decides what the agent works on, so it is a [target](#one-repository-per-run-and-targets): nothing an agent wrote (`target_from_untrusted_value`). Not together with `session.continue` (`session_target_invalid`): a session that goes on keeps its branch. See [Branches](#branches-and-what-a-step-starts-from). |
@@ -513,10 +544,8 @@ engine's. A value that fails is treated as a step without a result.
 
 ## The first workflow
 
-The plan's "Issue to PR", as version 1 states it, with the two profiles it needs: `implementer` (may push; the example at the end of
-[`profiles.md`](profiles.md#todays-implementer-as-a-profile)) and `reviewer` (may not push, and answers with `findings`; the example at the
-start of [`profiles.md`](profiles.md#a-profile)). Create both first. The review step is told not to change anything as well. Replace `node` by the name of
-an environment of your workspace. It validates
+The plan's "Issue to PR", as version 1 states it. Each agent step carries its settings and its runner itself (ADR 0007, #1105): `implement` may push, `review` may not and answers with `findings`, both on the
+hosted runner of 4 vCPU. Replace the model and the id of the runner by those of your workspace (`GET /api/w/<slug>/implementer/models`; the hosted runners are in `available` of a `runner_unknown`). It validates
 clean; this block is checked against [`contracts/examples/workflow/Workflow.json`](../contracts/examples/workflow/Workflow.json) by a test.
 
 ```json
@@ -573,8 +602,11 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
         {
           "id": "implement",
           "kind": "agent",
-          "profile": "implementer@1",
-          "environment": "node",
+          "harness": "opencode",
+          "model": { "entryId": "example-model" },
+          "canPush": true,
+          "instructions": "Work in small steps and run the tests before you finish.",
+          "runner": "runner-vercel-4-vcpu",
           "session": {
             "continue": "implement"
           },
@@ -596,8 +628,10 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
         {
           "id": "review",
           "kind": "agent",
-          "profile": "reviewer@1",
-          "environment": "node",
+          "harness": "opencode",
+          "model": { "entryId": "example-model" },
+          "canPush": false,
+          "runner": "runner-vercel-4-vcpu",
           "session": "new",
           "branch": "{{implement.branch}}",
           "instruction": "Review branch {{implement.branch}} against this issue. Do not change anything. The lane opens the pull request itself after the review; do not open one and do not report it as missing or open work.\n\nIssue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\nWhat the implementer reports it did. It names the answers people gave to its questions; those answers are binding, so do not report them as findings:\n{{implement.summary}}",
@@ -696,18 +730,18 @@ the run (the step, its code and a short message, defused), and `release` takes `
 
 ## The API
 
-All routes are under `/api/w/<slug>/workflows`, need a signed in member of the workspace, and answer `Cache-Control: no-store`. A lane belongs to a project (#922): the list and the creation name it with the query value `projectId` (the workspace has no list of all its workflows any more); the routes of one workflow are by its id as before. The API keeps these routes with the `projectId` filter for one release, then the project-scoped routes take over. The body of a
+All routes are under `/api/w/<slug>/workflows`, need a signed in member of the workspace (the writes `POST /workflows`, `PUT /workflows/<id>` and `DELETE /workflows/<id>` need an **Owner or Admin**: a Member gets `403` `{"error": "forbidden"}` and nothing is read or saved; `validate`, `scope` and the reads stay open to every member), and answer `Cache-Control: no-store`. A lane belongs to a project (#922): the list and the creation name it with the query value `projectId` (the workspace has no list of all its workflows any more); the routes of one workflow are by its id as before. The API keeps these routes with the `projectId` filter for one release, then the project-scoped routes take over. The body of a
 write is the document itself (`Content-Type: application/json`, 256 KB at most). A refusal is `{"error": <code>, "message": ...}` with a stable
 code from the table below.
 
 | Route | What | Answer |
 | --- | --- | --- |
 | `POST /workflows/validate` | Checks the document against the format and the workspace's environments. Stores nothing. | `200` `{valid, errors, truncated, steps, budgetUsd?, warnings?}` (also for an invalid document; `warnings` has the shape of `errors`, each with `severity: "warning"`, and never makes `valid` false) |
-| `POST /workflows/scope` | The values a step of a document can reach (#927), by the validator's own scope rules, for the variable picker of the lane builder. Body `{document, at, targetRoots?, wants?, workflowId?}`: `at` is the JSON pointer of the step (or of a text in it, `/steps/1/instruction/next`; the `until` of a loop is read in the scope of its body); the document may be unsaved and may have problems; `targetRoots` (roots of a target input, as in [targets](#one-repository-per-run-and-targets)) lists only the values that field takes; `wants` (`text`, `comparable` or `emptiable`) lists only the values of the kind the validator accepts there by type (no object where a text is wanted; a text, choice, number or true/false as an operand of `equals`; a list or text as an operand of `empty`), and both filters apply before the answer is cut at 400 values; `workflowId` takes the samples from the latest run of that lane. Stores nothing. | `200` `{at, entries: [{reference, category, name, type, insert, sample?}], truncated, sampled}`; `400` `WORKFLOW_REQUEST_INVALID` with `issues: [{path, code, message, available}]` (`at` is no step, `targetRoots` names no root, `wants` names no kind) |
-| `POST /workflows?projectId=<id>` | Validates and saves as **version 1**, as a lane of that project (switched on, of this workspace). The name is held once per project. | `201` `{workflow}`; `422` `WORKFLOW_INVALID` with `errors` and `truncated` (as the validate call gives them); `400` `WORKFLOW_PROJECT_REQUIRED`, `404` `WORKFLOW_PROJECT_NOT_FOUND` or `409` `WORKFLOW_PROJECT_INACTIVE` with `issues` |
-| `PUT /workflows/<id>` | Validates and saves as the **next version**; the name is taken from the document. `?expectedVersion=n` saves only if `n` is still current (a race gives `409` `WORKFLOW_VERSION_CONFLICT` with `current`). | `200` `{workflow}` |
+| `POST /workflows/scope` | The values a step of a document can reach (#927), by the validator's own scope rules (it served the variable picker of the lane builder, which is gone; the route stays until the routes of ADR 0007 go in release B). Body `{document, at, targetRoots?, wants?, workflowId?}`: `at` is the JSON pointer of the step (or of a text in it, `/steps/1/instruction/next`; the `until` of a loop is read in the scope of its body); the document may be unsaved and may have problems; `targetRoots` (roots of a target input, as in [targets](#one-repository-per-run-and-targets)) lists only the values that field takes; `wants` (`text`, `comparable` or `emptiable`) lists only the values of the kind the validator accepts there by type (no object where a text is wanted; a text, choice, number or true/false as an operand of `equals`; a list or text as an operand of `empty`), and both filters apply before the answer is cut at 400 values; `workflowId` takes the samples from the latest run of that lane. Stores nothing. | `200` `{at, entries: [{reference, category, name, type, insert, sample?}], truncated, sampled}`; `400` `WORKFLOW_REQUEST_INVALID` with `issues: [{path, code, message, available}]` (`at` is no step, `targetRoots` names no root, `wants` names no kind) |
+| `POST /workflows?projectId=<id>` | Validates and saves as **version 1**, as a lane of that project (switched on, of this workspace). The name is held once per project. The document needs a non-blank `description` (a document without one is `422` `WORKFLOW_INVALID` with an issue at `/description`, code `missing_field`); version 1 has no change description, the lane's description serves. | `201` `{workflow}`; `422` `WORKFLOW_INVALID` with `errors` and `truncated` (as the validate call gives them); `400` `WORKFLOW_PROJECT_REQUIRED`, `404` `WORKFLOW_PROJECT_NOT_FOUND` or `409` `WORKFLOW_PROJECT_INACTIVE` with `issues` |
+| `PUT /workflows/<id>` | Validates and saves as the **next version**; the name is taken from the document. The body is the document **plus the root key `changeDescription`** (see [Versions and the change description](#versions-and-the-change-description)), which is not part of the document and is stored with the version. `?expectedVersion=n` saves only if `n` is still current (a race gives `409` `WORKFLOW_VERSION_CONFLICT` with `current`). | `200` `{workflow}`; `422` `WORKFLOW_CHANGE_DESCRIPTION_REQUIRED` without a usable `changeDescription`; `422` `WORKFLOW_INVALID` for the document |
 | `GET /workflows?projectId=<id>` | The lanes of the project by name, **not the archived ones**. `projectId` is required. | `200` `{workflows: [{id, projectId, name, version, createdAt, updatedAt, archivedAt}], maximum}`; `400` `WORKFLOW_PROJECT_REQUIRED` or `404` `WORKFLOW_PROJECT_NOT_FOUND` with `issues: [{path: "projectId", code, message, available}]`, `available` being the ids of the projects of the workspace |
-| `GET /workflows/<id>` | The workflow with its current version, or `?version=n`. An archived workflow is readable too. | `200` `{workflow: {id, projectId, name, version, archivedAt, documentVersion, document, versions: [{version, savedAt}]}}` |
+| `GET /workflows/<id>` | The workflow with its current version, or `?version=n`. An archived workflow is readable too. | `200` `{workflow: {id, projectId, name, version, archivedAt, documentVersion, document, versions: [{version, savedAt, savedBy, changeDescription}]}}`; `versions` is the newest first, `savedBy` the id of the user, `changeDescription` is `null` for version 1 and for a version saved before change descriptions existed |
 | `DELETE /workflows/<id>` | **Archives** the workflow (a soft delete). Asked again, it answers the same. | `200` `{workflow}` with `archivedAt` set; `404` `WORKFLOW_NOT_FOUND`; `409` `WORKFLOW_ARCHIVE_LIMIT_REACHED` |
 
 Every save is a **new, immutable version**: the database refuses to change a saved version (there is no UPDATE of a version; only the erasure
@@ -719,8 +753,8 @@ under it. A workflow that reaches its 500 versions is archived and written again
 `WORKFLOW_ARCHIVED`), is never started (the engine reads `archivedAt`), does not count against the 100, and **gives its name back**: a new
 workflow may use it. Its versions stay readable by id. There is no way back yet. The archive is bounded so that archiving and creating again
 cannot grow the rows for ever: with 1000 archived workflows in a workspace one more **cannot be archived** (`409`
-`WORKFLOW_ARCHIVE_LIMIT_REACHED`, with `maximum`); creating, saving and reading go on. Every member may do everything in a workspace (no role is checked), so
-the count, not a role, is the bound; there is no way to remove archived workflows yet (a follow-up).
+`WORKFLOW_ARCHIVE_LIMIT_REACHED`, with `maximum`); creating, saving and reading go on. Archiving needs an Owner or Admin like every write, so
+the count is the bound against a runaway script; there is no way to remove archived workflows yet (a follow-up).
 
 ### Lanes belong to a project
 
@@ -735,7 +769,7 @@ that was written before has no stored source and reads as the issues of its repo
   its tickets from. A lane without a project (archived, or written by an older version) is not held to it.
 - **`ticket.setStatus`** takes the board from the project ([The action](#the-action-kind-action)); `board` on the step stays an accepted override.
 - **The name of a lane** is held once per project (case ignored), not once per workspace, so every project can have its own "Issue to PR". A lane without a project keeps the old rule among such lanes.
-- **A lane without a project** is what an older version writes while this one is being deployed (the database allows it; the service never creates one, and the migration has placed or archived every lane that existed when it ran).
+- **A lane without a project** is what an older version writes while this one is being deployed (the database allows it; the service never creates one: a creation without `projectId` is `400 WORKFLOW_PROJECT_REQUIRED` since #1107, and the migration has placed or archived every lane that existed when it ran). ADR 0007 has a later release add a check that a lane that is not archived has a project; these paths then go.
   It is still read, saved, archived and started by its id (a manual or api start is held to no repository), and it keeps its name rule among such lanes. It starts **no run from a label**, is listed in **no project** (the list
   needs a `projectId`) and shows on no Lanes tab; a lane like that is written again in a project (`POST /workflows?projectId=…`) and the old one archived. There is no separate list of them: they are rare and last for one release.
 - **Migration.** Each workflow that existed was given to the project of the repository its newest run used (an active project before an inactive one), else to the only active project of its workspace; a lane that
@@ -746,7 +780,7 @@ that was written before has no stored source and reads as the issues of its repo
 **Creating a project** in the factory is `POST /api/w/<slug>/projects` (Admins and Owners, like switching a repository on): the body is
 `{ "repositoryId", "board": { "projectV2Id" } | null, "lanes": ["issue-to-pr", "review-a-pull-request"] }`, `board` and `lanes` optional. The board must be one of the boards of the repository (`GET
 /api/w/<slug>/repositories/<id>/boards` lists them with the options of their Status field, read from GitHub with a token that may read boards and nothing else); the server takes the Status field from that list, never from
-the body. `lanes` copies the built-in lanes into the new project as lanes of its own (validated like any save, with the profiles `implementer` and `reviewer` and the first environment of the workspace by name): a lane that
+the body. `lanes` copies the built-in lanes into the new project as lanes of its own (validated like any save; the agent steps carry their settings and runner inline, taken from the profiles `implementer@1` and `reviewer@1` and the hosted runner of 4 vCPU, [Built-in lanes](#built-in-lanes)): a lane that
 cannot be copied is reported in `lanes: [{ key, ok, workflowId | code }]` and does not undo the project; each lane is caught on its own (#937), so a database error on the second lane is `ok: false` with `code: "LANE_COPY_FAILED"` for that lane only and the first stays saved (when the copying fails altogether, every lane is `LANE_COPY_FAILED`). The answer is `201 { project: { id, repositoryId, active, ticketSource }, lanes }`; a body that cannot be used is
 `400 PROJECT_REQUEST_INVALID` with `issues: [{ path, code, message, available }]` (`unknown_field`, `missing_field`, `wrong_type`, `invalid_value`, `unknown_lane`, `duplicate_lane`, `unknown_board`, `board_without_status`,
 `board_unavailable`; `available` lists what would have been accepted); a repository that is a project already is `409 PROJECT_ALREADY_EXISTS`. The tickets of a project are `GET /api/w/<slug>/projects/<id>/issues`, the same
@@ -762,15 +796,81 @@ hint when the last full sync is **older than 3 days** and no delivery has writte
 
 ### Built-in lanes
 
-A new project may copy three lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Both need the profile versions `implementer@1` (may push) and `reviewer@1` (may not) and run in the first environment of the workspace by name.
+> **ADR 0007 (epic #1103, #1105).** The built-in lanes write their agents' settings and their runner **into the steps**; they name no profile and no environment. The profile pages are gone; the profile tables go in release B.
+
+A new project may copy four lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Every agent step of a copy carries `harness`, `model`, `canPush`, `instructions` (when there are any) and `runner`: the values come from the profile versions `implementer@1` (may push) and `reviewer@1` (may not) of the workspace (until release B drops the profiles, they are where a new workspace's agent settings are written down, **read by the server only**: no page shows or edits them; a workspace without one gets `profile_unknown` for that lane, and "One-off task" needs `implementer@1` alone; the source after release B is #1118), and the runner is the workspace's **hosted runner of 4 vCPU** ("Vercel Sandbox 4 vCPU"). A script and a network rule the old first environment held are not carried over: add `setupScript` and `network` to the step by saving a new version.
 
 | Key | Lane | Starts | Does | Budget |
 |---|---|---|---|---|
+| `one-off-task` | One-off task | by hand: `input.task`, a text of 8,000 characters at most (the start form shows a box); no ticket and no repository | **The replacement for a task started by hand** (ADR 0007 decision 15, the owner's "Einmalige Aufgabe"): one agent step `implement` (may push, the implementer's settings, the hosted runner of 4 vCPU, `session: new`) works on **the project's repository, on its default branch**, with the task as its instruction, then `github.pullRequest.open` opens the pull request from the branch it made (title: "One-off task: " and the task, cut to one line of 256 characters at most; body: the agent's summary and the task). **The task text is published**: it is copied unchanged into the title and the body of the pull request, which may be public, so a person must not write a secret into it (an `@team` mention or `Closes #5` in it is defused only in the agent's summary, not in the task). Nothing is opened when the agent makes no commit: the step fails and the run says so | 10 USD |
 | `issue-to-pr` | Issue to PR | label `agent implement` on a ticket of the project's repository, or by hand with `input.ticket` | The first workflow below: implement, review, fix (3 rounds at most), open the pull request, otherwise comment on the ticket | 20 USD |
-| `issue-to-pr-status` | Issue to PR (status) | the ticket is moved on the project's board into the status `Ready for agent` (whoever moves it), or by hand with `input.ticket` | The same as `issue-to-pr`, and it reports on the board: `In progress` at the start, `In review` when the pull request is open, back to `Backlog` plus the comment when it stopped without one (`onFailure` does the same). The four status names are literals of the document: change them in the lane builder, whose picker offers the options of the project's board (a name the board does not have fails the step with `board_status_unknown`, which lists the options). A caller that copies the lane may pass its own names (`LaneStatuses` of `built-in-lanes.ts`). It is not ticked by default in the new project dialog | 20 USD |
+| `issue-to-pr-status` | Issue to PR (status) | the ticket is moved on the project's board into the status `Ready for agent` (whoever moves it), or by hand with `input.ticket` | The same as `issue-to-pr`, and it reports on the board: `In progress` at the start, `In review` when the pull request is open, back to `Backlog` plus the comment when it stopped without one (`onFailure` does the same). The four status names are literals of the document: change them by saving a new version through the API (with a change description); the validator lists the options of the project's board (a name the board does not have fails the step with `board_status_unknown`, which lists the options). A caller that copies the lane may pass its own names (`LaneStatuses` of `built-in-lanes.ts`). It is not ticked by default in the new project dialog | 20 USD |
 | `review-a-pull-request` | Review a pull request | by hand: `input.pullRequest` (the number); `input.repo` may be left out | The `reviewer` reads the pull request (`git fetch origin pull/<n>/head`) against its base and changes nothing; the findings (at most 20: `type` bug, risk or nit, `name`, `description`) are written as one comment on the pull request (`pullRequest.comment`) | 5 USD |
 
-**The repository of a lane of a project is the project's** (#937). The input of "Review a pull request" still declares `repo` (a manual trigger must declare `ticket` or `repo`), but a start of a lane that belongs to a project and declares `repo` may **leave it out**: the run is given
+**What a follow-up of a one-off run is** (the open point of ADR 0007 decision 15, settled in #1105): **a new run of the same lane.** Start "One-off task" again and write the next task; to work on the earlier branch, name it in the text (the agent's clone has every branch). The lane has no
+`session.continue` step: a run is one agent step, and an agent that needs an answer asks for it (a ToDo). Optional inputs that would let a start pick a base or an earlier branch are not part of it (a reference to an optional input is not
+a value every start has); a lane that needs them is a copy with its own fields. The "Continue" form of the old tasks stays until release B ([`implementer.md`](implementer.md#follow-ups)).
+
+**How an existing project gets it.** `lanes` of `POST /projects` copies the built-in lanes into a **new** project (the dialog ticks "One-off task" by default). There is no job that adds it to the projects that exist, on purpose: lanes are written through
+the API (ADR 0007 decision 8), and the copy needs this workspace's model and runner id, which the conversion job and the other lanes already carry. To add it to a project, an Admin or the lead agent saves the document below with
+`POST /api/w/<slug>/workflows?projectId=<id>`, taking `model` and `runner` from the `implement` step of the project's "Issue to PR" (or `GET /api/w/<slug>/implementer/models` and the hosted runner of 4 vCPU in `available` of a `runner_unknown`). It is safe to
+repeat: a second save of the same name is `409 WORKFLOW_NAME_TAKEN`. A lane written this way is a lane like any other.
+
+```json
+{
+  "version": 1,
+  "name": "One-off task",
+  "description": "A person describes a task; one agent does it on the project's repository and the lane opens a pull request with the result.",
+  "triggers": [
+    {
+      "id": "manual",
+      "kind": "manual",
+      "input": {
+        "type": "object",
+        "required": ["task"],
+        "properties": {
+          "task": {
+            "type": "string",
+            "maxLength": 8000,
+            "description": "What the agent should do, in your own words."
+          }
+        }
+      },
+      "steps": []
+    }
+  ],
+  "budgetUsd": 10,
+  "steps": [
+    {
+      "id": "implement",
+      "kind": "agent",
+      "harness": "opencode",
+      "model": { "provider": "<provider>", "model": "<model>" },
+      "canPush": true,
+      "runner": "<id of the hosted runner of 4 vCPU>",
+      "session": "new",
+      "instruction": "{{trigger.input.task}}",
+      "result": {
+        "type": "object",
+        "required": ["summary"],
+        "properties": { "summary": { "type": "string" } }
+      }
+    },
+    {
+      "id": "pr",
+      "kind": "action",
+      "connector": "github.pullRequest.open",
+      "head": "{{implement.branch}}",
+      "title": "{{trigger.input.task}}",
+      "body": "{{implement.summary}}\n\nTask: {{trigger.input.task}}"
+    }
+  ]
+}
+```
+
+(The built-in copy adds one sentence to the instruction, that the lane opens the pull request itself, so the agent does not.) **No test checks this block against the code** (it has placeholders); `built-in-lanes.test.ts` holds the built-in to the validator.
+
+**The repository of a lane of a project is the project's** (#937). The input of "Review a pull request" still declares `repo` (a manual trigger that declares `ticket` or `repo` is held to it; one without `input`, or whose input declares neither, needs neither, #1106, #1105), but a start of a lane that belongs to a project and declares `repo` may **leave it out**: the run is given
 `input.repo` = the full name of the project's repository before the input is checked, and it is stored so (`trigger.input.repo` reads as before). A start that names a repository is still held to the project's (`422 WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT`), a start with a `ticket` has its repository, and a lane without a project is not given one (it needs `repo`). Replaying a request id
 with the input left out answers the run it made. Lanes saved before keep working: they declare the same input and may still be started with `repo`.
 
@@ -803,11 +903,15 @@ run is started by hand (`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step na
 `POST /api/w/<slug>/workflows/<id>/runs` with `{"trigger": "manual", "input": {...}, "clientRequestId": "..."}`, for every member (the permission to start an Implementer
 task, `start_implementer_task`: a run starts tasks). `trigger` is the `id` of one of the workflow's [triggers](#the-triggers-and-their-pre-steps) of the kind `manual` or `api`; it may be left out
 when the workflow has exactly one of them (a workflow written with the single `trigger` has one). `input` must fit the `input` schema of that trigger (checked again here with the same rules as a
-result: a start knows the values). The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`, which a lane of a project may leave out: it is then the project's repository, [Built-in lanes](#built-in-lanes)); either is a repository of the workspace and, for a lane of a project, the project's own ([Lanes belong to a project](#lanes-belong-to-a-project)). The answer is
+result: a start knows the values). A trigger **without `input`** (#1106) takes no fields: `input` is left out (or `{}`), any field is `422 WORKFLOW_RUN_INPUT_INVALID`, and the run works on the repository of the lane's project and its default branch; a lane without a project is refused with `422 WORKFLOW_RUN_PROJECT_REQUIRED`, and a lane whose project is switched off with `409 WORKFLOW_RUN_PROJECT_INACTIVE` (a trigger with an `input` is not held to the second); when the project's repository is not available (switched off, installation gone), `404 WORKFLOW_RUN_REPOSITORY_NOT_FOUND` names that repository. The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`, which a lane of a project may leave out: it is then the project's repository, [Built-in lanes](#built-in-lanes)); either is a repository of the workspace and, for a lane of a project, the project's own ([Lanes belong to a project](#lanes-belong-to-a-project)). The answer is
 `201 {"run": {...}}`, with the run and its steps; the pre-steps of the trigger and then the shared steps start right after the answer.
 
 ```jsonc
-{ "trigger": "manual", "input": { "ticket": "github:itegro/shop#128" }, "clientRequestId": "…" }
+{
+  "trigger": "manual",
+  "input": { "ticket": "github:itegro/shop#128" },
+  "clientRequestId": "…",
+}
 ```
 
 A `ticket` is resolved through the GitHub App of the workspace when the run starts (`trigger.ticket` holds what it answered, bounded; the run keeps it, so a step reads one
@@ -1022,7 +1126,7 @@ The limits belong to the workflow (the lane), not to the profile: the budget abo
   (`implementer_turns.time_limit_minutes`, also for a `session.continue` turn), and the claim hands it to the Worker as its `limits.timeLimitSeconds`: the
   runner holds the turn to it, keeps the last minutes of it for the final commit and the push, and ends the turn with `timeout`. The app is the backstop: a turn
   still running **ten minutes after its limit** is failed with `timeout` by the queue (`IMPLEMENTER_RUNTIME_GRACE_MS` in `app/src/db/job-limits.ts`); a turn without a
-  limit of its own (one started from the Implementer form, or written before the field existed) keeps 3600 seconds and the 70 minutes.
+  limit of its own (one started by hand before release A, or written before the field existed) keeps 3600 seconds and the 70 minutes.
 - **The Dispatcher is the ceiling, so 60 minutes is the most.** It stops the VM of an Implementer turn at its own timeout (`DISPATCHER_WORKER_CONFIG.implementer.timeoutSeconds`,
   3600 seconds), and the runner holds a turn to the smaller of its limit and that timeout ([`dispatcher.md`](dispatcher.md)). A limit above 60 would be cut by the
   Dispatcher without the final commit and push, so the validator refuses it. A longer limit needs the Dispatcher to follow the limit of the job instead of a
@@ -1099,8 +1203,10 @@ When the last one is over, the run ends with the stored status and error code (`
   started are not written as skipped rows (only a step that was written and not claimed is); the page shows what ran. A discard has no such wait: the run is over at once, and only the agent's stop and push take that long. The run page has plain buttons, no confirmation.
 - **`onFailure` reads no step of the workflow.** After a failure any step may not have run, so the facts of the failure (`status`, `stepId`, `code`, `message`) and the trigger are all it has: it cannot name the branch the agent pushed or quote an earlier result. (A later extension could offer them with a `| default`.)
 - **`onFailure` is not shown apart on the run page and not in the run's JSON**: its steps are rows after the failed one, like any step; `workflow_runs.failure` is not returned by the routes yet.
-- **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
-  with version 1.
+- **A step in the old profile form** (superseded: profiles are removed in release B, ADR 0007; the conversion job rewrites a lane into the inline form) resolves its profile per step, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
+  with version 1. A step with settings of its own (#1105) is what it says: nothing under it changes.
+- **The one-off lane works on the default branch of the project's repository** and has no field for a base or an earlier branch (see "What a follow-up of a one-off run is", [Built-in lanes](#built-in-lanes)); its pull request step fails when the agent made no commit.
+- **No lane has a run-level time limit** while a step waits for a free runner (ADR 0007 decision 13): a person cancels the run.
 - **The sweep has a time budget** (40 seconds, 10 for the maintenance after a request), checked between two runs; a run is looked at as a whole.
 
 ### Actions
@@ -1184,7 +1290,7 @@ once the text is put together (`defuseSegments`, `app/src/workflow-runs/template
   attempt of a step believe its comment exists. This holds inside code as well;
 - as `&amp;` for the `&` of the entities of `@` and `#` (`&#64;`, `&#x40;`, `&commat;`, `&#35;`, `&#x23;`, `&num;`).
 
-A fenced block (```` ``` ```` or `~~~`, open to the end of the text when it is never closed) and a code span (`` `…` ``) are left out of all of this except for `<!--`: GitHub
+A fenced block (` ``` ` or `~~~`, open to the end of the text when it is never closed) and a code span (`` `…` ``) are left out of all of this except for `<!--`: GitHub
 mentions nobody there. A title is no Markdown, so nothing is left out of a title. Where a code span or a fence of an agent cannot be told from the one GitHub sees (a quote
 or list item, an indented line, a table row), the text is defused as if it were no code.
 
@@ -1389,8 +1495,10 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `template_invalid` | step | A reference holds an object, or the text is not a template. |
 | `template_too_large` | step | The text does not fit where it goes. |
 | `profile_not_found` | step | The profile is gone, archived or has no such version. |
+| `agent_settings_invalid` | step | #1105: a step that carries its settings itself ([the agent step](#the-agent-step-kind-agent)) holds a value that cannot be used (a model, `canPush`, harness, instructions, setup script or network rule that does not read). The validator refuses such a document at save, so this means a version that was not saved by it. Nothing starts, free of charge. |
+| `runner_not_found` | step | #1105 (ADR 0007, decision 14): the `runner` of a step with settings of its own is not one of the workspace, or it was revoked after the lane was saved. Nothing starts, free of charge: the step does not wait for a machine nobody has. Save a new version of the lane that names a runner that exists. |
 | `environment_not_found` | step | The environment (the profile's, or the step's for a profile version without one) is not one of the workspace. |
-| `environment_mismatch` | step | The step names another environment than the profile version it runs ([`profiles.md`](profiles.md#where-profiles-meet-workflows)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step. |
+| `environment_mismatch` | step | The step names another environment than the profile version it runs (the old form, [`profiles.md`](profiles.md)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step. |
 | `repo_duplicate` | step | Two entries of `repos` are one repository without regard to case once their references are filled in (#1092). Nothing starts, free of charge. |
 | `repo_name_clash` | step | The mount names of two repositories of `repos` are equal without regard to case after the derivation (#1092). Nothing starts, free of charge. |
 | `repo_invalid` | step | A reference in the `repo` of an entry of `repos` gave no repository (`owner/name`) (#1092). Nothing starts, free of charge. |
@@ -1431,7 +1539,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_CROSS_SITE_REQUEST` | 403 | The request comes from another site. |
 | `WORKFLOW_RUN_WORKFLOW_NOT_FOUND` | 404 | No such workflow in this workspace. |
 | `WORKFLOW_RUN_NOT_FOUND` | 404 | No such run of this workflow in this workspace. |
-| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND` | 404 | `input.repo`, or the repository of the `ticket`, is none of the workspace's repositories (or not `owner/name`). |
+| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND` | 404 | `input.repo`, or the repository of the `ticket`, is none of the workspace's repositories (or not `owner/name`). For a trigger without `input` (#1106) it is the project's own repository that is not available (switched off, its installation gone, or removed); the message names it. |
 | `WORKFLOW_RUN_TRIGGER_UNKNOWN` | 404 | The workflow has no trigger with the id the body names as `trigger`. |
 | `WORKFLOW_RUN_TICKET_NOT_FOUND` | 404 | The repository has no issue of the number the `ticket` names (a pull request is none). |
 | `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
@@ -1444,24 +1552,38 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT` | 422 | The `ticket` is not an issue of the repository the lane's project takes its tickets from (`issues[].available` names it). |
 | `WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED` | 422 | The `ticket` names a provider the engine cannot read tickets of yet (`jira:…` parses, #1035, but a run starts from a GitHub issue only until #1039/#1040). |
 | `WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT` | 422 | `input.repo` is not that repository. |
+| `WORKFLOW_RUN_PROJECT_INACTIVE` | 409 | The trigger declares no `input` and the lane's project is switched off (#1106). Triggers with an `input` are not held to this. Switch the project on, then start again. |
+| `WORKFLOW_RUN_PROJECT_REQUIRED` | 422 | The trigger declares no `input` (its run works on the repository of the lane's project), and the lane has no project (#1106). |
 | `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
 | `WORKFLOW_RUN_ANSWER_INVALID` | 422 | `answer`: the answer is empty, over 4000 characters, or names an option the question does not have. |
 | `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
 | `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
 
+## Setup and the control panel
+
+*#1108 of epic #1103 ([ADR 0007](decisions/0007-ai-configured-factory.md), decisions 7 to 9); the code is `app/src/shell/nav-items.ts`. Only the factory (the capability `implementer`) has this navigation; code-review.com keeps its own.*
+
+A person has two areas in the web app and configures nothing by hand: lanes are written through the API by an AI (decision 8), and the server's validator and the linked integrations are the only guard (decision 9). The sidebar of the factory has three groups:
+
+- **Control panel**: **ToDos** (what waits for an answer, with the count), **Projects** (the cockpit of a project; its **Lanes** tab lists the lanes read only, each opens its [lane page](#the-lane-page) with the **Start** form generated from the manual trigger's `input`, or only a button for a lane without input) and **Runs** (the [lane runs](#the-run-page), live; the run page answers a question and cancels).
+- **Setup**: only the integrations a person links. **GitHub and Jira** (`/w/<slug>/settings/integrations`), **MCP servers** (`/w/<slug>/mcp`, #1050), **Runners** (`/w/<slug>/runners`) and **LLM keys** (`/w/<slug>/settings/llm`). Nothing else is configured here.
+- **Workspace**: **Settings** with its tabs General (Workspace, Review defaults, Advanced), Members and Billing. The two integration pages that Setup lists keep their old addresses below `/settings` but are places of Setup: their page title is the word of the sidebar link (**GitHub and Jira**, **LLM keys**; the breadcrumb starts with Setup), they have none of the Settings tabs, and Settings is not marked while they are open. The page of GitHub and Jira says "Jira is not set up on this installation." where the Atlassian app is not configured.
+
+What left the navigation, and the UI, with this change: the **Profiles** page and the **Environments** page (their routes and API stay until release B, ADR 0007 "Migration path"; the page `/w/<slug>/environments` is gone since #1105 and the Runners page links to no page of environments), and the **review settings** of the workspace (`/settings/review-defaults`) and of a project (`/projects/<id>/review`), which an AI sets through the API: both pages show the values and no form to save them (no Save, no reset, no Edit skill; the note names the endpoints: `PUT /api/w/<slug>/review-settings`, `PUT|DELETE /api/w/<slug>/repositories/<id>/project/settings`). The workspace defaults are a page of the General tab of Settings, read only. The board of a project is read only on its Setup tab too (an AI sets it with `PUT /api/w/<slug>/projects/<id>` and `board`). The **Implementer** page (`/w/<slug>/implementer`) and its form are gone since #1105: a task that belongs to no ticket is a run of the lane "One-off task" ([Built-in lanes](#built-in-lanes)), started like any lane; the routes behind the old form stay until release B.
+
 ## The run page
 
 *Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
-A member can edit a workflow in the [lane builder](#the-lane-builder), start one by hand and watch a run. The pages exist
+A member can read a workflow on its [lane page](#the-lane-page) (nobody edits a lane in the browser, ADR 0007), start one by hand and watch a run. The pages exist
 only in a deployment with the capability `implementer`, are reached from the **Lanes** tab of a project (no sidebar place of their own since #925), and are open to every member (the permission
-`start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
+`start_implementer_task`; only saving a lane is for Owners and Admins, `manage_workflows`). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
 not exist.
 
 - **Workflows** (`/w/<slug>/workflows`): the workflows of the workspace that are not archived, with their version and the time of the last save.
-- **One workflow** (`/w/<slug>/workflows/<id>`): the [lane builder](#the-lane-builder) (its **Run now** opens the Start form) and the newest 50 runs.
+- **One workflow** (`/w/<slug>/workflows/<id>`): the [lane page](#the-lane-page) (name, description, project, triggers and the versions with their change descriptions, read only; #1107), the Start form below it, and the newest 50 runs.
   - The form has one field for each field of the `input` of the manual trigger, the repository (`repo`) or the ticket first: a text (a ticket is a text like `github:owner/repo#128`), a whole number, a number, a
-    choice (a text with a list of names), a checkbox, and a box for JSON for a list or an object. A workflow with several manual triggers shows one form for each. It sends `{trigger, input, clientRequestId}` (`trigger` when the workflow has `triggers`) to
+    choice (a text with a list of names), a checkbox, and a box for JSON for a list or an object. A trigger without `input` has a form without fields, only the button (#1106). A workflow with several manual triggers shows one form for each. It sends `{trigger, input, clientRequestId}` (`trigger` when the workflow has `triggers`) to
     `POST .../workflows/<id>/runs`. The `clientRequestId` is made when the form is sent and kept for the same input: sending it again after a lost
     answer is one run, changing the input is another. A refusal is told in words; a field the server names is marked. A workflow that is archived, or whose
     trigger is not the manual one, shows a note instead of the form.
@@ -1495,7 +1617,7 @@ not exist.
     The basis is kept with the step (`workflow_step_runs.cost_basis`, null for a step that was charged nothing, and for steps written before milestone 3c) and is
     in the step of the run routes as `costBasis`.
   - **Header (#1079).** The ticket (its ref, its title as text, and a link only for an address of the run's own repository on github.com), the lane and the version the run uses, the status, the trigger, who put the label on, when it started and ended, how long it took, and what was spent of the budget. The controls stay as they are.
-  - **The flow (#1079).** The lane document of **the version the run uses** (read through the workflow service, so a lane saved again since does not change an old run) is drawn read-only with the layout of the builder's flow (`builder/flow-layout.tsx`, shared with the builder): the triggers with their pre-steps, the shared steps top down, a loop as a container, an `if` with then and else side by side, and `onFailure` at the bottom. Every node is a button with its kind, its name, its **state** and, where known, how long it took and what it cost:
+  - **The flow (#1079).** The lane document of **the version the run uses** (read through the workflow service, so a lane saved again since does not change an old run) is drawn read-only with the layout of the lane flow (`flow/flow-layout.tsx`): the triggers with their pre-steps, the shared steps top down, a loop as a container, an `if` with then and else side by side, and `onFailure` at the bottom. Every node is a button with its kind, its name, its **state** and, where known, how long it took and what it cost:
     - *Done*, *Running* (the symbol pulses; the pulse is off for a person who asked for less motion), *Waiting for an answer*, *Failed*, *Skipped* (the branch that was not taken, or a trigger that did not start the run) and *Not reached*. A state is told by a symbol and a word as well as by a calm hue (`--flow-*` in `theme.css`, light and dark);
     - a loop says its round ("Round 2 of max 3"); the loop has no row of its own while it runs, so its state and round come from its body;
     - steps are matched to nodes by `stepId`, the **latest round wins** on the node, and the earlier rounds are listed in the panel;
@@ -1548,28 +1670,26 @@ The lane block of a ticket (row and drawer) draws the [step track](#the-run-page
 
 The start dialog's Start button gets the focus back when it closes. The list's `lane` now also names a run that **waits** for an answer (`status: "waiting"`) and carries `workflowId`; before, only a running run was a lane. No new route and no migration.
 
-## The lane builder
+## The lane page
 
-*#926 of epic #915; the code is [`app/src/workflow-pages/builder/`](../app/src/workflow-pages/README.md#the-lane-builder). It is the page of one workflow (`/w/<slug>/workflows/<id>`), reached from the Lanes tab of its project (#922).*
+*#1107 of epic #1103 ([ADR 0007](decisions/0007-ai-configured-factory.md)); the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md). It is the page of one workflow (`/w/<slug>/workflows/<id>`), reached from the Lanes tab of its project (#922).*
 
-The builder reads a workflow and edits **the document itself**: there is no second format, what it shows is what the validator checks and what it saves. A document written with the single `trigger` of before #916 opens as `triggers` with that one entry (the id the engine gives it), but is saved with its single `trigger` as long as nobody changes that trigger, so an older app version can still read it; editing the trigger, or giving it a pre-step, saves `triggers`. Everything else in a document is kept as it is.
+A lane is changed only through the API, by an AI (the owner's decision of ADR 0007, which removed the editor of #926 with its field pickers, variable picker and JSON view). The page therefore shows the lane as it is saved and has nothing to edit:
 
-- **Flow** (left). Each trigger is a dashed group with its pre-steps; then the shared steps top down. A loop is a container with its body indented and a footer (until, max rounds, exits); an `if` shows then and else side by side; `onFailure` is a group of its own at the bottom and offers comments, labels and `if` only. The **+** below a card inserts a step of the kind picked (agent step, action, loop, if) after it, at any depth; a step can be added to an empty branch, body or pre-step list too.
-- **Inspector** (right) for the selected node, with the id (editable: references to the old id are **not** renamed, the validator reports them), remove, and move up and down within the list:
-  - *trigger*: kind (changing it starts the fields of the new kind), label, cron, or the input as a table of fields (name, type, required);
-  - *agent step*: **Repositories** (#1094: a block for each repository of `repos`, up to ten: a picker over the active repositories of the workspace (`GET .../implementer/repositories`, one that the App cannot write to is offered and marked), a picker over the branches of the picked repository for the base (`.../repositories/<id>/branches`, the default branch first and the choice "the default branch of the repository" that writes no `base`), and the optional branch as text with `{{trigger.ticket.key}}` allowed. A repository or a base that is a reference, or that the lists do not hold, is typed in the usual target field; where the routes give nothing the field is typed and says so. Taking the last block out takes `repos` out of the step, which is then the step of today. A step that continues a session shows that it keeps that session's repositories. The errors of the validator (`repos_with_branch`, `repo_duplicate`, `target_from_untrusted_value`, …) are shown on the step like any other), **MCP servers** (#1052: the servers of the lane, as checkboxes: all of the lane's until one is unchecked, then the list is written; "none" writes `[]`; a lane without servers shows nothing to pick), profile (the profiles of the workspace, newest or pinned), session (new, or continue an agent step), start branch (a target), the instruction (first and next in a loop body), the result as a table of fields; the environment only where the step still has one or the validator asks for it (deprecated since #919: the profile says where it runs; clearing the field removes it, and a new agent step gets none). No model, no key;
-  - *action*: the connector and its inputs, taken from the connector's own spec (the pull request step hides `head` and `base` once it has `repos`), so the inputs, the required ones and the **targets** (marked "target · one value", or "target · literal") are the validator's; a list of labels is one entry to a line, or one reference to a list (the text being typed stays as it is, a trailing new line included, while it parses to the same list);
-  - *loop*: max rounds (1 to 10) and the `until` condition; *if*: the `when` condition. A condition is an operator (`empty`, `notEmpty`, `equals`, `notEquals`, `all`, `any`, `not`) and its operands or conditions. An operand is text unless its type is set to Number or true/false, so `"3"` stays a text.
+- **The lane**: its name (the title), its **description**, its **project** (the repository's name, a link to the project), a line per **trigger** (what starts it) and, for an archived lane, that it is archived. A saved document that cannot be read as a lane is said so, and the rest is shown as far as it can be read.
+- **Versions**: every saved version, the newest first, each with its number (the current one is marked), when it was saved (UTC), who saved it (the member's name; a former member of the workspace is "a former member"), and **what it changed against the version before**. Version 1 shows the lane's description as version 1 said it. A version saved before change descriptions existed (the column is empty) shows a neutral sentence that it has none; nothing is made up for it.
+- **Start** (the Start form of the manual trigger, as in [The run page](#the-run-page), with the same notes for an archived lane or a lane that is not started by hand) and the newest runs of the lane.
 
-  Fields that can hold a value of the run are text with `{{…}}` and show their variables as chips, see the next item.
-- **Variables, chips and the picker** (#927). In every inspector text field (instruction, action inputs, start branch, the operands of a condition) a reference is also shown as a **chip**, `category · name` (`Ticket · title`, `Steps before · implement.branch`), with × to remove it. Typing `{{…}}` still works and the stored document keeps exactly the text that was typed or picked: a chip is a view of the text, never a rewritten form (`{{ a.b }}` stays `{{ a.b }}`). A **+** at the right of the field opens a popup under it: search, the categories on the left and the values on the right with their name, type and, once the lane has run, a **sample** of its latest run. Picking a value inserts it at the cursor (replacing a selection) and focus returns to the field. The popup is keyboard accessible: the search box has focus, Arrow up/down move through the values, Enter picks, Escape closes, Tab reaches the categories.
-  - **What is listed** is what the validator accepts at that place, not a second set of rules: the server reads the scope at the node with the validator itself (`POST /workflows/scope`). Categories: *Ticket* (`trigger.ticket.*`), *Trigger input* (`trigger.input.*`), *Steps before* (the steps that ran before on every path, the body's steps after a loop, `if.taken`), *This loop* (`previous.<step>.*`, only inside a loop body), *Lane and run* (`trigger.id`, `trigger.kind`), *Failure* (`failure.*`, only in `onFailure`). A field the validator wants a default for (an optional result field, `previous.*` outside the `next` instruction) gets `{{… | default …}}` inserted. `trigger.issue` and `trigger.repo` stay accepted for older lanes and are not offered.
-  - **Target fields** take a literal or exactly **one** value (see [targets](#one-repository-per-run-and-targets)): the popup lists only the values the field takes (`targetRoots` of the scope call), the one reference shows as the only chip in place of the box, the **+** is greyed out while it is there (remove it to pick another), picking into a field that holds a literal replaces the literal, and the footer states the rule of the field. A field that takes a literal only has no picker.
-  - **Fields held to a type** (`wants` of the scope call): the instructions and the text inputs of an action list no object (it has no text form inside a text), the operands of `equals` and `notEquals` a text, choice, number or true/false, the operand of `empty` and `notEmpty` a list or a text. Other fields list every reachable value and say in the footer that the validator still checks the type; whether two operands fit each other (a choice against a text it can never be) is left to the validator. A value is inserted at the caret as it is when the value is picked, never inside an existing `{{…}}` (the nearest edge is taken) and never right after a `\` or `{` (which would turn it into text). The popup states the number of values it lists to screen readers.
-  - **Samples** come from the latest run of this lane (any version): the trigger's values and the output of each step that succeeded (the latest round); a value the run did not have has none. They are for orientation only and never part of the document.
-- **Validation on every change.** The document is sent to `POST .../workflows/validate` after a short pause. An error's `path` is a JSON pointer; the node it belongs to is the deepest step or trigger it runs through, which gets a red count on its card, and the inspector of that node shows the error in full: code, path, the validator's message and `available` as chips. Where `available` holds **exactly one** name and the value at `path` is a plain text (`profile_unknown`, `profile_archived`, `profile_version_unknown`, `environment_unknown`, `unknown_connector`, `unknown_trigger_kind`, `session_target_invalid`) the error has a one-click fix; nothing else is guessed. Errors about the lane as a whole (the name, the budget, no steps) show under the header whichever node is picked. The header says "Valid · n steps · $budget", or the number of errors and "not saved".
-- **Header**: **JSON** shows the document read only; **Run now** opens the Start form of the manual trigger (it starts the *saved* version, and says so when there are unsaved changes); **Save as vN** is on only for a document the validator accepted as it stands that differs from the saved one. It is `PUT .../workflows/<id>?expectedVersion=<current>`, so a lane saved by someone else since the page was opened is `WORKFLOW_VERSION_CONFLICT` (the page says so and keeps the changes). A saved document is always one the validator accepts, so the engine runs it.
-- **Lane card** (right column): the limits of the lane (`budgetUsd`, `turnTimeLimitMinutes`; a limit left out shows the default and is written when changed), the **MCP servers** of the lane (#1052: a checkbox per server of the workspace, by name; a server the lane names that the workspace no longer has is shown as missing and can be taken out; a server whose last test failed is marked broken), the versions, and the sentence that a turn ends with done or ask.
+All the text on the page comes from whoever saved the lane and is shown as text, never as markup. There is no diff between versions: the author's change description is what a person reads.
+
+### Versions and the change description
+
+Every save is a new version that is never changed. From version 2 on, a save also carries a **change description** (`changeDescription`, stored in `workflow_versions.change_description`, immutable like the version):
+
+- `PUT /workflows/<id>` takes it as the root key `changeDescription` next to the document's own keys; it is **not** part of the document (the document is closed: the validator would refuse the key) and the service takes it off before validating. It is one to 1,000 characters (counted in characters, not bytes), not only white space; leading and trailing white space is trimmed. Without a usable one the save is refused with `422` `WORKFLOW_CHANGE_DESCRIPTION_REQUIRED` and nothing is written (the check comes before the document is validated).
+- **It is text for people.** The validator and the engine never read it; write what changed against the previous version (for example "Raised the budget to 30 USD and added the review step"), not instructions for a run.
+- **Version 1** has none. The lane's `description` in the document serves, and a new lane must have one (`POST` refuses a document without a non-blank `description`, as `WORKFLOW_INVALID` at `/description`). The schema keeps `description` optional because lanes saved before have none; the rule is the save's.
+- **Versions saved before the column** (migration `20261120200000_add_workflow_version_change_description`, expand only: one nullable column) read `null`, and so does version 1. The lists of versions (`GET /workflows/<id>`, the lane page) show that as "no change description".
 
 ## Error codes
 
@@ -1609,26 +1729,34 @@ Beyond the form:
 | `condition_operand_type` | An operand of the wrong type, or two that cannot be compared. | Compare like with like; `empty` takes a list or a text. |
 | `condition_value_not_in_enum` | A text compared with a choice of names that can never hold it. | Use one of `available`. |
 | `instruction_next_outside_loop` | `instruction.next` in a step that is not in a loop. | Use a plain text, or put the step in a loop. |
-| `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or the step itself where it is not a direct step of a loop body; or a step with both `session.continue` and `branch`. | Use one of `available`, with the same profile and environment; or drop `branch` (a session that goes on keeps its branch). |
+| `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name, environment or `runner`, or (steps with settings of their own, #1105) one that differs in `harness`, `model`, `canPush` or `instructions` or takes its settings the other way (a profile against settings), or the step itself where it is not a direct step of a loop body; or a step with both `session.continue` and `branch`. | Use one of `available`, with the same profile and environment; or drop `branch` (a session that goes on keeps its branch). |
 | `repos_with_branch` | An agent step has `repos` and the `branch` of a session of its own (#1092). Reported at `repos`. | Take one of them out: with `repos` the branches are named in each entry. |
 | `repos_with_session_continue` | An agent step has `repos` and a `session` that is not `"new"` (`{"continue": …}`, or an object without `continue`, #1092). Reported at `repos`. | Leave `repos` out: a session that goes on keeps the repositories of the session it continues. |
 | `repo_duplicate` | Two entries of `repos` are one repository without regard to case (`Acme/App` and `acme/app`, #1092). Reported at the `repo` of the second. The engine reports the same for the filled-in references, as a failure of the step. | Name each repository once. |
 | `repo_name_clash` | Every entry of `repos` is a literal and two of them mount under one name without regard to case after the derivation (`acme/app`, `x/app` and `acme/acme__app` all give `acme__app`, #1092). Reported at the `repo` of the later one. The engine reports it for references, as a failure of the step. | Leave one of them out. |
+| `profile_with_inline_settings` | An agent step names a `profile` and also has settings of its own (`harness`, `model`, `canPush`, `instructions`, `setupScript`, `network`, `runner`, #1105). Reported at `profile`; `available` lists the keys of the settings. | Take the profile out and keep the settings, or take the settings out. |
+| `agent_settings_required` | An agent step names no `profile` and has none of the settings above (#1105). Reported at the step. | Name a `profile`, or write `model`, `canPush` and `runner` in the step. |
+| `model_not_allowed` | The workspace cannot run the `model` of a step's own settings (#1105): the reason is named, the same rule a profile's model gets when it is saved (a catalog entry that is not released or not allowed, a provider without a key). Not asked for the harness `claude-code`. | Take a model from `GET /api/w/<slug>/implementer/models`. |
+| `hosted_only_setting` | `setupScript` or `network` in a step whose runner is self-hosted, or whose environment runs on a runner (#1105, ADR 0007, decision 11): that machine's setup and network are its owner's. Reported at the field. | Take it out, or name a hosted runner. |
+| `runner_required` | A step with settings of its own names neither a `runner` nor an `environment` (#1105). Reported at `runner`; `available` lists the ids of the runners. | Name a runner by its id. |
+| `runner_with_environment` | A step names a `runner` and an `environment` (#1105). Reported at `environment`: a step runs in one place, and `environment` is only for documents written before the runner. | Take the environment out and keep the runner. |
+| `runner_unknown` | The `runner` of a step is the id of no runner of this workspace, the id of a **revoked** runner, or a runner's name where the id is wanted (#1105, ADR 0007, decision 14). Reported at `runner`; `available` lists the ids of the runners that can be named (hosted runners first), the message pairs them with their names. | Write one of `available`. A runner that was registered again has a new id. |
+| `network_host_invalid` | A host in the `network` rule of a step's own settings is no host name the rule can hold: an address, a port, a scheme or a path (#1105). The shape of the rule (mode, `hosts` only with `list`, one to 100 hosts) is the schema's. | Write an exact name (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`). |
 | `profile_unknown` | No such profile. | Use one of `available`. |
 | `profile_archived` | The profile exists but is archived: no step may run it. | Use one of `available`. |
 | `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |
-| `environment_unknown` | No such environment in the workspace; or, at the step's `/profile`, the environment of the profile version was removed. | Use one of `available`, or create it on the Environments page; for a removed one save a new version of the profile. |
+| `environment_unknown` | No such environment in the workspace; or, at the step's `/profile`, the environment of the profile version was removed. | Use one of `available`; for a removed one save a new version of the profile. |
 | `environment_mismatch` | The step names an `environment` other than the one of its profile (#919). `available` is the profile's. | Leave `environment` out of the step. |
-| `environment_required` | The step names no `environment` and its profile version names none (saved before #919). `available` lists the environments. | Name one in the step, or save a new version of the profile with an `environment`. |
-| `runner_needs_own_key` | An agent step runs a profile with a managed model (an entry of the platform's catalog, on the platform's key) in an environment that runs on a runner. A runner works with the workspace's own key. | Use a profile with a model of your own key, or an environment that runs on a platform VM. |
-| `harness_needs_runner` | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM. Such a harness exists only on a runner. | Use an environment that runs on a runner. |
-| `no_runner_announces` | An agent step runs a profile in an environment that runs on a runner, a runner with the environment's labels is online, and none of those announces the harness, the auth and the model the profile asks for (#973): for example `claude-code` on a subscription with the model `opus` when the online runners announce only `sonnet`. The runners announce `harnesses` entries (`docs/runner.md`, "Routing"). It is a **warning** (`severity: "warning"`, listed in `warnings`, never in `errors`; the workflow is `valid` and saves): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. Nothing is said while no runner with the labels is online: the turn waits for one. | Use a model or a harness the runner announces, or start a runner that does; or save anyway, the turn waits. |
+| `environment_required` | The step names no `environment` and its profile version names none (saved before #919), or it carries its settings itself (#1105) and so has no profile to say where it works. `available` lists the environments. | Name one in the step, or save a new version of the profile with an `environment`. |
+| `runner_needs_own_key` | An agent step runs a profile with a managed model (an entry of the platform's catalog, on the platform's key) in an environment that runs on a runner, or a step with settings of its own names a managed model and a **self-hosted runner** (#1105). A runner works with the workspace's own key. | Use a model of your own key, or a hosted runner (or an environment that runs on a platform VM). |
+| `harness_needs_runner` | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM, or a step with settings of its own names such a harness and a **hosted runner** (#1105). Such a harness exists only on a self-hosted runner. | Name a self-hosted runner (or an environment that runs on a runner). |
+| `no_runner_announces` | An agent step runs a profile in an environment that runs on a runner (or a step names a self-hosted runner, #1105: judged over **that runner's own** announcement), a runner with the environment's labels is online, and none of those announces the harness, the auth and the model the profile asks for (#973): for example `claude-code` on a subscription with the model `opus` when the online runners announce only `sonnet`. The runners announce `harnesses` entries (`docs/runner.md`, "Routing"). It is a **warning** (`severity: "warning"`, listed in `warnings`, never in `errors`; the workflow is `valid` and saves): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. Nothing is said while no runner with the labels is online: the turn waits for one. | Use a model or a harness the runner announces, or start a runner that does; or save anyway, the turn waits. |
 | `mcp_server_unknown` | `mcp` of the lane names a server this workspace does not have: it never existed, it was removed, or it belongs to another workspace (the answer is the same). `available` lists the ids of the servers there are. | Name a server of the MCP page by its id, or take the entry out. |
 | `mcp_server_not_in_lane` | `mcp` of an agent step names a server the lane does not name: a step narrows the lane's list and never adds to it. A step with a list on a lane without `mcp` is this too. `available` lists the lane's servers. | Add the server to the `mcp` of the lane, or take it out of the step. |
 | `mcp_server_broken` | A **warning** (`severity: "warning"`, in `warnings`, never in `errors`; the workflow is `valid` and saves): the lane names an MCP server whose last connection test failed, or an OAuth server that nobody connected or whose grant ended (`broken`). | Test the server again on the MCP page, or connect or reconnect it there, or save anyway. |
 | `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`). | Rename it. |
 | `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
-| `repo_required` | A manual or api trigger without `input` that declares `ticket` (type `ticket`, required) or `repo` as a required text: the run has no repository. | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`. |
+| `repo_required` | The `input` of a manual or api trigger declares neither `ticket` (type `ticket`, required) nor `repo` as a required text: the run has no repository. A trigger **without** `input` is fine (#1106): it works on the project's repository. | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`, or leave `input` out. |
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
 | `duplicate_trigger_label` | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first. | Give one of them another label, or merge them. |
 | `label_retriggers_workflow` | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may. | Remove the label instead, or add another one. |
@@ -1651,6 +1779,7 @@ Beyond the form:
 | `WORKFLOW_PROJECT_REQUIRED` | 400 | `projectId` is missing from a list or a creation; `issues` names it and `available` the projects of the workspace. |
 | `WORKFLOW_PROJECT_NOT_FOUND` | 404 | `projectId` is no project of this workspace (another workspace's looks the same). |
 | `WORKFLOW_PROJECT_INACTIVE` | 409 | The project is switched off and takes no new lane. |
+| `WORKFLOW_CHANGE_DESCRIPTION_REQUIRED` | 422 | A new version (`PUT`) has no `changeDescription`, or it is not a text, only white space, or longer than 1,000 characters. Nothing is saved; send the document again with a sentence on what changed against the version before. |
 | `WORKFLOW_NAME_TAKEN` | 409 | The project has a lane of that name that is not archived (case ignored; for a lane without a project, the workspace). |
 | `WORKFLOW_LIMIT_REACHED` | 409 | The project holds 100 workflows that are not archived (`maximum`; the lanes without a project count together, #937). |
 | `WORKFLOW_ARCHIVE_LIMIT_REACHED` | 409 | The workspace holds 1000 archived workflows: one more cannot be archived (`maximum`). |

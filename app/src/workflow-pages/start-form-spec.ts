@@ -14,7 +14,12 @@ export type StartField = {
   kind: "string" | "integer" | "number" | "boolean" | "json" | "ticket";
   /** The allowed values of a string field with a list of names. */
   choices?: string[];
+  /** A text the schema lets grow past one line (`maxLength` over `LONG_TEXT_FROM`): the form gives it a box. */
+  long?: boolean;
 };
+
+/** The `maxLength` from which a text field is a box and not a line: a name or a branch is short, a task is not. */
+const LONG_TEXT_FROM = 500;
 
 /** The form of one manual trigger. `trigger` is its id, sent with the start; a document with the single `trigger` of before #916 has none. */
 export type StartFormFields = { fields: StartField[]; trigger?: string };
@@ -27,6 +32,8 @@ export type StartFormSpec =
   | { kind: "forms"; forms: (StartFormFields & { trigger: string })[] };
 
 function fieldsOf(input: unknown): StartField[] | undefined {
+  // #1106: a trigger without `input` takes no fields: the form is only the button.
+  if (input === undefined) return [];
   const schema = validateResultSchema(input, "", { allowTicket: true }).schema;
   if (schema === undefined) return undefined;
   const required = new Set(schema.required ?? []);
@@ -41,6 +48,12 @@ function fieldsOf(input: unknown): StartField[] | undefined {
       if (node.description !== undefined) field.description = node.description;
       if (node.type === "string" && node.enum !== undefined)
         field.choices = [...node.enum];
+      else if (
+        node.type === "string" &&
+        node.maxLength !== undefined &&
+        node.maxLength > LONG_TEXT_FROM
+      )
+        field.long = true;
       return field;
     },
   );

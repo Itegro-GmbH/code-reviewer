@@ -47,6 +47,7 @@ function renderPicker(
     setBoard?: SetupApi["setBoard"];
     board?: string | null;
     canChange?: boolean;
+    readOnlyNote?: string;
     onSaved?: () => void;
   } = {},
 ) {
@@ -65,6 +66,9 @@ function renderPicker(
       repositoryId="repo-1"
       board={board}
       canChange={options.canChange ?? true}
+      {...(options.readOnlyNote === undefined
+        ? {}
+        : { readOnlyNote: options.readOnlyNote })}
       {...(options.onSaved === undefined ? {} : { onSaved: options.onSaved })}
       api={api}
     />
@@ -258,5 +262,20 @@ describe("the board picker", () => {
     expect(screen.queryByRole("combobox")).toBeNull();
     expect(screen.getByText(/A board is set on this project/)).toBeTruthy();
     expect(boards).not.toHaveBeenCalled();
+  });
+
+  // #1108: in the factory the board is shown and an AI sets it through the API.
+  it("says what it is given in place of the sentence about roles, and still offers no choice", () => {
+    renderPicker({
+      canChange: false,
+      board: "PVT_1",
+      readOnlyNote: "An AI sets the board through the API.",
+    });
+
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(
+      screen.getByText(/An AI sets the board through the API\./),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Only an Admin or an Owner/)).toBeNull();
   });
 });

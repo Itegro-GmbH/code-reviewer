@@ -24,7 +24,7 @@ export const PAGE_COPY = {
   empty: "No runner yet. Owners and Admins can add one.",
   kindsTitle: "Two kinds, one protocol",
   kindsHint:
-    "Both talk the Runner API. A profile says on which of them it runs: the Runs on field of the profile, an environment of the workspace.",
+    "Both talk the Runner API. An agent step of a lane names the runner it runs on.",
   hostedName: "Hosted sandbox",
   hostedDescription:
     "A fresh sandbox of the platform for every run: nothing to install.",
@@ -33,8 +33,8 @@ export const PAGE_COPY = {
   ownName: "Your own runner",
   ownDescription:
     "A machine of yours that connects from your network and takes the jobs of this workspace. Claude Code runs only here, on your subscription.",
-  environmentsNote: "The size and the setup script of a sandbox are kept as",
-  environmentsLink: "environments",
+  environmentsNote:
+    "The size of a hosted sandbox is its type, for example Vercel Sandbox 4 vCPU; the setup script and the network rule are set in the agent step of the lane.",
   connected: (count: number) => `Connected · ${String(count)}`,
   addRunner: "Connect your own runner",
   tokenTitle: "Connect your own runner",
@@ -90,6 +90,10 @@ const failureCopy = (
     typeof failure.maximum === "number" && Number.isFinite(failure.maximum)
       ? `The workspace holds ${failure.maximum} registration tokens that nobody used yet. Use one, or wait an hour for them to run out.`
       : "The workspace holds as many unused registration tokens as it may. Use one, or wait an hour for them to run out.",
+  RUNNER_FLEET_NAME_INVALID:
+    "A runner's name is one line of 1 to 80 characters.",
+  RUNNER_FLEET_NAME_TAKEN:
+    "A runner or a hosted runner of this workspace already has this name. Choose another.",
 });
 
 function hasCopy(code: string): code is RunnerFleetErrorCode {

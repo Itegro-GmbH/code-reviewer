@@ -316,7 +316,7 @@ describe("the New project dialog", () => {
       expect(createProject).toHaveBeenCalledWith({
         repositoryId: "repo-2",
         board: { projectV2Id: "PVT_board1" },
-        lanes: ["issue-to-pr"],
+        lanes: ["one-off-task", "issue-to-pr"],
       }),
     );
     await waitFor(() =>
@@ -325,7 +325,7 @@ describe("the New project dialog", () => {
   });
 
   // #922-T32
-  it("creates a project without a board when the repository has none, and with both lanes by default", async () => {
+  it("creates a project without a board when the repository has none, and with the default lanes", async () => {
     const user = userEvent.setup();
     const { api, createProject } = fakeApi(
       Promise.resolve({ ok: true, data: { available: true, boards: [] } }),
@@ -347,7 +347,7 @@ describe("the New project dialog", () => {
       expect(createProject).toHaveBeenCalledWith({
         repositoryId: "repo-2",
         board: null,
-        lanes: ["issue-to-pr", "review-a-pull-request"],
+        lanes: ["one-off-task", "issue-to-pr", "review-a-pull-request"],
       }),
     );
   });
@@ -604,7 +604,7 @@ describe("the New project dialog with a Jira project (#1038)", () => {
           connectionId: "conn-1",
           projectKey: "OPS",
         },
-        lanes: ["issue-to-pr-status", "review-a-pull-request"],
+        lanes: ["one-off-task", "issue-to-pr-status", "review-a-pull-request"],
       }),
     );
     await waitFor(() =>

@@ -33,6 +33,12 @@ export const WORKSPACE_ACTIONS = [
   "manage_runners",
   /** The MCP servers of the workspace: add, change, test and remove them (#1050; factory only, the routes do not exist elsewhere). Every member sees the list. */
   "manage_mcp",
+  /**
+   * Save lanes: create, save a new version, archive (ADR 0007 decision 12). A lane carries each agent step's model, push right, instructions,
+   * setup script and network rule, which a profile page and an environment used to gate; whoever saves decides them. Members read, validate,
+   * start, discard, pause and answer (`start_implementer_task`). Copying the built-in lanes into a new project is part of creating one (`manage_projects`).
+   */
+  "manage_workflows",
   /** Change the settings of one project. */
   "change_project_settings",
   /** Switch a project on or off: which repositories are reviewed (and paid for). */
@@ -72,6 +78,7 @@ export const MINIMUM_ROLE: Record<WorkspaceAction, WorkspaceRole> = {
   manage_implementer_environments: "admin",
   manage_runners: "admin",
   manage_mcp: "admin",
+  manage_workflows: "admin",
   change_project_settings: "member",
   manage_projects: "admin",
   manage_review_defaults: "admin",

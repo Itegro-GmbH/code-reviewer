@@ -28,6 +28,11 @@ App** (the Worker API, `crj_`, everywhere).
    `cr:managed` and its size label when it is enqueued, a runner turn the labels of its environment. The two special rules are this one rule. The
    claim without a `jobId` returns the oldest due job the caller matches (labels, workspace, harness); with a `jobId` it works as before while the hosted
    Dispatcher is still woken by id. The claim answer names the size label (`sizeLabel`), which the Dispatcher checks; the VM size stays the environment's `vcpus` or the operator's configuration.
+   **Amended by [ADR 0007](0007-ai-configured-factory.md), decision 10 (#1105):** one more reserved label, **`cr:runner:<id>`**, routes a job of a lane step to **one
+   concrete self-hosted runner**. It is carried only by the credential of the runner with that id: the claim adds it to the labels of a customer's runner, derived from the
+   credential's row and never from an announcement (a runner that announces any `cr:` label is still refused, `RUNNER_LABEL_RESERVED`), and the doorbell's pairing adds it the
+   same way. A job that requires it is that runner's alone; the platform identity and every other runner lack it. The rule itself ("all labels") does not change, and neither does
+   the Dispatcher.
 2. **Delivery** (#972). The claim is the only way to a job. A poll, the doorbell (a webhook without data) or a freed slot triggers it. The doorbell goes
    to every matching webhook dispatcher and the first claim wins. A full dispatcher declines and forgets; the app rings again on events (a job is
    enqueued, a job of its group ended) and the sweep stays the rare safety net.

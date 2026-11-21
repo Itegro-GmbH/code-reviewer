@@ -25,6 +25,7 @@ import {
   isReservedLabel,
   MANAGED_LABEL,
   PLATFORM_LABELS,
+  runnerLabel,
 } from "../../runner-identity/labels.ts";
 
 /** Everything a claim writes onto the job it hands out. */
@@ -54,12 +55,73 @@ export type JobClaim = {
  */
 export type ClaimScope = {
   customerRunner: {
+    /**
+     * #1105 (ADR 0007, decision 10): the id of the runner row the credential belongs to. The claim adds the label `cr:runner:<id>` to the
+     * runner's labels, so a job of a step that names this runner is its alone. It comes from the authenticated credential, never from what
+     * the runner announced.
+     */
+    runnerId: string;
     workspaceId: string;
     labels: readonly string[];
     /** The entries of its manifest: what it can run. */
     access: readonly HarnessAccess[];
   };
 };
+
+/**
+ * #1105 (ADR 0007, "Concurrency"): the job is the turn of a **hosted runner** (an `implementer_environments` row with a `concurrency`, which a
+ * turn copied by its id) that already runs as many turns as its concurrency. `jobIdColumn` is the job's id in the statement it goes into.
+ * Counted per hosted runner, that is per type and workspace: the running jobs whose turn copied the same row. A turn of an environment of a
+ * person (no `concurrency`) is never at one. The claim runs under the exclusive gate lock, so two claims cannot both count below the limit.
+ */
+export function hostedRunnerAtConcurrency(jobIdColumn: string) {
+  return sql<boolean>`exists (
+    select 1
+      from implementer_turns as capped
+      join implementer_environments as hosted
+        on hosted.id = capped.environment_id
+       and hosted.workspace_id = capped.workspace_id
+       and hosted.concurrency is not null
+     where capped.job_id = ${sql.ref(jobIdColumn)}
+       and capped.environment_kind is null
+       and (select count(*)
+              from jobs as running
+              join implementer_turns as held on held.job_id = running.id
+             where running.status = 'running'
+               and held.environment_id = hosted.id
+               and held.workspace_id = hosted.workspace_id
+               and held.environment_kind is null) >= hosted.concurrency
+  )`;
+}
+
+/**
+ * #1105 (review of part 2, finding 4): a place of the hosted runner this job's turn copied was freed after `since`, by a job that had been claimed
+ * and ended. The give-up (`failUndispatched`) counts a job's age from its last wait, not from when it was last blocked, so a job that waited
+ * hours behind a full runner would be failed the moment a place freed and before its claim; this keeps it for the give-up time after the place
+ * freed. A job whose turn copied no hosted runner is never this.
+ */
+export function hostedRunnerFreedSince(jobIdColumn: string, since: string) {
+  return sql<boolean>`exists (
+    select 1
+      from implementer_turns as waiting_turn
+      join implementer_environments as hosted
+        on hosted.id = waiting_turn.environment_id
+       and hosted.workspace_id = waiting_turn.workspace_id
+       and hosted.concurrency is not null
+     where waiting_turn.job_id = ${sql.ref(jobIdColumn)}
+       and waiting_turn.environment_kind is null
+       and exists (
+         select 1
+           from jobs as ended
+           join implementer_turns as held on held.job_id = ended.id
+          where held.environment_id = hosted.id
+            and held.workspace_id = hosted.workspace_id
+            and held.environment_kind is null
+            and ended.claimed_at is not null
+            and ended.status not in ('queued', 'running')
+            and ended.finished_at > ${since})
+  )`;
+}
 
 /** Enough for every pull request in the queue to be tried; a bug fails instead of looping. */
 const MAX_CLAIM_ATTEMPTS = 100;
@@ -125,11 +187,17 @@ function claimQuery(
     sql`, `,
   );
   // #971: the labels of the caller. The platform identity has the reserved ones and a customer's runner its own, from which the reserved
-  // namespace is dropped again here: it is the identity that may carry them, never the text a runner once announced.
+  // namespace is dropped again here: it is the identity that may carry them, never the text a runner once announced. #1105: and the one
+  // reserved label of its own id (`cr:runner:<id>`), which is derived from the credential's row and which no other runner has.
   const callerLabels =
     scope === undefined
       ? [...PLATFORM_LABELS]
-      : scope.customerRunner.labels.filter((label) => !isReservedLabel(label));
+      : [
+          ...scope.customerRunner.labels.filter(
+            (label) => !isReservedLabel(label),
+          ),
+          runnerLabel(scope.customerRunner.runnerId),
+        ];
   const labels =
     callerLabels.length === 0
       ? sql`'{}'::text[]`
@@ -165,6 +233,7 @@ function claimQuery(
   const routing =
     scope === undefined
       ? sql`${labelRule}
+        and not ${hostedRunnerAtConcurrency("due.id")}
         and not exists (
           select 1 from implementer_turns as routed
           where routed.job_id = due.id and not ${accessRule(entries, "routed")}

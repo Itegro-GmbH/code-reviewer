@@ -77,20 +77,21 @@ describe("the routes of the Implementer form without the capability", () => {
     );
   });
 
-  // #756-T09
-  it("has the page of the form in the table, so the loops below cover it", () => {
-    expect(implementerRoutes).toContain("/w/[workspace]/implementer");
+  // #756-T09, #1105: the page of the form is gone (ADR 0007 decision 15); its routes stay until release B.
+  it("has no page of the form in the table any more, and still its routes", () => {
+    expect(implementerRoutes).not.toContain("/w/[workspace]/implementer");
+    expect(implementerRoutes).toContain("/api/w/[workspace]/implementer/tasks");
   });
 
-  // #818-T15
-  it("has the environments routes and page in the table, so the loops below cover them", () => {
+  // #818-T15, #1105: the page of the environments is gone; its routes stay until release B.
+  it("has the environments routes in the table, so the loops below cover them, and no page", () => {
     expect(implementerRoutes).toEqual(
       expect.arrayContaining([
         "/api/w/[workspace]/environments",
         "/api/w/[workspace]/environments/[environmentId]",
-        "/w/[workspace]/environments",
       ]),
     );
+    expect(implementerRoutes).not.toContain("/w/[workspace]/environments");
   });
 
   // #755-T10

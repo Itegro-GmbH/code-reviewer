@@ -7,6 +7,11 @@
 // a customer's runner that announces one is refused (`reservedLabelIssues`).
 //
 // A job of a runner environment requires the labels of that environment, which are the customer's own and never start with `cr:`.
+//
+// One exception to "only the platform identity carries a `cr:` label" (ADR 0007, decision 10, which amends ADR 0005 §1): the reserved label
+// `cr:runner:<id>`. A step of a lane names a concrete self-hosted runner, and its job requires that runner's label; the claim of a runner's
+// credential adds the label of its own id, read from the credential's row and never from what the runner announced, so no other runner
+// has it. A runner that announces any `cr:` label is still refused at registration.
 
 /** The prefix no customer's runner may announce. */
 export const RESERVED_LABEL_PREFIX = "cr:";
@@ -27,6 +32,35 @@ export const REVIEW_VCPUS = 1;
 export const DEFAULT_IMPLEMENTER_VCPUS = 2;
 
 const SIZE_PREFIX = "cr:size-";
+
+/** The prefix of the label that routes a job to one concrete self-hosted runner (ADR 0007, decision 10). */
+export const RUNNER_LABEL_PREFIX = "cr:runner:";
+
+/** The label only the credential of the runner with this id carries: a job that requires it is that runner's alone. */
+export function runnerLabel(runnerId: string): string {
+  return `${RUNNER_LABEL_PREFIX}${runnerId}`;
+}
+
+/**
+ * The runner a label of the form `cr:runner:<id>` names, or undefined for any other label. The form is exact (lower case, no spacing): a
+ * label that only looks like one is a reserved label like any other and routes nothing.
+ */
+export function runnerIdOfLabel(label: string): string | undefined {
+  if (!label.startsWith(RUNNER_LABEL_PREFIX)) return undefined;
+  const id = label.slice(RUNNER_LABEL_PREFIX.length);
+  return id === "" || id !== id.trim() ? undefined : id;
+}
+
+/** The runner among the labels a job requires, or undefined for a job that is not a named self-hosted runner's. */
+export function runnerIdOfRequiredLabels(
+  labels: readonly string[] | null | undefined,
+): string | undefined {
+  for (const label of labels ?? []) {
+    const id = runnerIdOfLabel(label);
+    if (id !== undefined) return id;
+  }
+  return undefined;
+}
 
 /** The label of a VM size. */
 export function sizeLabel(vcpus: number): string {
@@ -86,15 +120,27 @@ export function hasAllLabels(
  * The labels a turn of the Implementer requires, from the environment it was started with: a runner environment's own labels, or
  * `cr:managed` and the size of a hosted environment (the Dispatcher's size for the kind when the task has none). A runner environment
  * stored before the namespace was reserved may hold `cr:` labels; they are dropped, or the turn would be one the platform could take.
+ * The one `cr:` label that stays is `cr:runner:<id>` (ADR 0007, decision 10): the copy of a step that named a self-hosted runner holds
+ * exactly that label and no other, and the job then requires the label of that runner alone.
  */
 export function requiredLabelsOfTurn(environments: {
   environment?: { vcpus: number } | null;
-  runnerEnvironment?: { labels: readonly string[] } | null;
+  runnerEnvironment?: { id: string; labels: readonly string[] } | null;
 }): string[] {
-  if (environments.runnerEnvironment)
+  if (environments.runnerEnvironment) {
+    const [only] = environments.runnerEnvironment.labels;
+    if (
+      environments.runnerEnvironment.labels.length === 1 &&
+      only !== undefined &&
+      runnerIdOfLabel(only) !== undefined &&
+      // The label must name the runner the copy is of: a stored copy that merely has the shape of one is not trusted.
+      runnerIdOfLabel(only) === environments.runnerEnvironment.id
+    )
+      return [only];
     return environments.runnerEnvironment.labels.filter(
       (label) => !isReservedLabel(label),
     );
+  }
   return hostedLabels(
     environments.environment?.vcpus ?? DEFAULT_IMPLEMENTER_VCPUS,
   );

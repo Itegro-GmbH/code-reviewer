@@ -55,6 +55,7 @@ const SCOPED = [
   "workflow-runs-repository.ts",
   "profiles-repository.ts",
   "runners-repository.ts",
+  "named-runners-repository.ts",
 ] as const;
 
 /**

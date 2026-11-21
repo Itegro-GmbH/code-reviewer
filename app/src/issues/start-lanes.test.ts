@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { builtInLaneDocument } from "../workflows/built-in-lanes.ts";
+import { EXAMPLE_BUILT_IN_AGENTS } from "../workflows/test-fixtures.ts";
 import { startLaneOf } from "./start-lanes.ts";
 
 const ticketInput = (
@@ -27,7 +28,7 @@ describe("the lanes that can start from an issue", () => {
     const found = startLaneOf(
       "wf-1",
       "Issue to PR",
-      builtInLaneDocument("issue-to-pr", "node"),
+      builtInLaneDocument("issue-to-pr", EXAMPLE_BUILT_IN_AGENTS),
     );
 
     expect(found).toMatchObject({

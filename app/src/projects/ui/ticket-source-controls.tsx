@@ -20,6 +20,7 @@ export function TicketSourceControls({
   showResync,
   switchedOn,
   staleness,
+  readOnlyNote,
 }: {
   workspaceSlug: string;
   projectId: string;
@@ -33,6 +34,8 @@ export function TicketSourceControls({
   /** Whether the project is switched on: a switched-off project reads no tickets. */
   switchedOn: boolean;
   staleness: SyncStaleness | null;
+  /** What a picker that may not change the board says instead of the sentence about roles. */
+  readOnlyNote?: string;
 }) {
   const [boardChanges, setBoardChanges] = useState(0);
   return (
@@ -46,6 +49,7 @@ export function TicketSourceControls({
         resync={
           showResync ? "offered" : switchedOn ? "not_allowed" : "switched_off"
         }
+        {...(readOnlyNote === undefined ? {} : { readOnlyNote })}
         onSaved={() => setBoardChanges((count) => count + 1)}
       />
       {showResync ? (

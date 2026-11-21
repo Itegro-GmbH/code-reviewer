@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { TrackerError } from "../tracker/errors.ts";
 import { builtInLaneDocument } from "../workflows/built-in-lanes.ts";
 import { loadIssuesPage } from "./load.ts";
+import { EXAMPLE_BUILT_IN_AGENTS } from "../workflows/test-fixtures.ts";
 import { ticketList, ticket } from "./test-fixtures.ts";
 
 function deps(
@@ -28,7 +29,9 @@ function deps(
     overrides.get ??
       (async (id: string) => {
         if (id === "wf-broken") throw new Error("unreadable");
-        return { document: builtInLaneDocument("issue-to-pr", "node") };
+        return {
+          document: builtInLaneDocument("issue-to-pr", EXAMPLE_BUILT_IN_AGENTS),
+        };
       }),
   );
   return {

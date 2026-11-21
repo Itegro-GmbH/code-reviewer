@@ -583,18 +583,18 @@ describe("the agent step", () => {
     codes(change(base, (d) => edit(agentSteps(d)[0] as Json)));
 
   // #833-M1-T52
-  it("needs profile and instruction, and refuses a field it does not know", () => {
+  it("needs its settings (a profile, or #1105 its own) and an instruction, and refuses a field it does not know", () => {
     expect(
       first((s) => {
         delete s.profile;
         delete s.environment;
         delete s.instruction;
-        s.model = "x";
+        s.mood = "x";
       }),
     ).toEqual([
+      ["/steps/0", "agent_settings_required"],
       ["/steps/0/instruction", "missing_field"],
-      ["/steps/0/model", "unknown_field"],
-      ["/steps/0/profile", "missing_field"],
+      ["/steps/0/mood", "unknown_field"],
     ]);
   });
 

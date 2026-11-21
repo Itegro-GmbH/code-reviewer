@@ -7,7 +7,7 @@
 // of the form (`model-fieldset`, `review-fieldset`, `when-fieldset`) build their fields from these,
 // so the markup and the accessible wiring live in one place. Values typed by people (a model name, the
 // project rules) are rendered as text, never as markup.
-import { useId, type ReactNode } from "react";
+import { createContext, useContext, useId, type ReactNode } from "react";
 import { Badge } from "../../components/ui/badge.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { Card, CardContent } from "../../components/ui/card.tsx";
@@ -79,17 +79,27 @@ export function settingsOrigin({
   };
 }
 
+/**
+ * Whether the card a control sits in is disabled (read only, or busy). A fieldset disables its controls in a browser, but the buttons that
+ * change a value (a reset, "Edit skill") also say it themselves and ignore a click, so a read only form cannot be changed by one of them.
+ */
+export const FieldsDisabledContext = createContext(false);
+
 export function Origin({ origin }: { origin: SettingsOrigin }) {
+  const disabled = useContext(FieldsDisabledContext);
   return (
     <span className="flex flex-wrap items-center gap-2">
       <Badge variant="neutral">{origin.source}</Badge>
       {origin.resetLabel !== null ? (
         <button
           type="button"
-          onClick={origin.onReset}
+          disabled={disabled}
+          onClick={() => {
+            if (!disabled) origin.onReset();
+          }}
           aria-label={origin.resetAriaLabel}
           className={cn(
-            "inline-flex min-h-8 cursor-pointer items-center rounded-sm px-1 text-xs font-semibold text-foreground pointer-coarse:min-h-11",
+            "inline-flex min-h-8 cursor-pointer items-center rounded-sm px-1 text-xs font-semibold text-foreground pointer-coarse:min-h-11 disabled:cursor-not-allowed disabled:opacity-50",
           )}
         >
           {origin.resetLabel}
@@ -352,7 +362,9 @@ export function SettingsCard({
               {title}
             </h2>
           </FieldLegend>
-          {children}
+          <FieldsDisabledContext.Provider value={disabled}>
+            {children}
+          </FieldsDisabledContext.Provider>
         </FieldSet>
       </CardContent>
     </Card>

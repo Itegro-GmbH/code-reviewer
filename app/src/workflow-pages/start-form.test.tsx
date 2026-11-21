@@ -94,6 +94,47 @@ describe("the fields", () => {
   });
 });
 
+describe("the form of the one-off lane (#1105)", () => {
+  // #1105-T421
+  it("asks for the task in a box, refuses it empty and sends it as the only input", async () => {
+    const user = userEvent.setup();
+    const api = apiAnswering(ok(run({ id: "run-3" })));
+    render(
+      <StartForm
+        workspaceSlug="acme"
+        workflowId="wf-1"
+        trigger="manual"
+        fields={[
+          {
+            name: "task",
+            required: true,
+            kind: "string",
+            long: true,
+            description: "What the agent should do",
+          },
+        ]}
+        api={api}
+      />,
+    );
+
+    const box = screen.getByLabelText("task");
+    expect(box.tagName).toBe("TEXTAREA");
+    expect(screen.getByText("What the agent should do")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+    expect(api.start).not.toHaveBeenCalled();
+
+    await user.type(box, "Rename the helper");
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(api.start).toHaveBeenCalledWith("wf-1", {
+      trigger: "manual",
+      input: { task: "Rename the helper" },
+      clientRequestId: expect.stringMatching(/^[\x21-\x7e]{1,200}$/),
+    });
+  });
+});
+
 describe("the ticket and the trigger (#916)", () => {
   // #916-T120
   it("asks for the ticket as a text with its hint, and sends it trimmed with the id of the trigger", async () => {
@@ -164,6 +205,21 @@ describe("what is sent", () => {
         "/w/acme/workflows/wf-1/runs/run-9",
       ),
     );
+  });
+
+  // #1106
+  it("starts a lane whose trigger has no input with no field filled in: an empty input goes to the start", async () => {
+    const user = userEvent.setup();
+    const api = apiAnswering(ok(run({ id: "run-10" })));
+    renderForm(api, []);
+
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(api.start).toHaveBeenCalledWith("wf-1", {
+      input: {},
+      clientRequestId: expect.stringMatching(/^[\x21-\x7e]{1,200}$/),
+    });
   });
 
   // #873-T52

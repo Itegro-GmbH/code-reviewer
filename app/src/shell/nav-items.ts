@@ -7,8 +7,9 @@
 // daily work (Projects, Runs), then a separator, then the workspace administration (Connections, Members, Settings); #168 says
 // Members stays a top-level item. The first place is the QA area, which the product names (`qaAreaName`, #757): its address is
 // `/projects` in every product. The factory (#925) has the list of its app shell instead: ToDos (with the count of what waits for
-// the person), Projects, Runs, Profiles, Runners, MCP (#1050), Settings. Its workspace administration (members, the GitHub App, billing) is one
-// place, Settings, with tabs; there are no favorites and no lanes outside a project.
+// the person), Projects, Runs (the control panel), then Setup (GitHub and Jira, MCP servers (#1050), Runners, LLM keys: only integrations to link,
+// #1108), then Settings. Its workspace administration (members, billing) is one place, Settings, with tabs; there are no favorites and no
+// lanes outside a project, and no place for profiles or environments (ADR 0007).
 import {
   createCapabilitySet,
   type Capability,
@@ -25,8 +26,11 @@ type NavPlace = {
   label: string | ((product: ProductIdentity) => string);
   capability?: Capability;
   badge?: NavBadge;
+  /** Places below this one that belong to another place of the list (Settings is not current on the pages of Setup). */
+  notCurrentBelow?: readonly string[];
 };
-const NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
+type NavGroupSpec = { label?: string; items: readonly NavPlace[] };
+const NAV_GROUPS: readonly NavGroupSpec[] = [
   {
     items: [
       {
@@ -46,9 +50,19 @@ const NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
   },
 ];
 
-/** The places of the factory (#925); a deployment with the `implementer` capability shows these and no other. */
-const FACTORY_NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
+/** The paths of the pages that Setup lists; they sit below `/settings` but are not part of the workspace settings in the sidebar. */
+const SETUP_SETTINGS_PATHS = ["/settings/integrations", "/settings/llm"];
+
+/**
+ * The places of the factory (#925, #1108); a deployment with the `implementer` capability shows these and no other. The person has two
+ * areas and nothing else to configure (ADR 0007, decision 7): the **control panel** (what waits for them, the projects with their lanes,
+ * the runs) and **Setup**, which only links integrations (GitHub and Jira, the MCP servers, the runners, the LLM keys). The workspace
+ * itself (members, billing, the name) stays under Settings. Lanes are configured through the API by an AI (decision 8), so there is no
+ * place for profiles, environments or the Implementer here.
+ */
+const FACTORY_NAV_GROUPS: readonly NavGroupSpec[] = [
   {
+    label: "Control panel",
     items: [
       {
         path: "/todos",
@@ -58,11 +72,30 @@ const FACTORY_NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
       },
       { path: "/projects", label: "Projects", capability: "review" },
       { path: "/runs", label: "Runs", capability: "review" },
-      { path: "/profiles", label: "Profiles", capability: "implementer" },
-      { path: "/runners", label: "Runners", capability: "implementer" },
+    ],
+  },
+  {
+    label: "Setup",
+    items: [
+      {
+        path: "/settings/integrations",
+        label: "GitHub and Jira",
+        capability: "implementer",
+      },
       // The MCP servers of the workspace (#1050): the tools an agent may use, next to the machines it runs on.
-      { path: "/mcp", label: "MCP", capability: "implementer" },
-      { path: "/settings", label: "Settings" },
+      { path: "/mcp", label: "MCP servers", capability: "implementer" },
+      { path: "/runners", label: "Runners", capability: "implementer" },
+      { path: "/settings/llm", label: "LLM keys", capability: "implementer" },
+    ],
+  },
+  {
+    label: "Workspace",
+    items: [
+      {
+        path: "/settings",
+        label: "Settings",
+        notCurrentBelow: SETUP_SETTINGS_PATHS,
+      },
     ],
   },
 ];
@@ -72,9 +105,15 @@ const WHOLE_PRODUCT = createCapabilitySet(PRODUCTS["code-review-com"].default);
 
 /** The counts a sidebar link can carry. */
 export type NavBadge = "todos";
-export type NavItem = { href: string; label: string; badge?: NavBadge };
-/** A group of places; the sidebar draws a separator between two groups, not inside one. */
-export type NavGroup = { items: NavItem[] };
+export type NavItem = {
+  href: string;
+  label: string;
+  badge?: NavBadge;
+  /** Addresses below `href` that belong to another place: this place is not current on them. */
+  notCurrentBelow?: string[];
+};
+/** A group of places; the sidebar draws a separator between two groups, not inside one. A `label` is the heading of a group (the factory's). */
+export type NavGroup = { label?: string; items: NavItem[] };
 
 /**
  * The class of a sidebar link, shared by the workspace and the admin sidebar: the token colour (muted at
@@ -101,6 +140,7 @@ export function navGroupsFor(
     : NAV_GROUPS;
   return groups
     .map((group) => ({
+      ...(group.label === undefined ? {} : { label: group.label }),
       items: group.items
         .filter(
           (place) =>
@@ -114,6 +154,13 @@ export function navGroupsFor(
               ? place.label
               : place.label(product),
           ...(place.badge === undefined ? {} : { badge: place.badge }),
+          ...(place.notCurrentBelow === undefined
+            ? {}
+            : {
+                notCurrentBelow: place.notCurrentBelow.map((path) =>
+                  workspacePath(slug, path),
+                ),
+              }),
         })),
     }))
     .filter((group) => group.items.length > 0);
@@ -137,4 +184,12 @@ export function navItemsFor(
 export function isCurrentPage(pathname: string | null, href: string): boolean {
   if (pathname === null) return false;
   return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+/** Whether the place `item` is the current one on `pathname`: on its own address or below it, except below an address that is another place's. */
+export function isCurrentItem(pathname: string | null, item: NavItem): boolean {
+  if (!isCurrentPage(pathname, item.href)) return false;
+  return !(item.notCurrentBelow ?? []).some((href) =>
+    isCurrentPage(pathname, href),
+  );
 }

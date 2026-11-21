@@ -9,7 +9,7 @@ export const PROJECT_COPY = {
   allProjects: (projects: number) => `All projects · ${String(projects)}`,
   allProjectsHint: "Open tasks, running lanes and what waits for you.",
   footnote:
-    "A project is one or more GitHub repositories and their issues, plus the lanes that run on them. The factory stores only runs, ToDos, lanes and profiles.",
+    "A project is one or more GitHub repositories and their issues, plus the lanes that run on them. The factory stores only runs, ToDos and lanes.",
   ticketSource: (repository: string) => `Issues of ${repository}`,
   /** The ticket source of a project on a Jira project (#1038): the project's key, and where the code lives. */
   jiraTicketSource: (projectKey: string, repository: string) =>
@@ -74,12 +74,13 @@ export const NEW_PROJECT_COPY = {
   lanesHint:
     "Copies of the built-in lanes; the project owns them and you change them without changing the built-in.",
   laneNames: {
+    "one-off-task": "One-off task",
     "issue-to-pr": "Issue to PR",
     "issue-to-pr-status": "Issue to PR (status)",
     "review-a-pull-request": "Review a pull request",
   } as Record<string, string>,
   laneProblem: (names: string) =>
-    `The project was created, but these lanes could not be copied (they need the profiles implementer and reviewer, and an environment): ${names}.`,
+    `The project was created, but these lanes could not be copied: ${names}. An Admin can add them through the API.`,
   none: "Every repository of the GitHub App already is a project.",
   cancel: "Cancel",
   create: "Create and read from GitHub",
@@ -99,16 +100,13 @@ export type CockpitTab = (typeof COCKPIT_TABS)[number]["segment"];
 
 export const LANES_COPY = {
   title: "Lanes",
-  hint: "The flows that run on this project. A lane belongs to the project and works on its tickets, in its repository.",
+  hint: "The flows that run on this project, read only: open a lane to start it or to follow its runs. An AI changes a lane through the API.",
   emptyTitle: "No lanes yet",
   emptyDescription:
     "A new project copies the built-in lanes it is asked to; others are written through the API with the project's id (docs/workflows.md).",
   note: "A lane starts from a label on a ticket of this project's repository, or by hand with a ticket of it.",
   noteJira:
     "A lane starts when a ticket of this project's Jira project moves into the status the lane waits for, or by hand with a ticket of it (jira:owner/repo#PROJ-12).",
-  taskNote:
-    "Until a lane can be started from an issue, a task goes to the agent by hand:",
-  taskLink: "send a task",
   name: "Lane",
   version: "Version",
   updated: "Updated",

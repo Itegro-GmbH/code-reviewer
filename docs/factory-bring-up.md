@@ -99,15 +99,109 @@ a secret. The order matters; each step has a check and a way back.
 
 | # | Step | Who | Check | Rollback |
 |---|---|---|---|---|
-| 1 | Release the code to `main` (the pull request from `development`). The pipeline migrates the factory database first (two empty tables), stages, runs `health-factory` with the old set (`dynamic-review,review`), the canary (the Worker image changed, so the snapshot is rebuilt and Diff and Dynamic must pass) and promotes the App, the factory and the Dispatcher | lead | *Deploy production* is green; `apps-check` and `health-factory` are green; the factory answers `GET /api/health` with `dynamic-review,review`; the Implementer page is `404` | None needed, the release is dormant. A bad release: *Rollback production* ([`deployment-vercel.md`](deployment-vercel.md), section 7) |
+| 1 | Release the code to `main` (the pull request from `development`). The pipeline migrates the factory database first (two empty tables), stages, runs `health-factory` with the old set (`dynamic-review,review`), the canary (the Worker image changed, so the snapshot is rebuilt and Diff and Dynamic must pass) and promotes the App, the factory and the Dispatcher | lead | *Deploy production* is green; `apps-check` and `health-factory` are green; the factory answers `GET /api/health` with `dynamic-review,review`; the old Implementer page is `404` (it is gone since #1105; a task is a run of the lane "One-off task") | None needed, the release is dormant. A bad release: *Rollback production* ([`deployment-vercel.md`](deployment-vercel.md), section 7) |
 | 2 | Only after step 1 is live: Infisical `prod`, folder `/dispatcher`, key `DISPATCHER_APPS`: in the factory entry set `kinds` to `["diff","dynamic","implementer"]`, everything else as it is. If `DISPATCHER_ENGINES` is set (`/dispatcher`), add `implementer` to it too (`pr-agent,opencode,implementer`); unset, which is the default, the kind in `DISPATCHER_APPS` adds the engine by itself. A list without it leaves the Launcher advertising `pr-agent,opencode` only: the canary does not ask for `implementer`, it passes, and the tasks end `no_capable_runner`. Naming it never gives the kind to code-review.com's own app. Optional: an `implementer` entry of `DISPATCHER_WORKER_CONFIG` (sizes, `timeoutSeconds`; the defaults need none; a wrong value fails the canary of a deployment that serves the kind). Wait for the Secret Sync, then run *Deploy production* once, which stages and proves the Dispatcher with the kind. Earlier than step 1, the old Dispatcher refuses the unknown kind at start and the reviewer has an outage | lead | The canary of that run is green and its report names `implementer` (`engines=pr-agent,opencode,implementer`); `apps-check` passes; no `worker_config_invalid` in the Dispatcher's log. A `503` with `reasons=implementer_probe_failed missing=implementer` is the failure described above (the log of the Dispatcher names the half: `canary_implementer_probe_failed`, `canary_implementer_not_proven`). Also keep an eye on the time: `DISPATCHER_PROBE_TIMEOUT_SECONDS` at or below 190 | Set `kinds` back to `["diff","dynamic"]` (and remove the `DISPATCHER_WORKER_CONFIG` entry if you added one), wait for the Secret Sync and run *Deploy production* again: the Launcher advertises nothing new, the canary passes and the held changes are promoted |
-| 3 | Together: Infisical `prod`, folder `/app-factory`, key `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`, and the repository variable `FACTORY_EXPECTED_CAPABILITIES` = `dynamic-review,implementer,review` (sorted, no spaces). Then run *Deploy production* once. One of the two alone makes `health-factory` fail with `PRODUCT_MISMATCH`: nothing of the factory is promoted, nothing live changes (safe and loud) | lead | `health-factory` is green; `GET /api/health` of the factory lists `dynamic-review`, `implementer`, `review`; the factory's sidebar lists ToDos, Projects, Runs, Profiles, Runners and Settings | Remove `implementer` from `PRODUCT_CAPABILITIES` and reset (or delete) the repository variable, deploy again. The Dispatcher entry and the GitHub permission may stay. What it does to tasks: the Implementer's routes and page are `404` at once, so nothing new can be started. A turn that is **running** keeps its lease and finishes; the app no longer switches off its write token when it ends (the revoke and the retry steps ask for the capability), so that token lives out its lifetime of up to an hour. A turn that is **queued** is still sent to the Dispatcher; when a Worker fetches it, the app refuses the token (`implementer_engine_unavailable`, not billed). With `kinds` set back as well, queued turns end `no_capable_runner` instead. Wait for running tasks to end before you roll back |
-| 4 | Set the maximum cost per review in the factory's admin portal (General, Limits, "Maximum cost per review") to 5.00 USD, the owner's per-turn maximum; the default is 1.00 USD until then. It is the only brake of a turn: there is no step limit. **The setting is the cap of every job the factory claims**, so it also loosens the factory's own Dynamic and Diff reviews (a project's own lower limit still applies) | owner or lead | The task form's cost field names 5.00 USD as its upper bound | Set it back to the earlier value; a running turn keeps the limit it was claimed with |
-| 5 | The factory's GitHub App. **Main path: one click in the admin portal, after step 3 is deployed.** Open Integrations in the admin portal and press *Create the App with one click*; the manifest asks for Contents **Read and write** because the capability is on ([`github-app.md`](github-app.md), "One click"). Then install the App on the repositories (*Connect GitHub* on the workspace's Settings, tab Integrations, *Only select repositories*). **Never click before the deploy of step 3:** an App created earlier gets Contents read-only. Fallback only: an App that exists already (created before step 3, or from the earlier manifest) is updated by hand on GitHub, and then the owner of every installation accepts the new permissions ([`github-app.md`](github-app.md), "Update an existing App"); until then the form lists the repository as disabled, with the note "approve the new GitHub permission". **Tenancy:** the factory is `multi` today, and then the manifest creates a **public** App: anybody on GitHub can install it on their own account or organization and chooses the repositories it gets; an installation gives the App access to those repositories only, and no workspace uses an installation until an Owner or Admin who owns the GitHub account (or is an owner of the organization) has linked it. Who may create a workspace is the sign-up rule: keep sign-up closed until #784 is closed | owner | On GitHub, the App's Contents permission shows **Read and write**; the portal's *Check the permissions* lists nothing missing; the repository is selectable in the Implementer form | Delete the App on GitHub (and its configuration in the portal), or set Contents back to Read-only; the Implementer refuses the repository again, nothing else changes |
-| 6 | A model: a workspace key in Settings, LLM access (a provider of the models catalog), or released catalog entries that serve Dynamic Review in the admin portal | owner | The model picker of the form lists at least one model | Remove the key or release |
+| 3 | Together: Infisical `prod`, folder `/app-factory`, key `PRODUCT_CAPABILITIES` = `review,dynamic-review,implementer`, and the repository variable `FACTORY_EXPECTED_CAPABILITIES` = `dynamic-review,implementer,review` (sorted, no spaces). Then run *Deploy production* once. One of the two alone makes `health-factory` fail with `PRODUCT_MISMATCH`: nothing of the factory is promoted, nothing live changes (safe and loud) | lead | `health-factory` is green; `GET /api/health` of the factory lists `dynamic-review`, `implementer`, `review`; the factory's sidebar lists ToDos, Projects, Runs (control panel), GitHub and Jira, MCP servers, Runners, LLM keys (Setup) and Settings | Remove `implementer` from `PRODUCT_CAPABILITIES` and reset (or delete) the repository variable, deploy again. The Dispatcher entry and the GitHub permission may stay. What it does to tasks: the Implementer's routes are `404` at once, so nothing new can be started (a run of "One-off task" fails at its agent step). A turn that is **running** keeps its lease and finishes; the app no longer switches off its write token when it ends (the revoke and the retry steps ask for the capability), so that token lives out its lifetime of up to an hour. A turn that is **queued** is still sent to the Dispatcher; when a Worker fetches it, the app refuses the token (`implementer_engine_unavailable`, not billed). With `kinds` set back as well, queued turns end `no_capable_runner` instead. Wait for running tasks to end before you roll back |
+| 4 | Set the maximum cost per review in the factory's admin portal (General, Limits, "Maximum cost per review") to 5.00 USD, the owner's per-turn maximum; the default is 1.00 USD until then. It is the only brake of a turn: there is no step limit. **The setting is the cap of every job the factory claims**, so it also loosens the factory's own Dynamic and Diff reviews (a project's own lower limit still applies) | owner or lead | The cost a run may spend is capped by it: the budget of a lane (for "One-off task" 10 USD) and this maximum per turn both apply, and a run of "One-off task" whose turn costs more ends `cost_limit_reached` at 5.00 USD | Set it back to the earlier value; a running turn keeps the limit it was claimed with |
+| 5 | The factory's GitHub App. **Main path: one click in the admin portal, after step 3 is deployed.** Open Integrations in the admin portal and press *Create the App with one click*; the manifest asks for Contents **Read and write** because the capability is on ([`github-app.md`](github-app.md), "One click"). Then install the App on the repositories (*Connect GitHub* under Setup, GitHub and Jira, *Only select repositories*). **Never click before the deploy of step 3:** an App created earlier gets Contents read-only. Fallback only: an App that exists already (created before step 3, or from the earlier manifest) is updated by hand on GitHub, and then the owner of every installation accepts the new permissions ([`github-app.md`](github-app.md), "Update an existing App"); until then the form lists the repository as disabled, with the note "approve the new GitHub permission". **Tenancy:** the factory is `multi` today, and then the manifest creates a **public** App: anybody on GitHub can install it on their own account or organization and chooses the repositories it gets; an installation gives the App access to those repositories only, and no workspace uses an installation until an Owner or Admin who owns the GitHub account (or is an owner of the organization) has linked it. Who may create a workspace is the sign-up rule: keep sign-up closed until #784 is closed | owner | On GitHub, the App's Contents permission shows **Read and write**; the portal's *Check the permissions* lists nothing missing; the repository is selectable in the New project dialog | Delete the App on GitHub (and its configuration in the portal), or set Contents back to Read-only; the Implementer refuses the repository again, nothing else changes |
+| 6 | A model: a workspace key in Settings, LLM access (a provider of the models catalog), or released catalog entries that serve Dynamic Review in the admin portal | owner | `GET /api/w/<slug>/implementer/models` lists at least one model (the lanes name a model in the step; the start form has no picker) | Remove the key or release |
 | 7 | Optional: if reviews wait behind tasks, raise `RUNNER_DISPATCH_MAX_RUNNING` (`/app-factory`) and `maxRunning` of the factory entry of `DISPATCHER_APPS` to the same number. For two reviews and two tasks at the same time it must be **at least 4**; the sum over all Apps must fit the team's Sandbox concurrency | lead | Two reviews and two tasks run at the same time | Both back to 2 |
 | 8 | The live smoke test, a throwaway repository and a trivial task: [`implementer-smoke-test.md`](implementer-smoke-test.md) | lead | Every row of the test passes and the result is written into issue #768 | Step 3's rollback, then fix and run it again |
 
 Three things to know. The permission is an action of the owner, not a decision: a task can be started only after it. The
 cost limit applies to every turn, and a person can ask for a lower one. And the Worker image changes in the release of step
 1: the first run rebuilds the golden snapshot (section 5.1 of the deployment guide), which the smoke test measures.
+
+## Converting the lanes to the new form (ADR 0007, release A)
+
+**Release checklist, after the conversion job below: add the lane "One-off task" to the projects that exist.** The Lanes tab has no "send a task" link any more and no job adds the lane, so until it is saved a project cannot start a task by hand. An Admin or the lead agent saves the document of [`workflows.md`](workflows.md#built-in-lanes) ("How an existing project gets it") with `POST /api/w/<slug>/workflows?projectId=<id>` for each project, taking `model` and `runner` from the `implement` step of the project's "Issue to PR"; a second save is `409 WORKFLOW_NAME_TAKEN`, so it is safe to repeat. Check: each project's Lanes tab lists "One-off task" and its start form shows the task box.
+
+The agent settings and the runner of a lane step move into the step itself ([ADR 0007](decisions/0007-ai-configured-factory.md),
+epic #1103, #1105). A lane saved before names a **profile** and an **environment**; `pnpm lanes:convert` gives every lane that is
+not archived a new version with the profile values and the runner written into its steps. It is an app-side job, not a SQL migration,
+because it needs the validator of a save and what the app knows about profiles, environments and runners. Run it **after
+`pnpm migrate` of the release** (the migration made the hosted runners, one for each type of the Vercel Sandbox, in every
+workspace), against the database of the deployment, with the migrate URL:
+
+```sh
+DATABASE_URL_MIGRATE=... pnpm --dir app lanes:convert --dry-run     # only report: nothing is saved or archived
+DATABASE_URL_MIGRATE=... pnpm --dir app lanes:convert               # write the new versions
+```
+
+Options: `--workspace <id>` for one workspace (an id that is not a workspace, or one that is deleted, is an error: exit 1,
+`LANE_CONVERSION_WORKSPACE_NOT_FOUND`, nothing is looked at), `--json` for the report as one JSON document on stdout (with `scope`,
+`complete`, `counts`, `warned`, `workspaceFailures`). **Read the dry run first**, in particular the lanes without a project: they are
+archived by a real run, and a trigger or an MCP assignment that still points at one no longer runs it.
+
+What it does, for every workspace that is not deleted and every lane that is not archived:
+
+- **Converts** a lane (the **current** version only) with a new version: for each agent step the profile reference is resolved now (the
+  newest version for `name`, exactly `name@n`), and `harness`, `model`, `canPush` and `instructions` are copied; the profile's default
+  result becomes the step's `result` and its description the step's `description` when the step has none; the cost limit is **not**
+  copied. The environment becomes the step's `runner`: a hosted environment of N vCPU becomes the workspace's hosted runner of that type,
+  and its setup script and network rule are copied into the step; a runner environment (labels) becomes the self-hosted runner that has
+  all its labels, **only when exactly one has**. The version's description is "Profile values and runner written into the steps (ADR
+  0007)" and its author is the author of the version it replaces. Older versions and runs are never touched.
+- **Validates** the converted document with the validator a save uses, including the rules at the step's runner (for example
+  `runner_needs_own_key`), **except the model rule**: see "Models that are not checked" below. Any issue: no version, and the lane is
+  listed with the issue codes.
+- **Lists** a lane it cannot convert, with a reason code per step: `profile_archived`, `profile_missing`, `profile_version_missing`,
+  `environment_missing`, `environment_not_found`, `environment_size_unsupported` (a size no hosted runner type offers, 1 vCPU),
+  `runner_none_match`, `runner_several_match` (with the candidates: the owner decides which, or whether to split the lane; the job
+  never picks), `document_unreadable`, `validation_failed`, `version_conflict` (somebody saved meanwhile: run it again),
+  `version_limit_reached`, `mcp_server_missing`, `save_failed`. Nothing is guessed.
+- **Archives** a lane that is not archived and has no project, and lists it with the warning `archived_without_project`. (A workspace's
+  limit of archived lanes does not stop it.)
+- Reports a lane that was deleted or archived by somebody **while the run was going** as `lane_gone` (counted and listed, nothing done to
+  it; it is not "already inline").
+- Does **not** rename runners: duplicate runner names among the runners that are not revoked were made unique by the migration of the
+  hosted runners (the older keeps its name, the later get " (" and eight characters of the id ")"), and a unique index keeps them so.
+
+It is safe to run again: a lane whose steps hold no profile and no environment is skipped, and a converted lane is such a lane. It holds
+an advisory lock, so two runs take turns. A dry run writes no lane; the only write it can cause is what any page does when it lists a
+workspace's runners: a hosted runner type that is missing is made again. The environments and runners are read again for each lane, so
+an environment an owner changes during a run is seen by the next lane; still, **do not edit environments or runners while it runs**.
+
+### Exit codes, dry run and partial runs
+
+The report starts with `DRY RUN` or `REAL RUN` and with what it covered (`all workspaces`, or `ONLY workspace <id>`), then the count of
+each outcome. The last line is the verdict, and **"The list of release A is empty." is printed only by a real run over all workspaces
+that finished with nothing left**.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Nothing is left: no lane would change or is listed, no workspace failed. Read the last line for what that proves: after a **real run over all workspaces** it is the gate of release B; after a **dry run** it says nothing would change; after a **`--workspace` run** it says so for that workspace only ("not the gate of release B"). |
+| 1 | The job could not run (configuration, database, schema behind, unknown `--workspace`, usage), or it **ended early**. If it ended after the work started, the partial report is printed first and says `THE RUN ENDED EARLY`. |
+| 2 | Lanes are on the list of release A, or a workspace failed (`WORKSPACE FAILED`: its lanes may not have been looked at). A person acts, then it is run again. |
+| 3 | **Dry run only:** the real run would convert or archive lanes (`would_convert`, `would_archive_without_project`) and nothing is on the list. The release is not ready: run it without `--dry-run`. |
+
+A script that gates release B must use a **real run without `--workspace`** and read `scope` and `complete` in the JSON, not only the
+exit code. A **partial run** (`--workspace`) is for fixing one workspace; it never says the list is empty for the instance.
+
+**A failure in the middle does not lose the report.** One line per lane is printed as soon as that lane is done (`converted workspace …`,
+`archived …`, `NOT converted …`; on stderr with `--json`, so stdout stays one JSON document), so the record of what was written survives a
+crash. A failure in one workspace is listed as `workspaceFailures` and the next workspace goes on. A failure outside that (or a lost lock
+connection after the work) prints the report of everything done up to then with `complete: false`, before the error, and exits 1. Running
+again is always safe.
+
+### Models that are not checked
+
+The job does **not** run the model rule of a save (`model_not_allowed`: a managed model the plan allows, a key of the provider). That rule
+reads the workspace's keys, which means decrypting them with the app secret, and needs the running app's catalog and entitlement wiring; a
+script run with the migrate URL has neither and must not. A converted step keeps the model its profile ran with, and the claim refuses a
+model that is gone at the run, as before, so no run gets worse. What changes is that a **later save of the lane in the app** (an edit of
+any step) can refuse the model. So every converted lane (and every `would_convert` lane in a dry run) carries one warning
+**`model_unchecked`** per converted step, with the step and the model (the provider and model id, or the id of the catalog entry; never a
+key), in the report section "with a model that was NOT checked". The warning does not change the exit code. The operator hands that list
+to the lead agent, who opens each lane in the app and saves it once to see the answer of the rule.
+
+**Release B ships only when this list is empty** (every lane that is not archived holds no profile and no environment): the lead agent
+rewrites a listed lane into the new form by a saved version (the owner decides where a choice is needed), or it is archived, and the
+job is run again until a real run over all workspaces exits 0.
+
+**Built-in lanes and release B.** New projects copy the built-in lanes with their settings inline, taken from the profiles `implementer@1`
+and `reviewer@1` of the workspace. Release B removes the profiles, so before it ships the built-in lanes need another source of settings
+(a follow-up of #1105 that release B depends on): after it a workspace without those profiles can never copy them. A copy can also be refused with
+`model_not_allowed` now (the profile form ran that rule when the profile was saved, the lane runs it at the copy); project creation shows
+it per lane, as it shows `profile_unknown`.
+
