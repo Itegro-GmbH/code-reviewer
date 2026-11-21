@@ -2,6 +2,7 @@
 
 // Fixtures for the tests of the workflow format (#833): a fake resolver with a profile that may push and one that may not, and the
 // plan's example workflow ("Issue to PR") written as format v1 has it.
+import type { BuiltInAgents } from "./built-in-lanes.ts";
 import { BUILT_IN_CONNECTORS } from "./connectors.ts";
 import type { ProfileInfo, WorkflowResolver } from "./resolver.ts";
 
@@ -148,3 +149,23 @@ export function tiny(): Json {
     ],
   };
 }
+
+/**
+ * The settings of the two agents of the built-in lanes that the documentation's example has (`contracts/examples/workflow/Workflow.json`)
+ * and the hosted runner they name (#1105): what `builtInLaneDocument` is given where a test is not about the settings.
+ */
+export const EXAMPLE_BUILT_IN_AGENTS: BuiltInAgents = {
+  implementer: {
+    harness: "opencode",
+    model: { entryId: "example-model" },
+    canPush: true,
+    instructions: "Work in small steps and run the tests before you finish.",
+    runner: "runner-vercel-4-vcpu",
+  },
+  reviewer: {
+    harness: "opencode",
+    model: { entryId: "example-model" },
+    canPush: false,
+    runner: "runner-vercel-4-vcpu",
+  },
+};

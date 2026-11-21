@@ -5,6 +5,7 @@
 // version stays readable, and a workspace never sees the workflows of another.
 import { describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createNamedRunnersRepository } from "../db/repositories/named-runners-repository.ts";
 import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -76,6 +77,7 @@ async function setup() {
       profiles: createProfilesRepository(db, workspaceId),
       mcpServers: createMcpServersRepository(db, workspaceId),
       mcpOAuth: createMcpOAuthRepository(db, workspaceId),
+      runners: createNamedRunnersRepository(db, workspaceId),
       ...options,
     });
   /** The service with the project of the workspace filled in for `create` and `list`, as the tests below read. */
@@ -613,6 +615,69 @@ describe("the workflow service", () => {
       (await service.list(mine)).workflows.map((w) => w.name).sort(),
     ).toEqual(["Issue to PR", "Review a pull request"]);
     expect(twice[0]).toMatchObject({ ok: false, code: "WORKFLOW_NAME_TAKEN" });
+
+    // #1105-T401: the copies carry the profiles' settings and the hosted runner of 4 vCPU inline, and name no profile or environment.
+    const hosted = (await createNamedRunnersRepository(db, idA).list()).find(
+      (runner) => runner.kind === "hosted" && runner.vcpus === 4,
+    );
+    const review = copied[1];
+    if (!review?.ok) throw new Error("the review lane was not copied");
+    const lane = await service.get(review.workflow.id);
+    expect(
+      (lane.document as { steps: Record<string, unknown>[] }).steps[0],
+    ).toMatchObject({
+      kind: "agent",
+      harness: "opencode",
+      model: PROFILE_CONTENT.model,
+      canPush: PROFILE_CONTENT.canPush,
+      runner: hosted?.id,
+    });
+    expect(JSON.stringify(lane.document)).not.toContain('"profile"');
+    expect(JSON.stringify(lane.document)).not.toContain('"environment"');
+  });
+
+  // #1105-T402
+  it("reports a built-in lane whose profile model the workspace cannot run any more as a refused lane, the way a missing profile is, and still copies the others", async () => {
+    const { db, idA, projectIds } = await setup();
+    await createProfilesRepository(db, idA).create(
+      {
+        name: "reviewer",
+        content: { ...PROFILE_CONTENT, model: { entryId: "gone" } },
+        createdBy: USER.id,
+      },
+      100,
+    );
+    const service = createWorkflowService({
+      workflows: createWorkflowsRepository(db, idA),
+      projects: createProjectsRepository(db, idA),
+      environments: createImplementerEnvironmentsRepository(db, idA),
+      profiles: createProfilesRepository(db, idA),
+      runners: createNamedRunnersRepository(db, idA),
+      // The rule of the workspace today: the entry the reviewer profile names is not enabled.
+      models: {
+        check: async (model) => ("entryId" in model ? "not_enabled" : null),
+      },
+    });
+    const mine = projectIds.get(idA)!;
+
+    const results = await service.copyBuiltIn(USER, mine, [
+      "issue-to-pr",
+      "review-a-pull-request",
+    ]);
+
+    // Both lanes carry a reviewer, and the implementer profile of `setup` names the same kind of model: both are refused, with the code
+    // `profile_unknown` has (`WORKFLOW_INVALID`) and the issue `model_not_allowed`, and nothing is saved.
+    expect(results.map((r) => [r.key, r.ok])).toEqual([
+      ["issue-to-pr", false],
+      ["review-a-pull-request", false],
+    ]);
+    for (const result of results) {
+      expect(result).toMatchObject({ ok: false, code: "WORKFLOW_INVALID" });
+      expect(
+        result.ok ? [] : result.errors.map((error) => error.code),
+      ).toContain("model_not_allowed");
+    }
+    expect((await service.list(mine)).workflows).toEqual([]);
   });
 
   // #937 (from the re-review of #936)
@@ -639,6 +704,7 @@ describe("the workflow service", () => {
       projects: createProjectsRepository(db, idA),
       environments: createImplementerEnvironmentsRepository(db, idA),
       profiles: createProfilesRepository(db, idA),
+      runners: createNamedRunnersRepository(db, idA),
     });
     const mine = projectIds.get(idA)!;
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});

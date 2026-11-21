@@ -363,6 +363,21 @@ Runs are never rewritten. **Release B ships only when the list of release A is e
    app fills it from the step, with the lane's name (as a slug, because `name` takes `^[a-z0-9][a-z0-9_-]{0,63}$`; a name with nothing usable is `lane`) and version as `name` and `version`. Renaming it would need a runner release and
    gains nothing for the person; it can follow later.
 
+**How steps 2 to 5 were carried out (#1105, third slice).** The data migration of steps 2 to 4 is an **app-side job, `pnpm lanes:convert`**
+(`app/src/lane-conversion/`), not a SQL migration: it needs the validator of a save and the repositories, and a migration is frozen and
+imports none of that (`db/migrations/support`). It is re-runnable (a lane already in the new form is skipped), has a dry run, holds an advisory
+lock and writes the **list of release A** as a report (lines, or JSON with `--json`); its exit code is 0 only when nothing is left, and
+**only a real run over all workspaces** that exits 0 is the precondition of release B (a dry run and a `--workspace` run are not;
+`docs/factory-bring-up.md`, "Converting the lanes"). One exception to "validated by the same validator as a save": the job does **not**
+run the model rule (`model_not_allowed`), which needs the workspace's decrypted keys and the app's catalog wiring; it lists every converted
+lane with the warning `model_unchecked` instead. It also converts a step that already has settings of its own
+but names an `environment` and no `runner` (written between #1111 and #1114). The names of runners were made unique by the migration of the
+hosted runners (a unique index keeps them), so the job finds none to rename. The built-in lanes are written in the inline form: the settings
+of their two agents are taken from the profiles `implementer@1` and `reviewer@1` and the runner is the hosted runner of 4 vCPU; where a new
+workspace gets its model once the profiles are gone is for release B, which must give the built-in lanes another source of settings first
+(after it `copyBuiltIn` can never succeed for a workspace without those profiles). Because the copy goes through the save path, a built-in
+lane can now also be refused with `model_not_allowed`; project creation reports it per lane like `profile_unknown`. The engine reads both forms (step 5): nothing of it changed.
+
 **The schema version.** `contracts/workflow.v1.json` has `profile` in `required` (`:123`). The author's detail (not a decision of the owner): **the document stays version 1**.
 Release A is additive: the new settings are optional properties and `profile` leaves `required`; the validator requires either `profile`
 or the inline settings (together with `profile_with_inline_settings`). In release B the validator, not the schema, refuses `profile` and

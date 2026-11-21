@@ -111,3 +111,95 @@ a secret. The order matters; each step has a check and a way back.
 Three things to know. The permission is an action of the owner, not a decision: a task can be started only after it. The
 cost limit applies to every turn, and a person can ask for a lower one. And the Worker image changes in the release of step
 1: the first run rebuilds the golden snapshot (section 5.1 of the deployment guide), which the smoke test measures.
+
+## Converting the lanes to the new form (ADR 0007, release A)
+
+The agent settings and the runner of a lane step move into the step itself ([ADR 0007](decisions/0007-ai-configured-factory.md),
+epic #1103, #1105). A lane saved before names a **profile** and an **environment**; `pnpm lanes:convert` gives every lane that is
+not archived a new version with the profile values and the runner written into its steps. It is an app-side job, not a SQL migration,
+because it needs the validator of a save and what the app knows about profiles, environments and runners. Run it **after
+`pnpm migrate` of the release** (the migration made the hosted runners, one for each type of the Vercel Sandbox, in every
+workspace), against the database of the deployment, with the migrate URL:
+
+```sh
+DATABASE_URL_MIGRATE=... pnpm --dir app lanes:convert --dry-run     # only report: nothing is saved or archived
+DATABASE_URL_MIGRATE=... pnpm --dir app lanes:convert               # write the new versions
+```
+
+Options: `--workspace <id>` for one workspace (an id that is not a workspace, or one that is deleted, is an error: exit 1,
+`LANE_CONVERSION_WORKSPACE_NOT_FOUND`, nothing is looked at), `--json` for the report as one JSON document on stdout (with `scope`,
+`complete`, `counts`, `warned`, `workspaceFailures`). **Read the dry run first**, in particular the lanes without a project: they are
+archived by a real run, and a trigger or an MCP assignment that still points at one no longer runs it.
+
+What it does, for every workspace that is not deleted and every lane that is not archived:
+
+- **Converts** a lane (the **current** version only) with a new version: for each agent step the profile reference is resolved now (the
+  newest version for `name`, exactly `name@n`), and `harness`, `model`, `canPush` and `instructions` are copied; the profile's default
+  result becomes the step's `result` and its description the step's `description` when the step has none; the cost limit is **not**
+  copied. The environment becomes the step's `runner`: a hosted environment of N vCPU becomes the workspace's hosted runner of that type,
+  and its setup script and network rule are copied into the step; a runner environment (labels) becomes the self-hosted runner that has
+  all its labels, **only when exactly one has**. The version's description is "Profile values and runner written into the steps (ADR
+  0007)" and its author is the author of the version it replaces. Older versions and runs are never touched.
+- **Validates** the converted document with the validator a save uses, including the rules at the step's runner (for example
+  `runner_needs_own_key`), **except the model rule**: see "Models that are not checked" below. Any issue: no version, and the lane is
+  listed with the issue codes.
+- **Lists** a lane it cannot convert, with a reason code per step: `profile_archived`, `profile_missing`, `profile_version_missing`,
+  `environment_missing`, `environment_not_found`, `environment_size_unsupported` (a size no hosted runner type offers, 1 vCPU),
+  `runner_none_match`, `runner_several_match` (with the candidates: the owner decides which, or whether to split the lane; the job
+  never picks), `document_unreadable`, `validation_failed`, `version_conflict` (somebody saved meanwhile: run it again),
+  `version_limit_reached`, `mcp_server_missing`, `save_failed`. Nothing is guessed.
+- **Archives** a lane that is not archived and has no project, and lists it with the warning `archived_without_project`. (A workspace's
+  limit of archived lanes does not stop it.)
+- Reports a lane that was deleted or archived by somebody **while the run was going** as `lane_gone` (counted and listed, nothing done to
+  it; it is not "already inline").
+- Does **not** rename runners: duplicate runner names among the runners that are not revoked were made unique by the migration of the
+  hosted runners (the older keeps its name, the later get " (" and eight characters of the id ")"), and a unique index keeps them so.
+
+It is safe to run again: a lane whose steps hold no profile and no environment is skipped, and a converted lane is such a lane. It holds
+an advisory lock, so two runs take turns. A dry run writes no lane; the only write it can cause is what any page does when it lists a
+workspace's runners: a hosted runner type that is missing is made again. The environments and runners are read again for each lane, so
+an environment an owner changes during a run is seen by the next lane; still, **do not edit environments or runners while it runs**.
+
+### Exit codes, dry run and partial runs
+
+The report starts with `DRY RUN` or `REAL RUN` and with what it covered (`all workspaces`, or `ONLY workspace <id>`), then the count of
+each outcome. The last line is the verdict, and **"The list of release A is empty." is printed only by a real run over all workspaces
+that finished with nothing left**.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Nothing is left: no lane would change or is listed, no workspace failed. Read the last line for what that proves: after a **real run over all workspaces** it is the gate of release B; after a **dry run** it says nothing would change; after a **`--workspace` run** it says so for that workspace only ("not the gate of release B"). |
+| 1 | The job could not run (configuration, database, schema behind, unknown `--workspace`, usage), or it **ended early**. If it ended after the work started, the partial report is printed first and says `THE RUN ENDED EARLY`. |
+| 2 | Lanes are on the list of release A, or a workspace failed (`WORKSPACE FAILED`: its lanes may not have been looked at). A person acts, then it is run again. |
+| 3 | **Dry run only:** the real run would convert or archive lanes (`would_convert`, `would_archive_without_project`) and nothing is on the list. The release is not ready: run it without `--dry-run`. |
+
+A script that gates release B must use a **real run without `--workspace`** and read `scope` and `complete` in the JSON, not only the
+exit code. A **partial run** (`--workspace`) is for fixing one workspace; it never says the list is empty for the instance.
+
+**A failure in the middle does not lose the report.** One line per lane is printed as soon as that lane is done (`converted workspace …`,
+`archived …`, `NOT converted …`; on stderr with `--json`, so stdout stays one JSON document), so the record of what was written survives a
+crash. A failure in one workspace is listed as `workspaceFailures` and the next workspace goes on. A failure outside that (or a lost lock
+connection after the work) prints the report of everything done up to then with `complete: false`, before the error, and exits 1. Running
+again is always safe.
+
+### Models that are not checked
+
+The job does **not** run the model rule of a save (`model_not_allowed`: a managed model the plan allows, a key of the provider). That rule
+reads the workspace's keys, which means decrypting them with the app secret, and needs the running app's catalog and entitlement wiring; a
+script run with the migrate URL has neither and must not. A converted step keeps the model its profile ran with, and the claim refuses a
+model that is gone at the run, as before, so no run gets worse. What changes is that a **later save of the lane in the app** (an edit of
+any step) can refuse the model. So every converted lane (and every `would_convert` lane in a dry run) carries one warning
+**`model_unchecked`** per converted step, with the step and the model (the provider and model id, or the id of the catalog entry; never a
+key), in the report section "with a model that was NOT checked". The warning does not change the exit code. The operator hands that list
+to the lead agent, who opens each lane in the app and saves it once to see the answer of the rule.
+
+**Release B ships only when this list is empty** (every lane that is not archived holds no profile and no environment): the lead agent
+rewrites a listed lane into the new form by a saved version (the owner decides where a choice is needed), or it is archived, and the
+job is run again until a real run over all workspaces exits 0.
+
+**Built-in lanes and release B.** New projects copy the built-in lanes with their settings inline, taken from the profiles `implementer@1`
+and `reviewer@1` of the workspace. Release B removes the profiles, so before it ships the built-in lanes need another source of settings
+(a follow-up of #1105 that release B depends on): after it a workspace without those profiles can never copy them. A copy can also be refused with
+`model_not_allowed` now (the profile form ran that rule when the profile was saved, the lane runs it at the copy); project creation shows
+it per lane, as it shows `profile_unknown`.
+

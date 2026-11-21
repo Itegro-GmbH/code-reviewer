@@ -51,8 +51,13 @@
         {
           "id": "implement",
           "kind": "agent",
-          "profile": "implementer@1",
-          "environment": "node",
+          "harness": "opencode",
+          "model": {
+            "entryId": "example-model"
+          },
+          "canPush": true,
+          "instructions": "Work in small steps and run the tests before you finish.",
+          "runner": "runner-vercel-4-vcpu",
           "session": {
             "continue": "implement"
           },
@@ -74,8 +79,12 @@
         {
           "id": "review",
           "kind": "agent",
-          "profile": "reviewer@1",
-          "environment": "node",
+          "harness": "opencode",
+          "model": {
+            "entryId": "example-model"
+          },
+          "canPush": false,
+          "runner": "runner-vercel-4-vcpu",
           "session": "new",
           "branch": "{{implement.branch}}",
           "instruction": "Review branch {{implement.branch}} against this issue. Do not change anything. The lane opens the pull request itself after the review; do not open one and do not report it as missing or open work.\n\nIssue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\nWhat the implementer reports it did. It names the answers people gave to its questions; those answers are binding, so do not report them as findings:\n{{implement.summary}}",

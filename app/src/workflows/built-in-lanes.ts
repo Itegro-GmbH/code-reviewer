@@ -2,8 +2,9 @@
 
 // The built-in lanes (#922): the documents a new project can copy as its first lanes. Plain data in format v1, copied into the
 // project as the workflow of a lane like any other (validated, versioned, then the project's own): changing the copy never changes the
-// built-in, and the built-in never changes a copy. They need what the documentation says they need: the profiles `implementer` (may
-// push) and `reviewer` (may not), and an environment, whose name the caller passes in.
+// built-in, and the built-in never changes a copy. The agent steps carry their settings and their runner inline (#1105, ADR 0007), never a
+// profile or an environment: the caller passes the settings of the two agents (`BuiltInAgents`), and `WorkflowService.copyBuiltIn` takes
+// them from the profiles `implementer@1` (may push) and `reviewer@1` (may not) of the workspace, on the hosted runner of 4 vCPU.
 //
 // "Issue to PR (status)" (#1036) is the same lane started by a move of the ticket on the project's board instead of a label, and it
 // reports on the board: "in progress" when it starts, "in review" when the pull request is open, and back plus a comment on failure.
@@ -12,7 +13,51 @@
 //
 // "Issue to PR" is the first workflow of `docs/workflows.md`, which a test holds to `contracts/examples/workflow/Workflow.json`.
 
+import type { ModelChoice } from "../db/implementer-model-choice.ts";
+import type { ProfileHarness } from "../runner-identity/harness.ts";
 import type { TicketProviderName } from "./ticket-ref.ts";
+
+/** The settings of one agent of a built-in lane, as an agent step carries them (#1105): what a profile held, and the id of the runner. */
+export type BuiltInAgentSettings = {
+  harness: ProfileHarness;
+  model: ModelChoice;
+  canPush: boolean;
+  /** The standing text; left out for none. */
+  instructions?: string;
+  /** The id of the concrete runner the agent runs on. */
+  runner: string;
+};
+
+/** The two agents of the built-in lanes: the one that implements (may push) and the one that reviews (may not). */
+export type BuiltInAgents = {
+  implementer: BuiltInAgentSettings;
+  reviewer: BuiltInAgentSettings;
+};
+
+export type BuiltInRole = keyof BuiltInAgents;
+
+/** The agents each built-in lane has: the review lane has a reviewer only. */
+export const BUILT_IN_ROLES: Record<BuiltInLaneKey, readonly BuiltInRole[]> = {
+  "issue-to-pr": ["implementer", "reviewer"],
+  "issue-to-pr-status": ["implementer", "reviewer"],
+  "review-a-pull-request": ["reviewer"],
+};
+
+/** The hosted runner type the built-in lanes run on: 4 vCPU, the size an environment of the documentation's examples has. */
+export const BUILT_IN_RUNNER_VCPUS = 4;
+
+/** The keys of an agent step that are its settings, in the order a lane written by hand has them. */
+function settingsOf(settings: BuiltInAgentSettings): Record<string, unknown> {
+  return {
+    harness: settings.harness,
+    model: settings.model,
+    canPush: settings.canPush,
+    ...(settings.instructions === undefined || settings.instructions === ""
+      ? {}
+      : { instructions: settings.instructions }),
+    runner: settings.runner,
+  };
+}
 
 /** The code a lane is reported with when copying it failed in a way no lane has a code for (the other lanes are still copied). */
 export const LANE_COPY_FAILED = "LANE_COPY_FAILED";
@@ -105,7 +150,7 @@ export const REVIEW_INSTRUCTION =
   "{{implement.summary}}";
 
 /** The agent steps and the way they end, the same for both variants of "Issue to PR". */
-function implementAndReview(environment: string): Record<string, unknown> {
+function implementAndReview(agents: BuiltInAgents): Record<string, unknown> {
   return {
     id: "fix",
     kind: "loop",
@@ -114,8 +159,7 @@ function implementAndReview(environment: string): Record<string, unknown> {
       {
         id: "implement",
         kind: "agent",
-        profile: "implementer@1",
-        environment,
+        ...settingsOf(agents.implementer),
         session: { continue: "implement" },
         instruction: {
           first: `{{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\n${PULL_REQUEST_NOTE}`,
@@ -135,8 +179,7 @@ function implementAndReview(environment: string): Record<string, unknown> {
       {
         id: "review",
         kind: "agent",
-        profile: "reviewer@1",
-        environment,
+        ...settingsOf(agents.reviewer),
         session: "new",
         branch: "{{implement.branch}}",
         // #966: the reviewer has no other way to the issue, nor to the answers people gave the implementer (its summary names them).
@@ -148,7 +191,7 @@ function implementAndReview(environment: string): Record<string, unknown> {
   };
 }
 
-function issueToPr(environment: string): Record<string, unknown> {
+function issueToPr(agents: BuiltInAgents): Record<string, unknown> {
   return {
     version: 1,
     name: "Issue to PR",
@@ -196,7 +239,7 @@ function issueToPr(environment: string): Record<string, unknown> {
         remove: ["agent implement"],
         add: ["agent working"],
       },
-      implementAndReview(environment),
+      implementAndReview(agents),
       {
         id: "done",
         kind: "if",
@@ -275,7 +318,7 @@ function pullRequestOf(provider: TicketProviderName): {
 }
 
 function issueToPrStatus(
-  environment: string,
+  agents: BuiltInAgents,
   statuses: LaneStatuses,
   provider: TicketProviderName,
 ): Record<string, unknown> {
@@ -313,7 +356,7 @@ function issueToPrStatus(
     budgetUsd: 20,
     steps: [
       setStatus("start", statuses.inProgress),
-      implementAndReview(environment),
+      implementAndReview(agents),
       {
         id: "done",
         kind: "if",
@@ -345,7 +388,7 @@ function issueToPrStatus(
   };
 }
 
-function reviewAPullRequest(environment: string): Record<string, unknown> {
+function reviewAPullRequest(agents: BuiltInAgents): Record<string, unknown> {
   return {
     version: 1,
     name: "Review a pull request",
@@ -378,8 +421,7 @@ function reviewAPullRequest(environment: string): Record<string, unknown> {
       {
         id: "review",
         kind: "agent",
-        profile: "reviewer@1",
-        environment,
+        ...settingsOf(agents.reviewer),
         session: "new",
         instruction:
           "Review pull request #{{trigger.input.pullRequest}} of this repository: fetch it with `git fetch origin pull/{{trigger.input.pullRequest}}/head` and read the change against its base. Do not change anything.",
@@ -396,16 +438,16 @@ function reviewAPullRequest(environment: string): Record<string, unknown> {
   };
 }
 
-/** The document of a built-in lane, with the environment its agent steps run in (and, for the status variant, the board statuses it uses). */
+/** The document of a built-in lane, with the settings of its agents (and, for the status variant, the board statuses it uses). */
 export function builtInLaneDocument(
   key: BuiltInLaneKey,
-  environment: string,
+  agents: BuiltInAgents,
   statuses: LaneStatuses = DEFAULT_LANE_STATUSES,
   /** The provider of the project's ticket source (#1040): "Issue to PR (status)" words its pull request and its texts for it. */
   provider: TicketProviderName = "github",
 ): Record<string, unknown> {
-  if (key === "issue-to-pr") return issueToPr(environment);
+  if (key === "issue-to-pr") return issueToPr(agents);
   if (key === "issue-to-pr-status")
-    return issueToPrStatus(environment, statuses, provider);
-  return reviewAPullRequest(environment);
+    return issueToPrStatus(agents, statuses, provider);
+  return reviewAPullRequest(agents);
 }

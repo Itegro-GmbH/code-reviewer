@@ -17,9 +17,13 @@ import type {
   WorkflowsRepository,
 } from "../db/repositories/workflows-repository.ts";
 import {
+  BUILT_IN_ROLES,
+  BUILT_IN_RUNNER_VCPUS,
   builtInLaneDocument,
   LANE_COPY_FAILED,
+  type BuiltInAgentSettings,
   type BuiltInLaneKey,
+  type BuiltInRole,
   type LaneStatuses,
 } from "./built-in-lanes.ts";
 import {
@@ -130,9 +134,10 @@ export type WorkflowService = {
     body: unknown,
   ): Promise<WorkflowView>;
   /**
-   * Copies built-in lanes into a project (#922), each as a lane like any other: validated against the workspace's profiles and
-   * environments (the first environment by name is the one the agent steps run in), then saved as version 1. A lane that does not pass
-   * (a profile or an environment is missing) or whose name the project has is reported and the others are still copied.
+   * Copies built-in lanes into a project (#922), each as a lane like any other: its agent steps carry their settings inline (#1105, ADR 0007),
+   * taken from the profiles `implementer@1` and `reviewer@1` of the workspace, on the workspace's hosted runner of 4 vCPU; validated, then saved
+   * as version 1. A lane that does not pass (a profile or the runner is missing) or whose name the project has is reported and the others
+   * are still copied.
    */
   copyBuiltIn(
     user: { id: string },
@@ -167,7 +172,10 @@ export type WorkflowServiceDependencies = {
   projects: Pick<ProjectsRepository, "getById" | "list">;
   environments: ImplementerEnvironmentsRepository;
   /** The profiles of the workspace (#843): the names and versions a step may run, and what a version is (may it push, its default result). */
-  profiles: Pick<ProfilesRepository, "list" | "versionFacts" | "archivedNames">;
+  profiles: Pick<
+    ProfilesRepository,
+    "list" | "versionFacts" | "archivedNames" | "findByName"
+  >;
   /**
    * #1052: the MCP servers of the workspace, so a lane can name only those and the validator can say which are broken. Left out: the
    * workspace has none, and a lane that names a server is refused (it fails closed).
@@ -262,6 +270,71 @@ async function runnerInfos(
       });
   }
   return infos;
+}
+
+type AgentSettingsOutcome =
+  { ok: true; settings: BuiltInAgentSettings } | { ok: false; issue: Issue };
+
+/** The profile each built-in role copies its settings from, at the version the built-in lanes have always named. */
+const BUILT_IN_PROFILES: Record<BuiltInRole, string> = {
+  implementer: "implementer",
+  reviewer: "reviewer",
+};
+
+/**
+ * The settings of a built-in agent (#1105, ADR 0007): what the profile `implementer@1` or `reviewer@1` of the workspace holds (the harness,
+ * the model, the push right, the instructions) and the id of the workspace's hosted runner of 4 vCPU. The profile and the runner are
+ * what the built-in lanes needed before, so a workspace that could copy them can still; a missing one is the validator's own answer.
+ *
+ * RELEASE B FOLLOW-UP (ADR 0007): the profile pages and routes go away in release B, and then `implementer@1` / `reviewer@1` can no longer be
+ * made, so this copy can never succeed for a workspace that lacks them (`profile_unknown` at `/steps`). Release B must first give the built-in
+ * lanes another source of settings (instance-level defaults, or settings stored with the built-in lane). Until then this is the source.
+ *
+ * A built-in lane goes through `createLane`, so it also meets the model rule of a save (`model_not_allowed`): a profile's model that the
+ * workspace cannot run any more refuses the copy of the lane, which the profile form did not (its rule ran when the profile was saved).
+ * Project creation reports it per lane exactly like `profile_unknown`: `{ key, ok: false, code: "WORKFLOW_INVALID" }`, and the others
+ * are still copied.
+ */
+async function builtInSettings(
+  role: BuiltInRole,
+  profiles: Pick<ProfilesRepository, "findByName">,
+  runners: Pick<NamedRunnersRepository, "list"> | undefined,
+): Promise<AgentSettingsOutcome> {
+  const name = BUILT_IN_PROFILES[role];
+  const found = await profiles.findByName(name, 1);
+  if (found === undefined)
+    return {
+      ok: false,
+      issue: issue(
+        "/steps",
+        "profile_unknown",
+        `The built-in lanes take the settings of their agents from the profile '${name}@1' of the workspace, and there is none (an archived profile does not count). Create it, or write the lane yourself.`,
+      ),
+    };
+  const hosted = (await runners?.list())?.find(
+    (runner) =>
+      runner.kind === "hosted" && runner.vcpus === BUILT_IN_RUNNER_VCPUS,
+  );
+  if (hosted === undefined)
+    return {
+      ok: false,
+      issue: issue(
+        "/steps",
+        "runner_unknown",
+        `The built-in lanes run on the hosted runner of ${String(BUILT_IN_RUNNER_VCPUS)} vCPU, and the workspace has none.`,
+      ),
+    };
+  const { content } = found.version;
+  return {
+    ok: true,
+    settings: {
+      harness: content.harness ?? "opencode",
+      model: content.model,
+      canPush: content.canPush,
+      instructions: content.instructions,
+      runner: hosted.id,
+    },
+  };
 }
 
 export function createWorkflowService({
@@ -662,17 +735,56 @@ export function createWorkflowService({
     create: createLane,
 
     async copyBuiltIn(user, projectId, keys, statuses, provider) {
-      const [first] = [...(await environments.listSummaries())].sort((a, b) =>
-        a.name.localeCompare(b.name),
-      );
-      const environment = first?.name ?? "node";
+      const roles = new Map<BuiltInRole, Promise<AgentSettingsOutcome>>();
+      const agentOf = (role: BuiltInRole): Promise<AgentSettingsOutcome> => {
+        let found = roles.get(role);
+        if (found === undefined) {
+          found = builtInSettings(role, profiles, runners);
+          roles.set(role, found);
+        }
+        return found;
+      };
       const results: BuiltInLaneResult[] = [];
       for (const key of keys) {
         try {
+          const needed = await Promise.all(
+            BUILT_IN_ROLES[key].map(
+              async (role) => [role, await agentOf(role)] as const,
+            ),
+          );
+          const failed = needed.flatMap(([, outcome]) =>
+            outcome.ok ? [] : [outcome.issue],
+          );
+          if (failed.length > 0) {
+            results.push({
+              key,
+              ok: false,
+              code: "WORKFLOW_INVALID",
+              errors: failed,
+            });
+            continue;
+          }
+          const settings = Object.fromEntries(
+            needed.map(([role, outcome]) => [
+              role,
+              outcome.ok ? outcome.settings : undefined,
+            ]),
+          ) as Partial<Record<BuiltInRole, BuiltInAgentSettings>>;
+          // A lane without an agent of one role (the review lane has no implementer) is not given that role's settings.
+          const fallback = (settings.implementer ??
+            settings.reviewer) as BuiltInAgentSettings;
           const view = await createLane(
             user,
             projectId,
-            builtInLaneDocument(key, environment, statuses, provider),
+            builtInLaneDocument(
+              key,
+              {
+                implementer: settings.implementer ?? fallback,
+                reviewer: settings.reviewer ?? fallback,
+              },
+              statuses,
+              provider,
+            ),
           );
           results.push({
             key,

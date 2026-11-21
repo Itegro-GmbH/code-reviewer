@@ -36,6 +36,14 @@ const resultContract = createContractValidator("result-schema.v1.json");
 const resolver = createResolver({
   environments: [{ name: "node" }],
   profiles: FAKE_RESOLVER.profiles(),
+  // The hosted runner the example's agent steps name (#1105).
+  runners: [
+    {
+      id: "runner-vercel-4-vcpu",
+      name: "Vercel Sandbox 4 vCPU",
+      kind: "hosted",
+    },
+  ],
 });
 
 type Json = Record<string, unknown>;
