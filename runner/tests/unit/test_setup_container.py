@@ -614,9 +614,8 @@ def test_a_container_that_cannot_leave_the_setup_network_is_not_handed_over_and_
 # #1009-T15
 def test_the_setup_container_can_be_made_with_no_new_privileges_like_the_agents_container() -> None:
     """The Claude Code agent's container is sealed (`no-new-privileges`); the setup container is the
-    agent's container, so it takes the same flag. `subscription_setup_script` refuses that harness
-    with a script today; the day it does not, the setup's definition already has the one change it
-    needs, and the agent's seal check refuses an adopted container that lacks it."""
+    agent's container, so it takes the same flag (`job_run.harness_setup_seams`, #1126), and the
+    agent's seal check refuses an adopted container that lacks it."""
     plain = setup_document("sha256:aa", "volume-1", 1_000_000)["HostConfig"]
     sealed = setup_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)
     sealed = sealed["HostConfig"]

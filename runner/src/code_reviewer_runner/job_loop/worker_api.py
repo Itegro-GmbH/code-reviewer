@@ -111,6 +111,10 @@ WORKER_FEATURES: tuple[str, ...] = (
     # `/work/<name>`, pushes each with its own token and reports `implementer.repos`. Both
     # harnesses work this way.
     "implementer_multi_repo",
+    # #1126: the Worker runs a setup script on the harness `claude-code` (before the login is handed
+    # to the agent) and reads the step's network rule for it (the hosts besides the model's own are
+    # read-only). Without it the app ends such a turn, free, instead of the Worker ignoring them.
+    "implementer_subscription_setup",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

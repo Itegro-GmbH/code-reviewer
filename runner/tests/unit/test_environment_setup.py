@@ -616,3 +616,80 @@ def test_the_production_setup_makes_an_agent_container_that_takes_the_script_con
     assert made._container == "ee" * 32  # pyright: ignore[reportPrivateUsage]
     assert made._adopted == adopted  # pyright: ignore[reportPrivateUsage]
     assert made._memory_bytes == 6144 * 1024 * 1024  # pyright: ignore[reportPrivateUsage]
+
+
+def subscription_job_text(environment: dict[str, Any]) -> str:
+    document: dict[str, Any] = json.loads(job_text(environment))
+    spec = document["implementer"]
+    del spec["cost"], spec["modelEntry"], document["llm"]
+    spec["profile"] = {"name": "claude", "version": 1, "canPush": True, "harness": "claude-code"}
+    spec["subscription"] = {"model": "claude-opus-5-5", "maxBudgetUsd": "2.50"}
+    return json.dumps(document)
+
+
+# #1126-T30
+def test_a_subscription_turn_sets_up_in_the_layers_image_sealed_and_takes_the_container_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The script runs in the container the agent keeps, so that container is made from the image
+    that has Claude Code in it and with `no-new-privileges`; the agent takes it over with the same
+    seams (its seal check would refuse a container that differs). The login is in neither: it is
+    the agent's exec that gets it, once the script has ended."""
+    from code_reviewer_runner.implementer import job_run
+    from code_reviewer_runner.implementer.agent_container import AgentContainer
+    from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin
+    from code_reviewer_runner.implementer.claude_code.readiness import ReadyHarness
+
+    login = "sk-" + "ant-" + "oat01-setupordertest-setupordertest-setupordertest"
+    layer = "code-reviewer-agent-claude-code:2.1.311-test"
+
+    class Quiet:
+        def __init__(self, *args: Any, **options: Any) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    seen: list[sc.SetupSeams] = []
+
+    def capture(*arguments: Any, **options: Any) -> es.EnvironmentSetup:
+        seen.append(options["seams"])
+        return es.EnvironmentSetup(Adopted("ee" * 32), None, None, ())
+
+    monkeypatch.setattr(job_run, "ReaderAccess", Quiet)
+    monkeypatch.setattr(job_run, "GitWorkspace", Quiet)
+    monkeypatch.setattr(job_run, "run_environment_setup", capture)
+    job = parse_implementer_input(
+        subscription_job_text(
+            {
+                "name": "E",
+                "setupScript": SCRIPT,
+                "network": {"mode": "list", "hosts": ["fonts.googleapis.com"]},
+            }
+        )
+    )
+    harness = ReadyHarness(ClaudeLogin.oauth_token(login), layer)
+
+    setup = job_run.production_setup(
+        job, {"RUNNER_IMPLEMENTER_AGENT_MEMORY_MB": "6144"}, lambda: None, harness
+    )
+
+    assert setup.environment is not None
+    setup.environment.run(job, lambda: 0.0, lambda: False, 3600.0)
+    [seams] = seen
+    assert seams.image == layer and seams.no_new_privileges is True
+    assert login not in repr(seams), "nothing of the login is given to the setup"
+    made = setup.environment.place(Adopted("ee" * 32))()
+    assert isinstance(made, AgentContainer)
+    taken = made._seams  # pyright: ignore[reportPrivateUsage]
+    assert taken.image == layer and taken.no_new_privileges is True
+    # The turn's rule is the forced one with the step's host read-only.
+    assert made._rule.read_only == ("fonts.googleapis.com",)  # pyright: ignore[reportPrivateUsage]
+
+
+# #1126-T31
+def test_a_turn_on_another_harness_sets_up_exactly_as_before() -> None:
+    from code_reviewer_runner.implementer.job_run import harness_setup_seams
+
+    base = sc.SetupSeams()
+    assert harness_setup_seams(base, None) is base

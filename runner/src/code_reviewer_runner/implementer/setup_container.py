@@ -408,8 +408,8 @@ class SetupSeams:
     # The file the VM's memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
     # The agent's container of a turn on Claude Code is made with `no-new-privileges` (#856); the
-    # setup's is the agent's container, so it takes the same seam (`subscription_setup_script`
-    # refuses that harness with a script today).
+    # setup's is the agent's container, so it takes the same seam (`job_run.harness_setup_seams`,
+    # #1126, which also gives it the layer's image).
     no_new_privileges: bool = False
     # Which Docker the container is made in (#1017): the VM's, or B's on the Incus backend. There
     # `install_rules` is False: the setup network's walls are the NICs of the instances (the

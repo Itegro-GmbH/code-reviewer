@@ -83,6 +83,7 @@ from .result_channel import ResultReader, make_result_directory, redacted_value
 from .resume_session import ResumeInput
 from .runner_profile import agent_seams, outer_proxy_for_job, reader_seams, setup_seams
 from .session import AgentPlace, ImplementerSession, SessionSeams
+from .setup_container import SetupSeams
 from .snapshot_pump import SnapshotPump
 from .step_pump import StepPump
 from .turn_result import TurnResult
@@ -239,6 +240,19 @@ def check_sandbox(environment: Mapping[str, str]) -> JobError | None:
     return None
 
 
+def harness_setup_seams(base: SetupSeams, harness: ReadyHarness | None) -> SetupSeams:
+    """The setup container of a turn on Claude Code (#1126). The script runs in the very container
+    the agent keeps, so it is made from the layer's image (the program is there when the agent
+    starts) and with `no-new-privileges`, as the agent's container is. **The login is not in it
+    and not in its definition**: it is handed to the agent's own exec when the agent starts
+    (`claude_code/agent.py`), long after the script has ended and the container has left the setup
+    network, so nothing the script, or a package it installs, runs sees the token, whatever the
+    network of the setup is. `base` unchanged for another harness."""
+    if harness is None:
+        return base
+    return replace(base, image=harness.image, no_new_privileges=True)
+
+
 def production_setup(
     job: ImplementerInput,
     environment: Mapping[str, str],
@@ -256,14 +270,10 @@ def production_setup(
     # #843: a turn with a result schema has the result directory in its containers and its readers.
     with_result = spec.result_schema is not None
     subscription = spec.subscription is not None
-    if subscription and (harness is None or (spec.environment and spec.environment.has_script)):
-        # The layer is built on the golden image; a script's image is not that (a follow-up).
+    if subscription and harness is None:
         raise JobError(
             ErrorCode.IMPLEMENTER_CONFIG_INVALID,
-            "subscription_setup_script: a turn on the harness claude-code cannot run in an "
-            "environment with a setup script yet"
-            if harness is not None
-            else "harness_not_ready: the device was not looked at for this job",
+            "harness_not_ready: the device was not looked at for this job",
         )
     if subscription:
         environment_rule = OFF if spec.environment is None else spec.environment.network
@@ -352,7 +362,11 @@ def production_setup(
             elapsed=elapsed,
             should_stop=should_stop,
             secrets=turn.secrets,
-            seams=replace(setup_seams(environment), result=with_result, places=places),
+            seams=replace(
+                harness_setup_seams(setup_seams(environment), harness),
+                result=with_result,
+                places=places,
+            ),
         )
 
     rule = rule_of_turn
@@ -366,9 +380,13 @@ def production_setup(
     )
 
     def place_from(adopted: Adopted) -> Callable[[], AgentPlace]:
+        # #1126: the container the script ran in is the one the agent keeps, so a Claude Code
+        # turn takes it over with its own seams (the layer's image, `no-new-privileges`) too.
         return lambda: AgentContainer(
             memory,
-            agent_seams(environment, AgentSeams(mcp=has_mcp, places=places)),
+            agent_seams(
+                environment, AgentSeams(mcp=has_mcp, places=places) if claude is None else claude
+            ),
             rule,
             result=with_result,
             adopted=adopted,
