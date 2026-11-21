@@ -124,9 +124,13 @@ describe("the tabs", () => {
     expect(
       screen.queryByRole("link", { name: "All lanes of the workspace" }),
     ).toBeNull();
+    // #1105: a task started by hand is gone; a task is a run of the one-off lane, so the tab links to no Implementer page.
+    expect(screen.queryByRole("link", { name: "send a task" })).toBeNull();
     expect(
-      screen.getByRole("link", { name: "send a task" }).getAttribute("href"),
-    ).toBe("/w/acme/implementer");
+      screen
+        .getAllByRole("link")
+        .filter((link) => link.getAttribute("href")?.includes("/implementer")),
+    ).toEqual([]);
   });
 
   // #925

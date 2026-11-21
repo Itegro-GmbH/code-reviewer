@@ -308,6 +308,18 @@ function FieldControl({
               }
             />
           );
+        // A text the schema allows to be long (a task, a description) is written in a box, not on one line.
+        if (field.kind === "string" && field.long === true)
+          return (
+            <Textarea
+              {...control}
+              rows={6}
+              value={typeof value === "string" ? value : ""}
+              onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+                onChange(event.target.value)
+              }
+            />
+          );
         return (
           <Input
             {...control}

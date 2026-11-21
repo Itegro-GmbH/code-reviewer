@@ -107,7 +107,7 @@ describe("one repository per run", () => {
           input(d).required = ["other"];
         }),
       ),
-    ).toEqual([["/trigger/input", "repo_required"]]);
+    ).toEqual([]);
     expect(codes(change(tiny(), (d) => delete input(d).required))).toEqual([
       ["/trigger/input", "repo_required"],
     ]);

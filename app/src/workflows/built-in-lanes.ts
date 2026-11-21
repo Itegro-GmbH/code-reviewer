@@ -11,6 +11,10 @@
 // The four status names are the options of the board's Status field; the defaults below are the lane's own, changed in the lane builder
 // (the picker offers the names of the project's board) or by the caller that copies the lane (`LaneStatuses`).
 //
+// "One-off task" (ADR 0007 decision 15, the owner's "Einmalige Aufgabe") replaces a task started by hand outside a lane: a manual trigger with
+// one required text, one agent step with the implementer's settings on the same hosted runner, and the pull request. It names no repository:
+// a trigger whose input has neither a `ticket` nor a `repo` works on the repository of the lane's project, on its default branch.
+//
 // "Issue to PR" is the first workflow of `docs/workflows.md`, which a test holds to `contracts/examples/workflow/Workflow.json`.
 
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
@@ -38,6 +42,7 @@ export type BuiltInRole = keyof BuiltInAgents;
 
 /** The agents each built-in lane has: the review lane has a reviewer only. */
 export const BUILT_IN_ROLES: Record<BuiltInLaneKey, readonly BuiltInRole[]> = {
+  "one-off-task": ["implementer"],
   "issue-to-pr": ["implementer", "reviewer"],
   "issue-to-pr-status": ["implementer", "reviewer"],
   "review-a-pull-request": ["reviewer"],
@@ -64,6 +69,7 @@ export const LANE_COPY_FAILED = "LANE_COPY_FAILED";
 
 /** The keys a new project names the lanes it copies by. */
 export const BUILT_IN_LANE_KEYS = [
+  "one-off-task",
   "issue-to-pr",
   "issue-to-pr-status",
   "review-a-pull-request",
@@ -143,6 +149,10 @@ const FINDINGS = {
 const PULL_REQUEST_NOTE =
   "The lane opens the pull request itself after the review; do not open one and do not report it as missing or open work.";
 
+/** The one-off lane has no review step: it only says who opens the pull request. */
+const ONE_OFF_PULL_REQUEST_NOTE =
+  "The lane opens the pull request itself; do not open one.";
+
 export const REVIEW_INSTRUCTION =
   `Review branch {{implement.branch}} against this issue. Do not change anything. ${PULL_REQUEST_NOTE}\n\n` +
   "Issue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\n" +
@@ -188,6 +198,65 @@ function implementAndReview(agents: BuiltInAgents): Record<string, unknown> {
       },
     ],
     until: { empty: "{{review.findings}}" },
+  };
+}
+
+/** The longest task a person can hand to the one-off lane: a few pages, so the instruction and the pull request body stay one readable text. */
+export const ONE_OFF_TASK_MAX_LENGTH = 8000;
+
+function oneOffTask(agents: BuiltInAgents): Record<string, unknown> {
+  return {
+    version: 1,
+    name: "One-off task",
+    description:
+      "A person describes a task; one agent does it on the project's repository and the lane opens a pull request with the result. It replaces starting a task by hand: start it from the control panel or the project's Lanes tab and write the task in the form. A follow-up is a new run: start the lane again and name the earlier branch in the task.",
+    triggers: [
+      {
+        id: "manual",
+        kind: "manual",
+        input: {
+          type: "object",
+          required: ["task"],
+          properties: {
+            task: {
+              type: "string",
+              maxLength: ONE_OFF_TASK_MAX_LENGTH,
+              description:
+                "What the agent should do, in your own words. It works on the project's repository, on its default branch.",
+            },
+          },
+        },
+        steps: [],
+      },
+    ],
+    budgetUsd: 10,
+    steps: [
+      {
+        id: "implement",
+        kind: "agent",
+        ...settingsOf(agents.implementer),
+        session: "new",
+        instruction: `{{trigger.input.task}}\n\n${ONE_OFF_PULL_REQUEST_NOTE}`,
+        result: {
+          type: "object",
+          required: ["summary"],
+          properties: {
+            summary: {
+              type: "string",
+              description: "What was done, for the pull request.",
+            },
+          },
+        },
+      },
+      {
+        id: "pr",
+        kind: "action",
+        connector: "github.pullRequest.open",
+        head: "{{implement.branch}}",
+        title: "One-off task: {{trigger.input.task}}",
+        body: "{{implement.summary}}\n\nTask: {{trigger.input.task}}",
+      },
+    ],
   };
 }
 
@@ -446,6 +515,7 @@ export function builtInLaneDocument(
   /** The provider of the project's ticket source (#1040): "Issue to PR (status)" words its pull request and its texts for it. */
   provider: TicketProviderName = "github",
 ): Record<string, unknown> {
+  if (key === "one-off-task") return oneOffTask(agents);
   if (key === "issue-to-pr") return issueToPr(agents);
   if (key === "issue-to-pr-status")
     return issueToPrStatus(agents, statuses, provider);

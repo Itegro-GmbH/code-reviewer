@@ -521,7 +521,7 @@ describe("triggers with pre-steps", () => {
 
 describe("the input of a manual or api trigger", () => {
   // #916-T40
-  it("needs the ticket, or the repository, so that the run has one, once it declares an input", () => {
+  it("holds a declared ticket or repository to its rules, and lets an input that names neither work on the project's repository", () => {
     expect(
       codes(
         workflow([
@@ -535,7 +535,7 @@ describe("the input of a manual or api trigger", () => {
           },
         ]),
       ),
-    ).toEqual([["/triggers/0/input", "repo_required"]]);
+    ).toEqual([]);
     // The ticket must be handed in: it names the repository of the run.
     expect(
       codes(
@@ -560,7 +560,7 @@ describe("the input of a manual or api trigger", () => {
       expect(codes(workflow([{ id: "m", kind }], [comment("say", 7)]))).toEqual(
         [],
       );
-    // An input that is declared is still held to a repository.
+    // An input that declares neither a ticket nor a repository (the one-off lane's text, ADR 0007 decision 15) works on the project's repository too.
     expect(
       codes(
         workflow(
@@ -577,7 +577,27 @@ describe("the input of a manual or api trigger", () => {
           [comment("say", 7)],
         ),
       ),
-    ).toEqual([["/triggers/0/input", "repo_required"]]);
+    ).toEqual([]);
+  });
+
+  // #1105: `ticket` is reserved, a text field of that name would be split off and read as the run's ticket.
+  it("refuses an input named ticket whose type is not ticket, required or not", () => {
+    for (const required of [["ticket"], []])
+      expect(
+        codes(
+          workflow([
+            {
+              id: "m",
+              kind: "manual",
+              input: {
+                type: "object",
+                properties: { ticket: { type: "string" } },
+                required,
+              },
+            },
+          ]),
+        ),
+      ).toEqual([["/triggers/0/input/properties/ticket", "repo_required"]]);
   });
 
   // #1106

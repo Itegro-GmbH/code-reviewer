@@ -2,7 +2,7 @@
 
 Part of the Implementer of the factory deployment (epic #745, `plans/implementer-slice.md`). This folder is the server side of
 "send off a task": which repositories, branches and models a person can pick, and the validated submit that writes a session, a
-turn and a queued job, and (below, "Follow-up turns") the next instruction of a session. The page that uses it is `/w/<slug>/implementer` (#756, below). It follows the pattern of `manual-reviews`.
+turn and a queued job, and (below, "Follow-up turns") the next instruction of a session. The page that used it, `/w/<slug>/implementer` (#756, below), is gone since #1105 (ADR 0007 decision 15: a task is a run of the lane "One-off task"); the routes stay until release B. It follows the pattern of `manual-reviews`.
 
 The routes exist only in a deployment with the capability `implementer` (the product `factory`, switched on by
 `PRODUCT_CAPABILITIES`). Everywhere else every route below is **absent**: the access proxy answers it as a path that does not
@@ -169,42 +169,9 @@ Unit: `branch-name.test.ts` (more than 30 names, a subset cross-checked against 
 files with the running server's wiring, also in the deployments without the capability). Byte-for-byte equality of the 404 with a
 path that does not exist runs in the hosted lane (`e2e/hosted/capabilities.e2e.ts`).
 
-## The page (#756)
+## The page (#756) is gone (#1105)
 
-`src/app/(app)/w/[workspace]/implementer/page.tsx` and `ui/`. The page is no longer a place of the sidebar (#925: the sidebar is ToDos, Projects, Runs, Profiles, Runners, Settings); it is reached from the
-Lanes tab of a project ("send a task") and, like the routes, is **absent** outside the capability: `routes.ts` classifies it `implementer`, the proxy answers
-it as a path that does not exist, and the page asks again (`requireImplementerCapability()`) before it looks at the session. The server hands
-the form the workspace and the operator's maximum cost per task and nothing else; the form loads the repositories, branches and models through
-the routes above, so the page reads no secret and no token.
-
-| File                      | Role                                                                                                                                                                               |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ui/implementer-form.tsx` | The form: repository, base branch (the default one preselected and marked), new branch, task (20,000 characters, counter), model, optional cost limit; the submit and its refusals |
-| `ui/model-picker.tsx`     | The model picker with the select of the settings form: provider then model on the own key, one entry (by the operator's name) on the operator's key, the empty states              |
-| `ui/api.ts`               | The four calls to the routes (`requestJson`), with a stand-in for tests                                                                                                            |
-| `ui/messages.ts`          | A sentence for every stable code (`IMPLEMENTER_ERROR_CODES`), every rule of the branch name and every refusal reason of a model; `messages.test.ts` fails for a missing one        |
-| `ui/cost-limit.ts`        | Dollars as typed to whole cents, refused above the lower of the operator's maximum and $100 before anything is sent                                                                |
-| `ui/branch-suggestion.ts` | `implementer/` and six random lowercase letters or digits, made in the browser (a prerendered name would be the same for everybody)                                                |
-| `ui/use-request.ts`       | Loads one thing from a route; an answer for another repository than the one shown is dropped                                                                                       |
-
-- **A repository that cannot be written to** is listed, disabled, with a note for the reason that is true (`unwritable`): "approve the new GitHub
-  permission" only where the permission is what is missing; a removed or suspended installation, a failed sign-in of the app, a refused scope
-  and an unreachable repository each have their own note and sentence (`describeUnwritable`). If **no** repository can be written to, the form
-  says why, once for each reason, and cannot be sent. Without a linked repository the page links to Connections; without a model it links to
-  the LLM access settings.
-- **A base branch beyond the first 100.** When the route says `truncated`, a field "Another base branch" appears under the list; a name typed
-  there is the base branch (emptied, the list's choice applies). The server refuses a missing base with `404`, which marks the typed field. A
-  base branch that disappeared from the list marks nothing: the list is loaded again, the pick is dropped (the default applies) and a
-  sentence says so.
-- **The cost limit** shown and checked is the lower of the operator's maximum and the route's own bound ($100); the sentence names it.
-- **The branch name** is checked as the server checks it (`checkBranchName`, `validateStartInput`): on leaving the field and at the submit, with one
-  sentence per rule. `IMPLEMENTER_BRANCH_EXISTS` and `IMPLEMENTER_BRANCH_CONFLICT` mark the field and say that **a new branch name is needed**.
-- **A retried submit starts one task.** The client request id belongs to the body: a send of the same body again (after `503` or a lost
-  answer) carries the same id and the server answers `200` with the first task's ids; a body that was edited since is another task and gets
-  a new id (a body that went back to an earlier one gets that one's id again). If the server still names another task for the id
-  (`IMPLEMENTER_REQUEST_REUSED`), the form says a task with this form was already started and links to it. The button is disabled while the
-  request is pending, and a second Enter, even one in the same tick, is ignored. Any success (`201` or `200`) goes to
-  `/w/<slug>/runs/<runId>`; the link to the run is shown at once, and a page that comes back from the back/forward cache (`pageshow`,
-  `persisted`) leaves the sending state.
-- No text from GitHub or from a response is shown: every refusal is a fixed sentence for its code, and a code the page does not know gets the
-  generic sentence.
+The page `/w/<slug>/implementer`, its form (`ui/implementer-form.tsx`), the branch suggestion and the first-task calls of `ui/api.ts` were removed with ADR 0007 decision 15: a task that belongs
+to no ticket is a run of the built-in lane "One-off task" (`docs/workflows.md`, "Built-in lanes"), started from the control panel. The routes above stay until release B, so a script that uses
+them keeps working, but no page calls the start route. What is left in `ui/` is the "Continue" form of an earlier task and what it shares: the model picker, the cost-limit parsing, `ui/api.ts`
+(the models and the environments of the workspace), `ui/messages.ts` (a sentence for every stable code) and `ui/use-request.ts`.

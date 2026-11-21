@@ -450,7 +450,8 @@ export const PAGE_COPY = {
   stepNumber: "Number",
   stepExisting: "This already existed, so nothing new was created.",
   stepCreated: "This was created by the step.",
-  profile: "Profile",
+  /** A run that started before the settings moved into the steps recorded the profile it ran with: shown as history, never for a new run. */
+  profileRecorded: "profile recorded then:",
   openRun: "Open the run",
   askHeading: "The agent asks",
   askChoose: "Answer",
@@ -527,7 +528,7 @@ export const FLOW_COPY = {
   finishedAt: "Finished",
   duration: "Took",
   cost: "Cost",
-  profile: "Profile",
+  profileRecorded: "Profile recorded then",
   rounds: "Rounds",
   roundsHeading: "All rounds",
   roundsEarlier: "Earlier rounds",
@@ -605,7 +606,7 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_PROJECT_INACTIVE:
     "The project of this lane is switched off. Switch it on to start this lane.",
   WORKFLOW_RUN_PROJECT_REQUIRED:
-    "This lane has no project, and its trigger takes no input, so there is no repository to work on. Put the lane in a project.",
+    "This lane has no project, and its trigger names no repository or ticket, so there is no repository to work on. Put the lane in a project.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
     "The workflow has a step of a kind the engine does not run (a reserved one), so it cannot be started.",
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,

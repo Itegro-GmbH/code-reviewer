@@ -122,7 +122,10 @@ function describeSession(session: unknown): string {
 }
 
 /** An agent step with its settings written in it (#1105): the harness, the model and whether it may push, as `opencode · provider/model · may push`. */
-function describeInlineSettings(node: Doc): string {
+function describeInlineSettings(
+  node: Doc,
+  runnerNames: Readonly<Record<string, string>>,
+): string {
   const harness =
     typeof node.harness === "string" && node.harness !== ""
       ? node.harness
@@ -140,10 +143,22 @@ function describeInlineSettings(node: Doc): string {
       : node.canPush === false
         ? "read only"
         : "";
-  return [harness, brief(modelText, 60), push].filter(Boolean).join(" · ");
+  // The runner is stored by id and shown by name (ADR 0007 decision 14); an id no name is known for is shown as it is.
+  const runner =
+    typeof node.runner === "string" && node.runner !== ""
+      ? `on ${brief(runnerNames[node.runner] ?? node.runner, 60)}`
+      : "";
+  return [harness, brief(modelText, 60), push, runner]
+    .filter(Boolean)
+    .join(" · ");
 }
 
-export function describeNode(node: Doc, kind: NodeKind): NodeDescription {
+export function describeNode(
+  node: Doc,
+  kind: NodeKind,
+  /** The names of the runners of the workspace by id, for an agent step that names one. */
+  runnerNames: Readonly<Record<string, string>> = {},
+): NodeDescription {
   const note = typeof node.description === "string" ? node.description : "";
   const kindLabel = KIND_LABEL[kind];
   if (kind === "trigger") {
@@ -159,7 +174,7 @@ export function describeNode(node: Doc, kind: NodeKind): NodeDescription {
       return {
         kindLabel,
         title: note === "" ? "Agent step" : brief(note, 80),
-        summary: `${describeInlineSettings(node)} · ${describeSession(node.session)}`,
+        summary: `${describeInlineSettings(node, runnerNames)} · ${describeSession(node.session)}`,
       };
     }
     const profile = typeof node.profile === "string" ? node.profile : "";

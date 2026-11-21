@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   BUILT_IN_LANE_KEYS,
+  BUILT_IN_ROLES,
   DEFAULT_LANE_STATUSES,
   builtInLaneDocument as documentOf,
   isBuiltInLaneKey,
@@ -147,8 +148,58 @@ describe("the built-in lanes", () => {
   // #922-T04
   it("knows its keys", () => {
     expect(isBuiltInLaneKey("issue-to-pr")).toBe(true);
+    expect(isBuiltInLaneKey("one-off-task")).toBe(true);
     expect(isBuiltInLaneKey("nothing")).toBe(false);
     expect(isBuiltInLaneKey(3)).toBe(false);
+  });
+
+  // #1105-T410 (ADR 0007 decision 15)
+  it("One-off task has a manual trigger with one required text, one agent step on the hosted runner and the pull request, and names no repository, ticket or profile", () => {
+    const document = builtInLaneDocument("one-off-task") as {
+      name: string;
+      triggers: { kind: string; input: Record<string, unknown> }[];
+      steps: Record<string, unknown>[];
+    };
+
+    expect(document.name).toBe("One-off task");
+    expect(document.triggers).toHaveLength(1);
+    expect(document.triggers[0]).toMatchObject({
+      kind: "manual",
+      input: {
+        required: ["task"],
+        properties: { task: { type: "string" } },
+      },
+    });
+    expect(Object.keys(document.triggers[0]?.input.properties ?? {})).toEqual([
+      "task",
+    ]);
+    expect(document.steps.map((step) => [step.id, step.kind])).toEqual([
+      ["implement", "agent"],
+      ["pr", "action"],
+    ]);
+    expect(document.steps[0]).toMatchObject({
+      canPush: true,
+      runner: RUNNER,
+      instruction: expect.stringContaining("{{trigger.input.task}}"),
+    });
+    expect(document.steps[1]).toMatchObject({
+      connector: "github.pullRequest.open",
+      head: "{{implement.branch}}",
+      title: "One-off task: {{trigger.input.task}}",
+    });
+    // It has no review step, so the note must not speak of one (#1119).
+    expect(document.steps[0]?.instruction).toContain(
+      "The lane opens the pull request itself; do not open one.",
+    );
+    expect(document.steps[0]?.instruction).not.toContain("review");
+    const text = JSON.stringify(document);
+    for (const absent of ['"profile"', '"environment"', '"repo"', '"ticket"'])
+      expect(text).not.toContain(absent);
+  });
+
+  // #1105-T411
+  it("One-off task needs the implementer's settings only, so a workspace with no reviewer still gets it", () => {
+    expect(BUILT_IN_ROLES["one-off-task"]).toEqual(["implementer"]);
   });
 
   // #1036

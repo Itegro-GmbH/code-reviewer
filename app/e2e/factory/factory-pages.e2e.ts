@@ -16,6 +16,7 @@ import {
   repositoryIdOf,
   seedWaitingRun,
   signInAsFactoryAdmin,
+  TASK_LANE_DOCUMENT,
 } from "../helpers/factory";
 import {
   addGithubInstallation,
@@ -32,6 +33,7 @@ test.describe.configure({ mode: "serial" });
 test.describe("the pages of the factory", () => {
   let repositoryId = "";
   let laneId = "";
+  let projectId = "";
   let waitingRunId = "";
   // The address of the run the lane made on the first issue.
   let startedRunPath = "";
@@ -77,6 +79,7 @@ test.describe("the pages of the factory", () => {
     const { project: made } = (await project.json()) as {
       project: { id: string };
     };
+    projectId = made.id;
     const lane = await request.post(
       `/api/w/default/workflows?projectId=${made.id}`,
       { data: LANE_DOCUMENT },
@@ -296,6 +299,40 @@ test.describe("the pages of the factory", () => {
     await expect(
       page.getByText("GitHub issues", { exact: true }),
     ).toBeVisible();
+  });
+
+  // #1105: a task started by hand is a run of the one-off lane; the pages of the hand-started task, profiles and environments are gone.
+  test("@smoke a lane whose only input is a text starts from its page on the project's repository, and the old pages are gone", async ({
+    page,
+  }) => {
+    await openProject(page, "lanes");
+    // The Lanes tab no longer sends a person to a page of its own for a task.
+    await expect(page.getByRole("link", { name: "send a task" })).toHaveCount(
+      0,
+    );
+    await expect(page.locator('a[href$="/implementer"]')).toHaveCount(0);
+
+    const made = await page.request.post(
+      `/api/w/default/workflows?projectId=${projectId}`,
+      { data: TASK_LANE_DOCUMENT },
+    );
+    expect(made.status(), await made.text()).toBe(201);
+    const taskLaneId = ((await made.json()) as { workflow: { id: string } })
+      .workflow.id;
+    await page.goto(`/w/default/workflows/${taskLaneId}`);
+    const task = page.getByLabel("task");
+    await expect(task).toBeVisible();
+    expect(await task.evaluate((element) => element.tagName)).toBe("TEXTAREA");
+    await task.fill("Rename the helper");
+    await page.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/w/default/workflows/${taskLaneId}/runs/[^/]+$`),
+    );
+
+    for (const gone of ["implementer", "profiles", "environments"]) {
+      const response = await page.goto(`/w/default/${gone}`);
+      expect(response?.status(), gone).toBe(404);
+    }
   });
 
   // #951, #1108

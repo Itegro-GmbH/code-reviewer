@@ -90,7 +90,7 @@ export function addressesOf(
   // off: whoever reads here is a Member of a workspace on the operator's key, so every address answers a 4xx, scanned like any other.
   // The billing page of a workspace (#505) is the same: it exists only while billing is on, and this workspace's app has it off. So
   // is the key mode a workspace chooses (#496). The routes behind the Implementer form (#755) exist only in a deployment with the
-  // capability `implementer`, and so does its page (#756), the environments (#818), the workflows (#833, and their pages #873) and the profiles (#843); the app of this journey has not, so they answer the 404 of a path that does
+  // capability `implementer`, and so do the environments (#818), the workflows (#833, and their pages #873) and the profiles (#843), whose pages are gone (#1105); the app of this journey has not, so they answer the 404 of a path that does
   // not exist.
   let results: Array<{ path: string; refused: boolean }> = [
     {
@@ -103,8 +103,6 @@ export function addressesOf(
         // The MCP calls of a run (#1055) are the factory's, like its steps.
         route.pattern === "/api/w/:workspace/runs/:id/mcp-calls" ||
         route.pattern === "/api/w/:workspace/runs/:id/continuation" ||
-        route.pattern === "/w/:workspace/implementer" ||
-        route.pattern === "/w/:workspace/environments" ||
         route.pattern.startsWith("/api/w/:workspace/environments") ||
         route.pattern.startsWith("/api/w/:workspace/workflows") ||
         route.pattern === "/api/w/:workspace/workflow-runs" ||
@@ -117,7 +115,7 @@ export function addressesOf(
         // The MCP servers of a workspace (#1050) are the factory's.
         route.pattern.startsWith("/api/w/:workspace/mcp/") ||
         route.pattern === "/w/:workspace/mcp" ||
-        // The shell of the factory (#925): the ToDos and the profiles, the tabs of a project's cockpit, the settings tabs that moved from
+        // The shell of the factory (#925): the ToDos, the tabs of a project's cockpit, the settings tabs that moved from
         // `/connections` and `/members`, and the review settings below a project.
         route.pattern === "/w/:workspace/settings/integrations" ||
         route.pattern === "/w/:workspace/settings/members" ||
@@ -130,7 +128,6 @@ export function addressesOf(
         route.pattern === "/api/w/:workspace/todos" ||
         route.pattern === "/api/w/:workspace/todos/reviews" ||
         route.pattern === "/api/w/:workspace/projects/:projectId/todos" ||
-        route.pattern === "/w/:workspace/profiles" ||
         route.pattern === "/w/:workspace/projects/:repositoryId/todos" ||
         route.pattern === "/w/:workspace/projects/:repositoryId/lanes" ||
         // The tickets of a project from the ticket mirror (#923): read by the factory's cockpit only.

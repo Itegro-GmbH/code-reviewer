@@ -224,9 +224,10 @@ branch**; a lane without a project is `422 WORKFLOW_RUN_PROJECT_REQUIRED`, and o
 `409 WORKFLOW_RUN_PROJECT_INACTIVE`. The run reads **`project.ticketSource.repositoryId`**, as `withProjectRepository` does today (`workflow-runs/service.ts`),
 not `projects.repository_id` (ADR 0006 notes that the tie is planned to go; nothing new is built on it). For such a run `trigger.input` is
 the empty object, so a step cannot reference `trigger.input.repo` (the validator refuses it as an unknown field); the repository is
-reached through `trigger.repo`, as for any run. A trigger that does declare an input keeps all rules of today (`repo_required`: it must declare
-`ticket` or a required `repo`). `validate.ts` applies `repo_required` to manual **and api** triggers alike, so the rule of an omitted
-`input` is the same for both.
+reached through `trigger.repo`, as for any run. A trigger that declares an input keeps the rules of today for a `ticket` or a `repo` it declares (`repo_required`: the ticket is required, `repo` is a required text). `validate.ts` applies the rule to manual **and api** triggers alike, so the rule of an omitted
+`input` is the same for both. **Amended in #1105 (the one-off lane, decision 15):** an input that declares **neither** `ticket` nor `repo` is accepted and works, like a
+trigger without `input`, on the project's repository and its default branch (`workflow-runs/service.ts` reads the project's repository whenever the schema has neither); the one-off lane's
+required text `task` needs it, and "must declare `ticket` or `repo`" would have forced a repository field on a lane that has the project's.
 
 **Names of runners.** Among **non-revoked** runners of a workspace a name is unique without regard to case: a partial unique index on
 `runners (workspace_id, lower(name)) where revoked_at is null`, so that registering a DevBox again after revoking it keeps its name. A
@@ -408,7 +409,8 @@ The documentation is part of #1104. Where a document describes behaviour that th
 under the heading it concerns and says "This section" or "This page". What stays to be rewritten with the code, by sub-issue:
 
 - **#1105:** `docs/profiles.md` (whole page), the agent step and "Known limits" of `docs/workflows.md`, "Environments" and "Profiles" of
-  `docs/implementer.md`, "Routing" and "Validator rules" of `docs/runner.md`, the built-in lanes.
+  `docs/implementer.md`, "Routing" and "Validator rules" of `docs/runner.md`, the built-in lanes. **Done in release A:** `profiles.md` is a short redirect page that keeps the routes and error tables until release B;
+  the others carry Amended notes and the final wording, and the one-off lane is under "Built-in lanes".
 - **#1106:** the manual trigger in `docs/workflows.md` (the trigger table, `repo_required`).
 - **#1107:** `docs/workflows.md` "The lane builder", the lane page under "The pages", the intro, and the run page text that names the
   profile.
@@ -509,8 +511,12 @@ reads no profile and no label of a lane: only its copies of the contracts mentio
 
 ## Open points
 
-- **The one-off lane "Einmalige Aufgabe"** (decision 15): which runner and settings its step carries in a new project, and what a follow-up
-  of such a run is, are for #1105 and #1108.
+- **The one-off lane "Einmalige Aufgabe"** (decision 15) — **settled in #1105 (release A).** The built-in lane `one-off-task` (English name "One-off task") has a manual trigger with one required text `task`
+  (8,000 characters at most), one agent step `implement` in the inline form (the settings of `implementer@1`, may push, on the workspace's hosted runner of 4 vCPU, the same source as the
+  other built-in lanes) and the pull request step; it works on the project's repository and its default branch. A new project copies it (ticked by default; offered for Jira projects too);
+  a project that exists gets it by saving the document through the API (`docs/workflows.md`, "Built-in lanes"), because the lanes are written through the API and the copy needs the workspace's
+  own model and runner id. **A follow-up of such a run is a new run of the lane** (the task names the earlier branch); there is no `session.continue` step. An optional base or branch input is not
+  part of it. The old follow-up route and the "Continue" form of earlier tasks stay until release B.
 - **A run-level time limit for a waiting job** (decision 13): #1105 confirms that a run time limit exists to end a long wait; if it does
   not, the cancel by a person is the limit.
 - **Creating the hosted runners of a new type** (decision 16): by a migration or at start-up, and the default concurrency per type, are

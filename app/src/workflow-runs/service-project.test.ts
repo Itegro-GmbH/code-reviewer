@@ -625,3 +625,89 @@ describe("a manual start of a trigger without input (#1106)", () => {
     });
   });
 });
+
+// ADR 0007 decision 15, #1105: the one-off lane's input is a text and names no repository.
+describe("a manual start of a trigger whose input names no repository or ticket (#1105)", () => {
+  const TEXT_ONLY = {
+    ...NO_INPUT,
+    triggers: [
+      {
+        id: "manual",
+        kind: "manual",
+        input: {
+          type: "object",
+          required: ["task"],
+          properties: { task: { type: "string" } },
+        },
+      },
+    ],
+  };
+
+  // #1105-T01
+  it("works on the repository of the project and its default branch and keeps the text as the input", async () => {
+    const { service, created } = harness(TEXT_ONLY);
+
+    const started = await service.start(USER, "wf-1", {
+      input: { task: "Rename the helper" },
+      clientRequestId: "r-1",
+    });
+
+    expect(started.created).toBe(true);
+    expect(created[0]).toMatchObject({
+      repositoryId: "repo-widgets",
+      baseBranch: "main",
+    });
+    expect(JSON.parse(created[0]?.triggerInput ?? "{}")).toEqual({
+      task: "Rename the helper",
+    });
+  });
+
+  // #1105-T02
+  it("refuses a start without the text, a repository the trigger does not declare, a lane without a project and a switched-off project", async () => {
+    const missing = harness(TEXT_ONLY);
+    const named = harness(TEXT_ONLY);
+    const loose = harness(TEXT_ONLY, null);
+    const off = harness(TEXT_ONLY, "project-1", undefined, undefined, {
+      active: false,
+    });
+
+    expect(
+      (
+        await refusal(
+          missing.service.start(USER, "wf-1", { clientRequestId: "r-1" }),
+        )
+      ).code,
+    ).toBe("WORKFLOW_RUN_INPUT_INVALID");
+    expect(
+      (
+        await refusal(
+          named.service.start(USER, "wf-1", {
+            input: { task: "x", repo: "acme/other" },
+            clientRequestId: "r-2",
+          }),
+        )
+      ).code,
+    ).toBe("WORKFLOW_RUN_INPUT_INVALID");
+    expect(
+      (
+        await refusal(
+          loose.service.start(USER, "wf-1", {
+            input: { task: "x" },
+            clientRequestId: "r-3",
+          }),
+        )
+      ).code,
+    ).toBe("WORKFLOW_RUN_PROJECT_REQUIRED");
+    expect(
+      (
+        await refusal(
+          off.service.start(USER, "wf-1", {
+            input: { task: "x" },
+            clientRequestId: "r-4",
+          }),
+        )
+      ).code,
+    ).toBe("WORKFLOW_RUN_PROJECT_INACTIVE");
+    for (const h of [missing, named, loose, off]) expect(h.created).toEqual([]);
+  });
+});
