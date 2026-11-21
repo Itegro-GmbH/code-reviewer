@@ -130,8 +130,6 @@ const PROTECTED_ROUTES = [
   // The pages of a workspace: for its members only (src/workspaces/access-runtime.ts).
   "/w/[workspace]",
   "/w/[workspace]/connections",
-  "/w/[workspace]/environments",
-  "/w/[workspace]/implementer",
   "/w/[workspace]/mcp",
   "/w/[workspace]/members",
   "/w/[workspace]/projects",
@@ -141,7 +139,6 @@ const PROTECTED_ROUTES = [
   "/w/[workspace]/projects/[repositoryId]/runs",
   "/w/[workspace]/projects/[repositoryId]/setup",
   "/w/[workspace]/projects/[repositoryId]/todos",
-  "/w/[workspace]/profiles",
   "/w/[workspace]/runners",
   "/w/[workspace]/runs",
   "/w/[workspace]/runs/[id]",
