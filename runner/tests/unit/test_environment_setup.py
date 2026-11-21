@@ -678,7 +678,11 @@ def test_a_subscription_turn_sets_up_in_the_layers_image_sealed_and_takes_the_co
     setup.environment.run(job, lambda: 0.0, lambda: False, 3600.0)
     [seams] = seen
     assert seams.image == layer and seams.no_new_privileges is True
-    assert login not in repr(seams), "nothing of the login is given to the setup"
+    # The login is not a field of what the setup is given (`SetupSeams` has none); the order and
+    # the absence of the login in every request are read from the daemon's calls in
+    # `test_subscription_login_order.py`. What the setup is given for this harness: the leftover
+    # sweep (the login lives in this container).
+    assert seams.kill_leftovers is True
     made = setup.environment.place(Adopted("ee" * 32))()
     assert isinstance(made, AgentContainer)
     taken = made._seams  # pyright: ignore[reportPrivateUsage]

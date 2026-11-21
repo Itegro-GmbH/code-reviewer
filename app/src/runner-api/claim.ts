@@ -44,6 +44,7 @@ import {
   providerHostOf,
   type NetworkRule,
 } from "../network-rule/network.ts";
+import { isSharedWildcard } from "../network-rule/shared-domains.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
 import type { SessionRepo } from "../db/session-repos.ts";
@@ -1797,6 +1798,21 @@ export async function buildSubscriptionJob(
   // #1126: a Worker that does not name `implementer_subscription_setup` would refuse the script (and read the network rule as the
   // old one-host rule): it ends here, free, with a reason, before any credential exists, as for the features above.
   const setup = runnerSetupOf(turn.turn.runnerEnvironment);
+  // #1126, defence in depth beside the validator (at save) and the runner (at start): the login lives in the container, so a rule the
+  // runner would refuse is refused here, free, before the git token is minted. A lane saved before the validator knew it, or a row
+  // written by hand, ends the same way.
+  if (setup !== null) {
+    if (setup.network.mode === "open")
+      return refuse(
+        "implementer_config_invalid",
+        "reason=subscription_network_open",
+      );
+    if (setup.network.hosts.some(isSharedWildcard))
+      return refuse(
+        "implementer_config_invalid",
+        "reason=subscription_network_wildcard",
+      );
+  }
   if (setup !== null && !features.includes("implementer_subscription_setup"))
     return refuse(
       "implementer_engine_unavailable",

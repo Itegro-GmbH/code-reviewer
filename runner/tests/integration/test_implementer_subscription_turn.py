@@ -118,11 +118,11 @@ def setup_step(
     played: "Played", outcome: EnvironmentSetup | None = None
 ) -> Callable[..., EnvironmentSetup]:
     """The script's phase (#1126): what it saw is recorded, and the events say what ran before it.
-    The login is handed to the agent's own exec, so none of it is in what the step is given."""
+    The login is handed to the agent's own exec, so the step is not given it; what proves the
+    order against the real containers is `tests/unit/test_subscription_login_order.py`."""
 
     def run(job: Any, elapsed: Any, stop: Any, limit: float) -> EnvironmentSetup:
         played.events.append("setup")
-        played.setup_saw = repr(job)
         played.places_at_setup = len(played.places)
         if outcome is not None:
             return outcome
@@ -141,7 +141,6 @@ class Played:
         self.rules: list[NetworkRule] = []
         self.setups = 0
         self.events: list[str] = []
-        self.setup_saw = ""
         self.places_at_setup = -1
 
     @property
@@ -210,6 +209,7 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
 
         def netdoor(rule: NetworkRule, **options: Any) -> FakeNetDoor:
             played.rules.append(rule)
+            played.events.append("door")
             return FakeNetDoor()
 
         def no_door(**options: Any) -> None:
@@ -391,9 +391,12 @@ def test_a_setup_script_runs_before_the_login_is_placed_and_the_agent_keeps_the_
     )
 
     assert played.result["ok"] is True, played.output
-    assert played.events.index("setup") < played.events.index("claude")
+    assert [e for e in played.events if e in ("setup", "door", "claude")] == [
+        "setup",
+        "door",
+        "claude",
+    ], "the script ends, the door of the turn comes up, then the agent's exec has the login"
     assert played.places_at_setup == 0, "no container of the agent had run anything at the setup"
-    assert LOGIN not in played.setup_saw, "the setup is given nothing of the login"
     [place] = played.places
     [run] = place.runs
     assert run["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == LOGIN, "the agent's exec has it"

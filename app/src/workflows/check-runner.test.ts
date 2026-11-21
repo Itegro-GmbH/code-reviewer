@@ -163,6 +163,61 @@ describe("the runner of an agent step (#1105)", () => {
     expect(codes(lane(step({ ...extras, runner: DEVBOX.id })))).toEqual([]);
   });
 
+  // #1126-V03
+  it("refuses a suffix entry on a domain anybody can get a subdomain of, for the harness whose login lives in the container", () => {
+    const claude = { harness: "claude-code", model: LOGIN, runner: DEVBOX.id };
+    expect(
+      codes(
+        lane(
+          step({
+            ...claude,
+            network: {
+              mode: "list",
+              hosts: [
+                "*.github.io",
+                "lateinorum.de",
+                "*.VERCEL.app",
+                "*.co.uk",
+              ],
+            },
+          }),
+        ),
+      ),
+    ).toEqual([
+      ["/steps/0/network/hosts/0", "subscription_network_wildcard"],
+      ["/steps/0/network/hosts/2", "subscription_network_wildcard"],
+      ["/steps/0/network/hosts/3", "subscription_network_wildcard"],
+    ]);
+    // An exact host on such a domain is the owner's choice, a suffix of one's own is fine, and another harness is not asked.
+    expect(
+      codes(
+        lane(
+          step({
+            ...claude,
+            network: {
+              mode: "list",
+              hosts: [
+                "raw.githubusercontent.com",
+                "*.gstatic.com",
+                "*.mine.github.io",
+              ],
+            },
+          }),
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      codes(
+        lane(
+          step({
+            runner: DEVBOX.id,
+            network: { mode: "list", hosts: ["*.github.io"] },
+          }),
+        ),
+      ),
+    ).toEqual([]);
+  });
+
   // #1126-V02
   it("refuses an open network for the harness whose login lives in the container, and takes a list or off", () => {
     const claude = { harness: "claude-code", model: LOGIN, runner: DEVBOX.id };

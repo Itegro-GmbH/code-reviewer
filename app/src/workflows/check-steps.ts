@@ -17,6 +17,7 @@ import {
   isNetworkMode,
   normalizeHostEntry,
 } from "../network-rule/network.ts";
+import { isSharedWildcard } from "../network-rule/shared-domains.ts";
 import {
   INLINE_SETTING_KEYS,
   MODEL_HINT,
@@ -820,6 +821,24 @@ function checkHostedSettings(
         'A step on the harness "claude-code" cannot have an open network: its login is inside the container, so any host could be a place to send it to. Use mode "list" with the hosts the work needs (they are only read: GET and HEAD), or "off".',
       ),
     );
+  // A suffix entry on a domain whose subdomains anybody can get is a place a GET can carry the login to as well as `open` is.
+  if (
+    node.harness === CLAUDE_CODE_HARNESS &&
+    isRecord(node.network) &&
+    Array.isArray(node.network.hosts)
+  )
+    for (const [index, host] of node.network.hosts.entries()) {
+      if (typeof host !== "string") continue;
+      const form = normalizeHostEntry(host);
+      if (form === null || !isSharedWildcard(form)) continue;
+      c.report(
+        issue(
+          pointer(path, "network", "hosts", index),
+          "subscription_network_wildcard",
+          `${shown(host)} covers a domain whose subdomains anybody can get: the login of a step on the harness "claude-code" is inside the container, so a GET to any of them could carry it. Name the exact hosts the work needs.`,
+        ),
+      );
+    }
 }
 
 /**

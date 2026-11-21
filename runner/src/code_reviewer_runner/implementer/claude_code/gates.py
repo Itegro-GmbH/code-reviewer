@@ -28,6 +28,7 @@ The code of a refusal is `implementer_config_invalid`, as for any job the runner
 asked; the reason word at the start of the detail is the stable part to branch on.
 """
 
+import re
 from typing import Final
 
 from code_reviewer_runner.implementer.network_rule import (
@@ -43,6 +44,47 @@ ANTHROPIC_HOST: Final = "api.anthropic.com"
 ANTHROPIC_PORTS: Final = (443,)
 NETWORK_OPEN_REASON: Final = "subscription_network_open"
 NETWORK_HOSTS_REASON: Final = "subscription_network_hosts"
+NETWORK_WILDCARD_REASON: Final = "subscription_network_wildcard"
+# A `*.suffix` entry on one of these covers hosts anybody can get (user content, hosting, a
+# country's public suffix): the login is in the container, so a GET to any tenant's host could
+# carry it. An exact host on these domains stays the owner's choice. Small on purpose, the common
+# cases; the app keeps the same list (`app/src/network-rule/shared-domains.ts`, validator and
+# claim), and a test on each side pins it.
+SHARED_SUFFIXES: Final = (
+    "github.io",
+    "githubusercontent.com",
+    "gitlab.io",
+    "bitbucket.io",
+    "pages.dev",
+    "workers.dev",
+    "r2.dev",
+    "vercel.app",
+    "netlify.app",
+    "herokuapp.com",
+    "onrender.com",
+    "fly.dev",
+    "web.app",
+    "firebaseapp.com",
+    "appspot.com",
+    "blogspot.com",
+    "azurewebsites.net",
+    "cloudfront.net",
+    "amazonaws.com",
+    "glitch.me",
+    "repl.co",
+    "ngrok.io",
+    "surge.sh",
+)
+_COUNTRY_SECOND_LEVEL: Final = re.compile(r"(co|com|org|net|ac|gov|edu)\.[a-z]{2}")
+
+
+def is_shared_wildcard(entry: str) -> bool:
+    """Whether a rule entry is a `*.` entry on a shared domain (`SHARED_SUFFIXES`, or a country's
+    second-level suffix such as `co.uk`)."""
+    if not entry.startswith("*."):
+        return False
+    base = entry[2:]
+    return base in SHARED_SUFFIXES or _COUNTRY_SECOND_LEVEL.fullmatch(base) is not None
 
 
 def subscription_rule(environment: NetworkRule) -> NetworkRule:
@@ -62,6 +104,13 @@ def subscription_rule(environment: NetworkRule) -> NetworkRule:
         else ()
     )
     for host in extra:
+        if is_shared_wildcard(host):
+            raise JobError(
+                ErrorCode.IMPLEMENTER_CONFIG_INVALID,
+                f"{NETWORK_WILDCARD_REASON}: an entry of the step's network covers a domain "
+                "whose subdomains anybody can get, and the login is in the container: name the "
+                "exact hosts",
+            )
         # A wildcard over the API host would make the model's own host read-only, and Claude Code
         # posts to it: the turn could not work, and the rule would say something it does not mean.
         if RuleMatcher(NetworkRule(MODE_LIST, (host,))).allows(ANTHROPIC_HOST):

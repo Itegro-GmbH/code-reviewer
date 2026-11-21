@@ -3,6 +3,9 @@
 """The gates of a turn that runs on the device's login (#856): the network of the agent's
 container, no new privileges, and the check that the device can run the harness at all."""
 
+import re
+from pathlib import Path
+
 import pytest
 
 from code_reviewer_runner.implementer.agent_container import agent_document
@@ -10,6 +13,9 @@ from code_reviewer_runner.implementer.claude_code.gates import (
     ANTHROPIC_HOST,
     NETWORK_HOSTS_REASON,
     NETWORK_OPEN_REASON,
+    NETWORK_WILDCARD_REASON,
+    SHARED_SUFFIXES,
+    is_shared_wildcard,
     subscription_rule,
 )
 from code_reviewer_runner.implementer.netdoor.registries import (
@@ -110,6 +116,42 @@ def test_a_wildcard_over_the_model_host_refuses_the_turn(entry: str) -> None:
     assert subscription_rule(NetworkRule(MODE_LIST, ("*.example.org",))).read_only == (
         "*.example.org",
     )
+
+
+# #1126-T56
+@pytest.mark.parametrize(
+    "entry", ["*.github.io", "*.pages.dev", "*.vercel.app", "*.githubusercontent.com", "*.co.uk"]
+)
+def test_a_wildcard_on_a_domain_anybody_can_get_a_subdomain_of_refuses_the_turn(
+    entry: str,
+) -> None:
+    with pytest.raises(JobError) as refused:
+        subscription_rule(NetworkRule(MODE_LIST, ("registry.npmjs.org", entry)))
+    assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
+    assert refused.value.detail.startswith(NETWORK_WILDCARD_REASON)
+
+
+# #1126-T56
+@pytest.mark.parametrize(
+    "entry",
+    ["*.gstatic.com", "*.pythonhosted.org", "*.mine.github.io", "raw.githubusercontent.com"],
+)
+def test_a_suffix_of_ones_own_and_an_exact_host_on_a_shared_domain_stay_the_owners_choice(
+    entry: str,
+) -> None:
+    assert not is_shared_wildcard(entry)
+    assert subscription_rule(NetworkRule(MODE_LIST, (entry,))).read_only == (entry,)
+
+
+# #1126-T56
+def test_the_list_is_kept_in_step_with_the_apps() -> None:
+    """`app/src/network-rule/shared-domains.ts` holds the same suffixes (validator and claim)."""
+    source = (
+        Path(__file__).resolve().parents[3] / "app/src/network-rule/shared-domains.ts"
+    ).read_text(encoding="utf-8")
+    listed = re.search(r"SHARED_SUFFIXES: readonly string\[\] = \[(.*?)\];", source, re.S)
+    assert listed is not None
+    assert tuple(re.findall(r'"([^"]+)"', listed.group(1))) == SHARED_SUFFIXES
 
 
 # #1126-T03

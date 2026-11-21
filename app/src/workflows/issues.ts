@@ -86,6 +86,8 @@ export const SEMANTIC_ISSUE_CODES = [
   "network_host_invalid",
   /** #1126: `network` with `mode` `open` in a step on the harness `claude-code`, whose login lives in the container (ADR 0007, decision 11 as amended). */
   "subscription_network_open",
+  /** #1126: a `*.suffix` entry of the `network` rule of a step on the harness `claude-code` covers a domain whose subdomains anybody can get (`*.github.io`, `*.vercel.app`, `*.co.uk`): the login lives in the container. */
+  "subscription_network_wildcard",
   /** #1105: a step with settings of its own names neither a `runner` nor an `environment`. `available` lists the ids of the runners. */
   "runner_required",
   /** #1105: a step names a `runner` and an `environment`; a step runs in one place (`environment` is for steps written before the runner). */

@@ -134,8 +134,9 @@ agent step on a self-hosted runner (the DevBox, Claude Code on the owner's own s
 tools to build and test (a Next.js landing page: `npm ci` in the setup, then the agent runs `npm run lint && npm run build`, which also
 fetches fonts, and looks at the live site). Decision 11 said the setup of a self-hosted machine is its owner's; the owner is the one who
 now says otherwise, so **`setupScript` and `network` are valid on any runner** and `hosted_only_setting` is gone (the validator refuses
-what the runner cannot honour instead: `network.mode` `open` on the harness `claude-code`, `subscription_network_open`; the runner also refuses a wildcard
-entry that covers the model's host). What was the reason for the old rule, and what keeps each part safe:
+what the runner cannot honour instead: `network.mode` `open` on the harness `claude-code`, `subscription_network_open`, and a `*.suffix` entry on a
+domain whose subdomains anybody can get, `subscription_network_wildcard`; the runner and the app's claim refuse both as well, and the runner also refuses a
+wildcard entry that covers the model's host). What was the reason for the old rule, and what keeps each part safe:
 
 - *The script on a runner.* It runs in the agent's own container (decision of #1009), as for a hosted step, with the internet open and
   no secret of ours in it. The turn row copies it with the runner (`environment_setup_script`, the same columns as a hosted copy; one
@@ -160,9 +161,20 @@ entry that covers the model's host). What was the reason for the old rule, and w
   a command can print it. So **every listed host is a place something could be sent to**: read-only removes `POST`, request bodies and
   every upload API, but a `GET` carries a path and a query. A listed host that publishes what it is asked for (a paste host, a wildcard
   over user content, a host that echoes) is an exit; the owner writes the list, and the guard here is the owner's choice of hosts and
-  the rule "guard money, key and exits". A root process that the *script* (or a package's install script, in `npm ci`) leaves running can
-  read the agent's environment too: it can do no more than the agent, because the exits are the same. Accepted consequence: a
-  supply-chain attack through the install script gets, at worst, the same exits as the agent.
+  the rule "guard money, key and exits". The model's own host, `api.anthropic.com`, is itself an accepted exit (code in the container can call
+  it with its own key): the guard is that the token is inference-only and revocable (the dispatcher withdraws it on the `#980` codes).
+  A root process that the *script* (or a package's install script, in `npm ci`) leaves running could read the agent's environment too,
+  and the exits it has are the same as the agent's, but it needs no model's cooperation and can wait for the token (review of #1127). **So
+  it was decided in the review of #1127 (2026-11-21) that for this harness the setup ends every process that is not the container's own before the
+  hand-over**: the processes that existed before the script was written (init, `agent-init`, the inner `dockerd`) stay, with what
+  `dockerd` started and the inner containers' shims and their trees (`docker compose up -d` databases still survive, which is what
+  #1009 is for); everything else is killed, a second look must find none, and the turn ends before any login exists
+  (`setup_leftovers`) when one cannot be ended. The names of what was killed go into the setup notes. Bare daemons (`pg_ctl start &`)
+  do not survive for this harness (an opt-out per step is a later option if the owner wants it); hosted and OpenCode turns, whose key
+  is not in the container, keep what the script started. This narrows it and is **not a wall**: the script is root and could tamper
+  with the sweep's tools, copy a program to a shim's name, or start an inner container with the host's PID namespace. The exits stay the
+  real guard, and the live probe run before the DevBox roll-out (`docs/runner.md`) is the gate. Accepted consequence: a supply-chain
+  attack through the install script gets, at worst, the same exits as the agent, and not by waiting for the token.
 - *Memory.* The agent's container gets about 1.9 GB on a 2 vCPU VM, which a Next.js build can exceed. No code change: the owner sets
   `FACTORY_RUNNER_VM_VCPUS` (documented with the sizes and the host's limit in `docs/runner.md`).
 

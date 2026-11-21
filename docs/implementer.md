@@ -1629,7 +1629,9 @@ runs **before the login exists in the container**, and the network of the turn i
    (`claude_code/gates.py`): `api.anthropic.com` on port 443 (a tunnel: Claude Code posts to it) and **every other host of the step's
    `list` read-only on port 443**: the door ends the TLS connection itself and lets only `GET` and `HEAD` through (as it does for the
    package registries, `netdoor/registries.py`; the container trusts the door's certificate for exactly those names). `open` is refused
-   for this harness, by the validator when the lane is saved (`subscription_network_open`) and by the runner at the start of the turn.
+   for this harness, by the validator when the lane is saved (`subscription_network_open`), by the app's claim before any git token is
+   made, and by the runner at the start of the turn; so is a `*.suffix` entry on a domain whose subdomains anybody can get
+   (`subscription_network_wildcard`: `*.github.io`, `*.vercel.app`, `*.co.uk`, a short list).
 
 So for the Lateinorum landing page a step with `"setupScript": "npm ci"` and `"network": {"mode": "list", "hosts":
 ["fonts.googleapis.com", "*.gstatic.com", "lateinorum.de"]}` has its dependencies installed in phase 1, and in phase 3 the agent runs
@@ -1637,8 +1639,13 @@ So for the Lateinorum landing page a step with `"setupScript": "npm ci"` and `"n
 anywhere.
 
 **What this does not make safe.** The token is in the environment of the agent's tools (follow-up 5 of R3 in `docs/runner.md`). A process
-the *script* left running, as root, can read `/proc/<pid>/environ` of the agent's commands; a package with an install script that does so
-is the way a supply-chain attack on `npm ci` would try. What stops it from leaving is the **exit**, not the secrecy: the agent phase has
+the *script* left running, as root, could read `/proc/<pid>/environ` of the agent's commands; a package with an install script that does so
+is the way a supply-chain attack on `npm ci` would try. **So for this harness the setup ends every process that is not the container's
+own before the hand-over** (the init, `agent-init`, the inner `dockerd` and the inner containers stay; a bare `pg_ctl start &` does not
+survive, a `docker compose up -d` database does) and refuses the hand-over, before any login exists, when one cannot be ended
+(`setup_leftovers`, `docs/runner.md`, "Leftovers are ended"). That narrows the window; it is not a wall: the script is root and can tamper
+with the tools the sweep uses or start an inner container with the host's PID namespace. What stops it from leaving is the **exit**, not
+the secrecy: the agent phase has
 only the model's host and the read-only hosts the owner listed. A `GET` still carries a path and a query to a listed host, so a listed
 host that publishes what it is asked (a paste site, a wildcard on a platform's user content) is an exit; the owner writes the list and
 chooses hosts that do not. The setup script's text is the lane author's (an Admin or Owner of the workspace, decision 12), and on a

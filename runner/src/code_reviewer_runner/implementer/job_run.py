@@ -247,10 +247,14 @@ def harness_setup_seams(base: SetupSeams, harness: ReadyHarness | None) -> Setup
     and not in its definition**: it is handed to the agent's own exec when the agent starts
     (`claude_code/agent.py`), long after the script has ended and the container has left the setup
     network, so nothing the script, or a package it installs, runs sees the token, whatever the
-    network of the setup is. `base` unchanged for another harness."""
+    network of the setup is. Because the login is handed to the agent inside this container, every
+    process the script left that is not the container's own is ended before the hand-over
+    (`kill_leftovers`, `setup_leftovers.py`); OpenCode's turn holds no such login (its key is the
+    door's, outside the container) and keeps what the script started. `base` unchanged for another
+    harness."""
     if harness is None:
         return base
-    return replace(base, image=harness.image, no_new_privileges=True)
+    return replace(base, image=harness.image, no_new_privileges=True, kill_leftovers=True)
 
 
 def production_setup(

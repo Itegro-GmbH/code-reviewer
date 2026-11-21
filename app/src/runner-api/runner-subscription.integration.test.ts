@@ -17,6 +17,7 @@ import {
   WRITE,
 } from "../test-support/multi-repo-claim.ts";
 import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
+import type { NetworkRule } from "../network-rule/network.ts";
 import type {
   SplitClaimResponse,
   WorkerSubscriptionDetailsResponse,
@@ -334,6 +335,42 @@ describe("the claim of a turn on the harness claude-code", () => {
       errorCode: "implementer_engine_unavailable",
     });
   });
+
+  // #1126-T54
+  it.each<[NetworkRule, string]>([
+    [{ mode: "open", hosts: [] }, "open network"],
+    [
+      { mode: "list", hosts: ["registry.npmjs.org", "*.github.io"] },
+      "wildcard",
+    ],
+    [{ mode: "list", hosts: ["*.co.uk"] }, "public suffix"],
+  ])(
+    "ends the turn, free, before a token exists, for a rule the runner would refuse (%j, %s)",
+    async (network) => {
+      const h = await start();
+      const runner = await h.registerRunner({
+        labels: ["box"],
+        manifest: BOTH,
+      });
+      const turn = await h.enqueueTurn({
+        modelChoice: CLAUDE_MODEL,
+        runnerEnvironment: { ...RUNNER_ENV, setupScript: "npm ci\n", network },
+        profile: PROFILE,
+      });
+
+      const { response } = await fetchedTurn(h, runner.credential, [
+        ...NOW_FEATURES,
+        "implementer_subscription_setup",
+      ]);
+
+      expect(response.status).toBe(409);
+      expect(h.issuedJobTokens()).toEqual([]);
+      expect(await h.queue.get(turn.job.id)).toMatchObject({
+        status: "failed",
+        errorCode: "implementer_config_invalid",
+      });
+    },
+  );
 
   // #1126-T42
   it("sends no environment, and needs no feature, for a step without a script or a rule", async () => {
