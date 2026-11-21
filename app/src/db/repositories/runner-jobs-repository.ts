@@ -68,7 +68,8 @@ import {
   type CapOutcome,
 } from "../../billing/claim-caps.ts";
 import { headNoticeKey } from "../refusal-notice-key.ts";
-import { claimOldestDueJob } from "./jobs-claim.ts";
+import { claimOldestDueJob, hostedRunnerAtConcurrency } from "./jobs-claim.ts";
+import { RUNNER_LABEL_PREFIX } from "../../runner-identity/labels.ts";
 import type { HarnessAccess } from "../../runner-identity/access.ts";
 import { toJob } from "./jobs-repository.ts";
 import { createUsageRecordsRepository } from "./usage-records-repository.ts";
@@ -765,6 +766,22 @@ export function createRunnerJobsRepository(
     return Number(result.numUpdatedRows);
   }
 
+  /**
+   * #1105 (ADR 0007, decision 13): the job requires `cr:runner:<id>` (a step that names a self-hosted runner) and that runner is reachable: it
+   * is not revoked and was heard from after `seenAfter` (the deadline ago). A job waiting for such a runner keeps waiting, however long its
+   * runner is busy; only the lane's own limits (budget, run time limit) or a cancel end it. A runner that is revoked, or not heard from for
+   * the whole deadline, is unreachable, and its job goes the old way (`no_runner_available`). A job with no such label is not this.
+   */
+  function waitsOnReachableRunner(seenAfter: string) {
+    return sql<boolean>`exists (
+      select 1 from runners as named
+       where named.workspace_id = jobs.workspace_id
+         and named.revoked_at is null
+         and named.last_seen_at > ${seenAfter}
+         and (${RUNNER_LABEL_PREFIX} || named.id) = any(string_to_array(jobs.required_labels, E'\n'))
+    )`;
+  }
+
   /** #854: the job is not the turn of a runner environment. */
   function notARunnerTurn(eb: ExpressionBuilder<Database, "jobs">) {
     return eb.not(isARunnerTurn(eb));
@@ -821,6 +838,8 @@ export function createRunnerJobsRepository(
       .where("created_at", "<=", waitedBefore)
       .where("run_after", "<=", waitedBefore)
       .where(isARunnerTurn)
+      // #1105 (ADR 0007, decision 13): a turn of a step that names a self-hosted runner waits while that runner is reachable, busy or not.
+      .where(sql<boolean>`not ${waitsOnReachableRunner(waitedBefore)}`)
       .executeTakeFirst();
     const cancelled = Number(result.numUpdatedRows);
     if (cancelled > 0) await idleSessionsOfEndedTurns(executor, timestamp);
@@ -1047,6 +1066,8 @@ export function createRunnerJobsRepository(
         eb("updated_at", "<=", waitedBefore),
         // A turn of a runner environment is not dispatched to a VM: it waits for a runner and ends as `no_runner_available`.
         notARunnerTurn(eb),
+        // #1105 (ADR 0007, decision 13): a hosted job that waits only because its hosted runner is at its concurrency keeps waiting.
+        sql<boolean>`not ${hostedRunnerAtConcurrency("jobs.id")}`,
         eb.not(
           eb.exists(
             eb

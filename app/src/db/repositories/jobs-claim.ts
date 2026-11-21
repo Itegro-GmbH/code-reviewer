@@ -68,6 +68,32 @@ export type ClaimScope = {
   };
 };
 
+/**
+ * #1105 (ADR 0007, "Concurrency"): the job is the turn of a **hosted runner** (an `implementer_environments` row with a `concurrency`, which a
+ * turn copied by its id) that already runs as many turns as its concurrency. `jobIdColumn` is the job's id in the statement it goes into.
+ * Counted per hosted runner, that is per type and workspace: the running jobs whose turn copied the same row. A turn of an environment of a
+ * person (no `concurrency`) is never at one. The claim runs under the exclusive gate lock, so two claims cannot both count below the limit.
+ */
+export function hostedRunnerAtConcurrency(jobIdColumn: string) {
+  return sql<boolean>`exists (
+    select 1
+      from implementer_turns as capped
+      join implementer_environments as hosted
+        on hosted.id = capped.environment_id
+       and hosted.workspace_id = capped.workspace_id
+       and hosted.concurrency is not null
+     where capped.job_id = ${sql.ref(jobIdColumn)}
+       and capped.environment_kind is null
+       and (select count(*)
+              from jobs as running
+              join implementer_turns as held on held.job_id = running.id
+             where running.status = 'running'
+               and held.environment_id = hosted.id
+               and held.workspace_id = hosted.workspace_id
+               and held.environment_kind is null) >= hosted.concurrency
+  )`;
+}
+
 /** Enough for every pull request in the queue to be tried; a bug fails instead of looping. */
 const MAX_CLAIM_ATTEMPTS = 100;
 
@@ -178,6 +204,7 @@ function claimQuery(
   const routing =
     scope === undefined
       ? sql`${labelRule}
+        and not ${hostedRunnerAtConcurrency("due.id")}
         and not exists (
           select 1 from implementer_turns as routed
           where routed.job_id = due.id and not ${accessRule(entries, "routed")}

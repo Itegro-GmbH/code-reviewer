@@ -29,6 +29,7 @@ import {
   type ReasonDescription,
 } from "./error-copy.ts";
 import type { ProductIdentity } from "../product-identity/identity.ts";
+import { runnerIdOfLabel } from "../runner-identity/labels.ts";
 import { runDurationMs } from "./run-duration.ts";
 import type { RunPriceView } from "../workspace-billing/view.ts";
 
@@ -414,6 +415,16 @@ function cleanTaskLine(raw: string): string {
 }
 
 /** The first `max` UTF-16 units of `text`: bounds the work of the cleaners on a text of any size. */
+/** Whether the runner copy of a turn is a runner a lane step named: it holds exactly the label `cr:runner:<id>` (ADR 0007, #1105). */
+function namedRunnerOf(labels: readonly string[]): boolean {
+  const [only] = labels;
+  return (
+    labels.length === 1 &&
+    only !== undefined &&
+    runnerIdOfLabel(only) !== undefined
+  );
+}
+
 function head(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) : text;
 }
@@ -1035,15 +1046,20 @@ function implementerDetailView(
         ? null
         : {
             name: display(cleanTaskLine(head(source.runner.name, 400))),
-            labels: source.runner.labels.map((label) =>
-              display(cleanTaskLine(head(label, 160))),
-            ),
+            // A runner a step named has no labels to show: its one label is the platform's way to reach it (#1105).
+            labels: namedRunnerOf(source.runner.labels)
+              ? []
+              : source.runner.labels.map((label) =>
+                  display(cleanTaskLine(head(label, 160))),
+                ),
           },
     waitingForRunner:
       job.status === "queued" && source?.runner != null
-        ? `Waiting for a runner with labels ${source.runner.labels
-            .map((label) => display(cleanTaskLine(head(label, 160))))
-            .join(", ")}`
+        ? namedRunnerOf(source.runner.labels)
+          ? `Waiting for the runner ${display(cleanTaskLine(head(source.runner.name, 400)))}`
+          : `Waiting for a runner with labels ${source.runner.labels
+              .map((label) => display(cleanTaskLine(head(label, 160))))
+              .join(", ")}`
         : null,
     resultExpected: source?.result?.expected ?? false,
     resume: resumeViewOf(job.result),

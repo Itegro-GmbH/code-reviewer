@@ -50,6 +50,7 @@ import {
 } from "./registration.ts";
 import { OPENCODE_HARNESS } from "../runner-identity/harness.ts";
 import { announcesHarness } from "../runner-identity/access.ts";
+import { runnerConcurrency } from "../runner-identity/config.ts";
 
 export type RunnerApiDeps = ClaimDeps &
   ReportDeps &
@@ -230,6 +231,12 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
               ...(parsed.value.llmProviders === undefined
                 ? {}
                 : { llmProviders: parsed.value.llmProviders }),
+              // #1105 (ADR 0007, "Concurrency"): a self-hosted runner is at its concurrency when it holds that many running jobs (counted by
+              // its own id): it gets 204 and the job waits. The cap is the app's, not what the caller sends.
+              maxRunning: runnerConcurrency(
+                customer.runner.limits,
+                process.env,
+              ),
               customerRunner: {
                 // #1105: from the credential's row; the label `cr:runner:<id>` routes the jobs of the steps that name this runner.
                 runnerId: customer.runner.id,

@@ -28,6 +28,8 @@ import type {
 } from "./contract.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { runnerLabel } from "../runner-identity/labels.ts";
+import { sql } from "kysely";
 import { createRunnerFleetService } from "../runner-fleet/service.ts";
 import { customerRunnerId } from "../runner-identity/tokens.ts";
 import { createDispatchSweep } from "../dispatch/sweep.ts";
@@ -1212,6 +1214,83 @@ describe("the state of a job for a customer's dispatcher (#974)", () => {
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
       errorCode: "launch_failed",
+    });
+  });
+});
+
+describe("the concurrency of a self-hosted runner and the wait of a job for it (#1105, ADR 0007, decision 13)", () => {
+  const MINUTE = 60 * 1000;
+  const turnOn = (
+    h: Awaited<ReturnType<typeof start>>,
+    runner: { runnerId: string },
+  ) =>
+    h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: {
+        id: runner.runnerId,
+        name: "DevBox",
+        labels: [runnerLabel(runner.runnerId)],
+      },
+    });
+  const ended = (h: Awaited<ReturnType<typeof start>>, jobId: string) =>
+    sql`update jobs set status = 'succeeded', finished_at = ${h.clock.now().toISOString()} where id = ${jobId}`.execute(
+      h.db,
+    );
+
+  // #1105-R120
+  it("answers 204 at parallelRuns and hands the next job out as soon as one ended", async () => {
+    const h = await start();
+    const devbox = await h.registerRunner({ limits: { parallelRuns: 1 } });
+    const first = await turnOn(h, devbox);
+    const second = await turnOn(h, devbox);
+
+    expect((await claimedJob(h, devbox.credential)).id).toBe(first.job.id);
+    expect((await h.claim(claimOf(devbox.credential))).status).toBe(204);
+    expect(await h.queue.get(second.job.id)).toMatchObject({
+      status: "queued",
+    });
+
+    await ended(h, first.job.id);
+    expect((await claimedJob(h, devbox.credential)).id).toBe(second.job.id);
+  });
+
+  // #1105-R121
+  it("lets a runner that announced two run two at once, and counts only its own jobs", async () => {
+    const h = await start();
+    const devbox = await h.registerRunner({ limits: { parallelRuns: 2 } });
+    const other = await h.registerRunner({ limits: { parallelRuns: 1 } });
+    await turnOn(h, devbox);
+    await turnOn(h, devbox);
+    await turnOn(h, devbox);
+    await turnOn(h, other);
+
+    expect((await h.claim(claimOf(devbox.credential))).status).toBe(200);
+    expect((await h.claim(claimOf(devbox.credential))).status).toBe(200);
+    expect((await h.claim(claimOf(devbox.credential))).status).toBe(204);
+    // The other runner's own place is free, whatever the first one holds.
+    expect((await h.claim(claimOf(other.credential))).status).toBe(200);
+  });
+
+  // #1105-R130
+  it("keeps a job that waits for a busy runner for as long as the runner is heard from, far beyond the deadline", async () => {
+    const h = await start();
+    const devbox = await h.registerRunner({ limits: { parallelRuns: 1 } });
+    const running = await turnOn(h, devbox);
+    const waiting = await turnOn(h, devbox);
+    const taken = await claimedJob(h, devbox.credential);
+    expect(taken.id).toBe(running.job.id);
+
+    for (let minute = 0; minute < 45; minute += 1) {
+      h.clock.advance(MINUTE);
+      expect(
+        (await h.worker.heartbeat(taken.id, taken.credential)).status,
+      ).toBe(200);
+      // The runner asks again: busy, so 204; its call is what shows it is alive.
+      expect((await h.claim(claimOf(devbox.credential))).status).toBe(204);
+    }
+
+    expect(await h.queue.get(waiting.job.id)).toMatchObject({
+      status: "queued",
     });
   });
 });

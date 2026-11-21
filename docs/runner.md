@@ -164,6 +164,24 @@ does not have it, and a runner of another workspace cannot** (its claim is held 
 environment and keeps losing its `cr:` labels. The **doorbell** matches it by the same rule: a customer's dispatcher has the labels it announced plus `cr:runner:<its id>` in the
 pairing of the rings (`runner-dispatches-repository.ts`), so the named runner is rung and no other. The Dispatcher itself (`dispatcher/src`) forwards labels and does not change.
 
+**Concurrency per named runner** (ADR 0007, "Concurrency"; the claim counts, the app decides, not what the caller sends):
+
+- A **self-hosted runner** may hold as many running jobs as its `parallelRuns` (announced in `limits`), **held within the operator's maximum** `RUNNER_MAX_PARALLEL_RUNS` (a whole number
+  from 1 to 1000, default 16); a runner that announced none gets the maximum. The claim counts the running jobs of that runner (by its id in `jobs.runner_id`) and answers **`204`**
+  at or above the limit, so the job waits. It counts every job the runner holds, whatever form its step is in.
+- A **hosted runner** may run as many turns as its stored `concurrency`. The claim of the platform identity does not take a job whose turn copied a hosted runner that already runs that
+  many (the running jobs whose turn copied the same row): **per hosted runner, that is per type and workspace**, so a workspace's four 2 vCPU turns do not use its 8 vCPU allowance, and
+  another workspace's runner is another row. A turn of an environment of a person has no such limit. The Dispatcher's `maxRunning` stays the **pool-wide** cap above all workspaces
+  and types.
+- Claims run under the exclusive gate lock of the queue, so two claims cannot both count below a limit.
+
+**Waiting (decision 13).** A job that waits **only because its runner is at its concurrency** keeps waiting until a place is free or a person cancels the run; there is no age at which it fails. (Checked for decision 13's open
+point: **a lane has no run-level time limit** (the budget is spent by running turns only and a turn's time limit starts when the turn does), so the cancel by a person is the limit.) For a **self-hosted** runner the `no_runner_available` deadline (`RUNNER_WAIT_DEADLINE_MINUTES`, 30 minutes) applies **only when the
+runner is unreachable**: it is revoked, or it was **not heard from for the whole deadline** (its calls, `last_seen_at`, are what show it is alive: a busy runner that asks for a job
+every 30 seconds is reachable). For a **hosted** runner a job that waits because its runner is full is not given up as `dispatch_unavailable` either (a hosted job that waits for any other
+reason still is). A runner below the minimum base version is heard from, so it counts as reachable; it gets `426 RUNNER_UPDATE_NEEDED` until it is updated. The run page says "Waiting
+for the runner DevBox" for such a turn. A job of a step in the old form (labels) waits as before.
+
 A turn of a step that names a **hosted runner** is a hosted job of the size of its type, as before: `cr:managed` and `cr:size-<n>`, the platform identity takes it. The turn copies the
 hosted runner's id and size; the step's own `setupScript` and `network` apply (the hosted runner has neither). The record of which hosted runner the job was enqueued for is the id of
 that copy.

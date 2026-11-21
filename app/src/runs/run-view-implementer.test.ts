@@ -1689,3 +1689,30 @@ describe("the continuation mode of an implementer run (#841)", () => {
     expect(viewOf("imported")).toBeNull();
   });
 });
+
+describe("the wait of a turn for a runner a step named (#1105)", () => {
+  // #1105-R140
+  it("says it waits for the runner by its name, and shows no label for it; a turn of an environment keeps its labels", () => {
+    const queued = turn({ status: "queued", finishedAt: null });
+    const named = view(
+      queued,
+      source({
+        runner: { name: "DevBox", labels: ["cr:runner:abc-123"] },
+      }),
+    ).implementer;
+    expect(named?.waitingForRunner).toBe("Waiting for the runner DevBox");
+    expect(named?.runner).toEqual({ name: "DevBox", labels: [] });
+
+    const labelled = view(
+      queued,
+      source({ runner: { name: "GPU box", labels: ["gpu", "linux"] } }),
+    ).implementer;
+    expect(labelled?.waitingForRunner).toBe(
+      "Waiting for a runner with labels gpu, linux",
+    );
+    expect(labelled?.runner).toEqual({
+      name: "GPU box",
+      labels: ["gpu", "linux"],
+    });
+  });
+});
