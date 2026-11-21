@@ -154,7 +154,6 @@ export async function testMcpServer(
       if (first) {
         const checked = checkMcpUrl(current.toString(), {
           ...policy,
-          allowQuery: true,
         });
         if (!checked.ok) return fail("mcp_test_address_refused");
       }
@@ -190,7 +189,7 @@ export async function testMcpServer(
       } catch {
         return fail("mcp_test_redirect_refused");
       }
-      if (!checkMcpUrl(next.toString(), { ...policy, allowQuery: true }).ok)
+      if (!checkMcpUrl(next.toString(), policy).ok)
         return fail("mcp_test_redirect_refused");
       // A credential is meant for the address it was entered for: another origin gets none.
       if (next.origin !== current.origin) credentials = {};
@@ -365,7 +364,7 @@ export async function testMcpServer(
       }
       if (endpoint.origin !== finalUrl.origin)
         return fail("mcp_test_protocol_error");
-      if (!checkMcpUrl(endpoint.toString(), { ...policy, allowQuery: true }).ok)
+      if (!checkMcpUrl(endpoint.toString(), policy).ok)
         return fail("mcp_test_address_refused");
       postUrl = endpoint;
       return;

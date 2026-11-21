@@ -150,8 +150,6 @@ const failureCopy = (): Record<McpErrorCode, string> => ({
   mcp_url_not_https: "Only https addresses are allowed.",
   mcp_url_credentials:
     "The address must not hold a user name or a password. Use a header for the key.",
-  mcp_url_query:
-    "The address must not have a query string, because a key in it would be shown to everybody. Use a header for the key.",
   mcp_url_private:
     "The address names this machine or a private or internal network. Only public servers can be used.",
   mcp_auth_invalid: "Choose no authentication, a header or OAuth.",
