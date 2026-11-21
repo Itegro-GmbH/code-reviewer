@@ -94,6 +94,35 @@ export function hostedRunnerAtConcurrency(jobIdColumn: string) {
   )`;
 }
 
+/**
+ * #1105 (review of part 2, finding 4): a place of the hosted runner this job's turn copied was freed after `since`, by a job that had been claimed
+ * and ended. The give-up (`failUndispatched`) counts a job's age from its last wait, not from when it was last blocked, so a job that waited
+ * hours behind a full runner would be failed the moment a place freed and before its claim; this keeps it for the give-up time after the place
+ * freed. A job whose turn copied no hosted runner is never this.
+ */
+export function hostedRunnerFreedSince(jobIdColumn: string, since: string) {
+  return sql<boolean>`exists (
+    select 1
+      from implementer_turns as waiting_turn
+      join implementer_environments as hosted
+        on hosted.id = waiting_turn.environment_id
+       and hosted.workspace_id = waiting_turn.workspace_id
+       and hosted.concurrency is not null
+     where waiting_turn.job_id = ${sql.ref(jobIdColumn)}
+       and waiting_turn.environment_kind is null
+       and exists (
+         select 1
+           from jobs as ended
+           join implementer_turns as held on held.job_id = ended.id
+          where held.environment_id = hosted.id
+            and held.workspace_id = hosted.workspace_id
+            and held.environment_kind is null
+            and ended.claimed_at is not null
+            and ended.status not in ('queued', 'running')
+            and ended.finished_at > ${since})
+  )`;
+}
+
 /** Enough for every pull request in the queue to be tried; a bug fails instead of looping. */
 const MAX_CLAIM_ATTEMPTS = 100;
 

@@ -1271,6 +1271,36 @@ describe("the concurrency of a self-hosted runner and the wait of a job for it (
     expect((await h.claim(claimOf(other.credential))).status).toBe(200);
   });
 
+  // #1105-R153
+  it("lets exactly one of two claims started together take the last place of a runner", async () => {
+    const h = await start();
+    const devbox = await h.registerRunner({ limits: { parallelRuns: 1 } });
+    await turnOn(h, devbox);
+    await turnOn(h, devbox);
+
+    const answers = await Promise.all([
+      h.claim(claimOf(devbox.credential)),
+      h.claim(claimOf(devbox.credential)),
+    ]);
+
+    expect(answers.map((answer) => answer.status).sort()).toEqual([200, 204]);
+  });
+
+  // #1105-R156
+  it("frees the place of a job whose lease lapsed, before the next claim counts", async () => {
+    const h = await start();
+    const devbox = await h.registerRunner({ limits: { parallelRuns: 1 } });
+    const crashed = await turnOn(h, devbox);
+    await turnOn(h, devbox);
+    expect((await claimedJob(h, devbox.credential)).id).toBe(crashed.job.id);
+    expect((await h.claim(claimOf(devbox.credential))).status).toBe(204);
+
+    // No heartbeat for longer than the lease: the holder is gone.
+    h.clock.advance(3 * MINUTE);
+
+    expect((await h.claim(claimOf(devbox.credential))).status).toBe(200);
+  });
+
   // #1105-R130
   it("keeps a job that waits for a busy runner for as long as the runner is heard from, far beyond the deadline", async () => {
     const h = await start();

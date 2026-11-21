@@ -255,8 +255,26 @@ export type ImplementerRowSource = {
   canPush?: boolean;
 };
 
+/**
+ * #1105 (ADR 0007, decision 13): why a queued turn waits for the runner its step named, read by the repository for the run page. A hosted
+ * runner waits for a free place; a self-hosted one is busy (no deadline: a person cancels), offline or online-but-unable (both end after
+ * `deadlineMinutes` without it) or "ready" (nothing but its own polling explains the wait).
+ */
+export type RunnerWaitSource =
+  | { kind: "hosted"; name: string; running: number; limit: number }
+  | {
+      kind: "self_hosted";
+      name: string;
+      state: "busy" | "offline" | "cannot_serve" | "ready";
+      running: number;
+      limit: number;
+      deadlineMinutes: number;
+    };
+
 /** And for the detail. */
 export type ImplementerDetailSource = ImplementerRowSource & {
+  /** Why a queued turn waits for its runner (#1105); absent or null when it does not, or the turn is no turn of a named runner. */
+  wait?: RunnerWaitSource | null;
   baseBranch: string;
   instruction: string;
   /** #843: whether the turn had a result schema, and the result the agent handed in once it was checked against it. */
@@ -414,7 +432,6 @@ function cleanTaskLine(raw: string): string {
   return cleanTaskText(raw).replace(/\s+/g, " ").trim();
 }
 
-/** The first `max` UTF-16 units of `text`: bounds the work of the cleaners on a text of any size. */
 /** Whether the runner copy of a turn is a runner a lane step named: it holds exactly the label `cr:runner:<id>` (ADR 0007, #1105). */
 function namedRunnerOf(labels: readonly string[]): boolean {
   const [only] = labels;
@@ -425,6 +442,7 @@ function namedRunnerOf(labels: readonly string[]): boolean {
   );
 }
 
+/** The first `max` UTF-16 units of `text`: bounds the work of the cleaners on a text of any size. */
 function head(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) : text;
 }
@@ -927,6 +945,43 @@ function resumeViewOf(result: JsonValue | null): ImplementerResumeView | null {
   return null;
 }
 
+/** The place count of a full runner, "2 of 2 in use". */
+function inUse(running: number, limit: number): string {
+  return `${String(running)} of ${String(limit)} in use`;
+}
+
+/**
+ * #854, #1105: what the run page says while a queued turn waits for its runner, and why. A hosted runner and a busy self-hosted runner wait for
+ * a free place with no age limit (a person cancels); an offline runner, or one online that cannot take the step, ends the run after the
+ * deadline, and the page says so. The names are untrusted text.
+ */
+function waitingForRunnerText(
+  status: Job["status"],
+  source: ImplementerDetailSource | null,
+  display: (text: string) => string,
+): string | null {
+  if (status !== "queued" || source === null) return null;
+  const wait = source.wait;
+  if (wait != null) {
+    const name = display(cleanTaskLine(head(wait.name, 400)));
+    if (wait.kind === "hosted")
+      return `Waiting for a free place on ${name} (${inUse(wait.running, wait.limit)}). The run starts when a place is free; cancel it to stop waiting.`;
+    if (wait.state === "busy")
+      return `Waiting for a free place on the runner ${name} (${inUse(wait.running, wait.limit)}). The run starts when a place is free; cancel it to stop waiting.`;
+    if (wait.state === "offline")
+      return `Waiting for the runner ${name}, which is offline or revoked. The run is cancelled if it stays so for ${String(wait.deadlineMinutes)} minutes.`;
+    if (wait.state === "cannot_serve")
+      return `The runner ${name} is online but cannot take this step: its version, harness or model access does not fit. The run is cancelled if that stays so for ${String(wait.deadlineMinutes)} minutes.`;
+    return `Waiting for the runner ${name}`;
+  }
+  if (source.runner == null) return null;
+  return namedRunnerOf(source.runner.labels)
+    ? `Waiting for the runner ${display(cleanTaskLine(head(source.runner.name, 400)))}`
+    : `Waiting for a runner with labels ${source.runner.labels
+        .map((label) => display(cleanTaskLine(head(label, 160))))
+        .join(", ")}`;
+}
+
 function implementerDetailView(
   job: Job,
   source: ImplementerDetailSource | null,
@@ -1053,14 +1108,7 @@ function implementerDetailView(
                   display(cleanTaskLine(head(label, 160))),
                 ),
           },
-    waitingForRunner:
-      job.status === "queued" && source?.runner != null
-        ? namedRunnerOf(source.runner.labels)
-          ? `Waiting for the runner ${display(cleanTaskLine(head(source.runner.name, 400)))}`
-          : `Waiting for a runner with labels ${source.runner.labels
-              .map((label) => display(cleanTaskLine(head(label, 160))))
-              .join(", ")}`
-        : null,
+    waitingForRunner: waitingForRunnerText(job.status, source, display),
     resultExpected: source?.result?.expected ?? false,
     resume: resumeViewOf(job.result),
     result:
