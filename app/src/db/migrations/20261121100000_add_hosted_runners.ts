@@ -10,7 +10,7 @@
 //  - `implementer_environments` gets the nullable column `concurrency` (no default, so no rewrite) and `created_by` loses NOT NULL: the
 //    hosted runners are made by the platform, as `workspaces.created_by` already may be null. A foreign key stays;
 //  - the rows are made here, for every workspace that is not deleted and every size the platform offers an environment
-//    (`ENVIRONMENT_VCPUS`, the app's copy of `environmentVcpus` of `contracts/environment-sizes.v1.json`), with the concurrency the
+//    (`support/hosted-runner-rules.ts`, a frozen copy of `environmentVcpus` of `contracts/environment-sizes.v1.json`), with the concurrency the
 //    operator set (`HOSTED_RUNNER_DEFAULT_CONCURRENCY`, else 2). Asked again it makes nothing (one row for each type and workspace). A name
 //    that is taken in the workspace (an environment of its own, or a runner that is not revoked, named "Vercel Sandbox 4 vCPU") is
 //    not taken from its owner: the hosted runner then gets " (hosted)" after it. A workspace made later gets its rows with the workspace;
@@ -26,10 +26,10 @@
 import { sql } from "kysely";
 import type { Migration } from "kysely/migration";
 import {
-  HOSTED_RUNNER_VCPUS,
-  hostedRunnerDefaultConcurrency,
-  hostedRunnerName,
-} from "../../named-runners/hosted.ts";
+  HOSTED_RUNNER_MIGRATION_VCPUS,
+  hostedRunnerMigrationConcurrency,
+  hostedRunnerMigrationName,
+} from "./support/hosted-runner-rules.ts";
 
 /** How long the migration waits for a lock before it gives up. */
 export const LOCK_TIMEOUT = "5s";
@@ -82,9 +82,9 @@ export const migration: Migration = {
       db,
     );
 
-    const concurrency = hostedRunnerDefaultConcurrency(process.env);
-    for (const vcpus of HOSTED_RUNNER_VCPUS) {
-      const name = hostedRunnerName(vcpus);
+    const concurrency = hostedRunnerMigrationConcurrency(process.env);
+    for (const vcpus of HOSTED_RUNNER_MIGRATION_VCPUS) {
+      const name = hostedRunnerMigrationName(vcpus);
       await sql`insert into implementer_environments
           (id, workspace_id, name, vcpus, setup_script, network_mode, network_hosts, kind, labels, created_by, created_at, updated_at, concurrency)
         select gen_random_uuid()::text, w.id,

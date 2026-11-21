@@ -112,7 +112,7 @@ describe("the migration that adds the environment's network rule", () => {
     const { rows: environments } = await sql<{
       network_mode: string;
       network_hosts: string;
-    }>`select network_mode, network_hosts from implementer_environments`.execute(
+    }>`select network_mode, network_hosts from implementer_environments where concurrency is null`.execute(
       db,
     );
     expect(environments).toEqual([{ network_mode: "off", network_hosts: "" }]);

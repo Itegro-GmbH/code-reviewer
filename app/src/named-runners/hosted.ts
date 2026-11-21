@@ -2,16 +2,13 @@
 
 // The hosted runners (ADR 0007, decisions 5 and 16): the provided Vercel Sandbox is one hosted runner for each size the platform offers
 // an environment, in every workspace. A hosted runner states only how many turns it may run at the same time; its size is the property of
-// its type and is never configured. The types are `ENVIRONMENT_VCPUS` (the app's copy of `environmentVcpus` in
-// `contracts/environment-sizes.v1.json`, which `implementer/environments/limits.test.ts` holds to the file), not a second list.
-import {
-  ENVIRONMENT_VCPUS,
-  type EnvironmentVcpus,
-} from "../implementer/environments/limits.ts";
-
-/** The types of hosted runner, by size in vCPUs, smallest first. */
-export const HOSTED_RUNNER_VCPUS: readonly EnvironmentVcpus[] =
-  ENVIRONMENT_VCPUS;
+// its type and is never configured.
+/**
+ * The types of hosted runner, by size in vCPUs, smallest first: the sizes an environment may name. A typed copy of `environmentVcpus` of
+ * `contracts/environment-sizes.v1.json` (this module imports no other, so the runners and the environments stay apart), which `hosted.test.ts`
+ * holds to the file and to `ENVIRONMENT_VCPUS` of the environments.
+ */
+export const HOSTED_RUNNER_VCPUS = [2, 4, 6, 8] as const;
 
 /** The name of the hosted runner of a type: "Vercel Sandbox 4 vCPU". */
 export function hostedRunnerName(vcpus: number): string {

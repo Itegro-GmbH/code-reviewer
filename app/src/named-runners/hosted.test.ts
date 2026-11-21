@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ENVIRONMENT_VCPUS } from "../implementer/environments/limits.ts";
 import {
   HOSTED_RUNNER_CONCURRENCY_MAX,
   HOSTED_RUNNER_DEFAULT_CONCURRENCY,
@@ -32,6 +33,7 @@ describe("the hosted runner types", () => {
   // #1105-R60
   it("are the sizes an environment may name in contracts/environment-sizes.v1.json: 2, 4, 6 and 8 vCPU, never 1", () => {
     expect([...HOSTED_RUNNER_VCPUS]).toEqual(sizes.environmentVcpus);
+    expect([...HOSTED_RUNNER_VCPUS]).toEqual([...ENVIRONMENT_VCPUS]);
     expect([...HOSTED_RUNNER_VCPUS]).toEqual([2, 4, 6, 8]);
   });
 

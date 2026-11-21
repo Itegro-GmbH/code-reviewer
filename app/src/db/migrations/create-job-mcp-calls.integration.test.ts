@@ -9,7 +9,10 @@ import { describe, expect, it } from "vitest";
 import { migrateToLatest } from "../migrate.ts";
 import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
-import { columnsAddedLater } from "../../test-support/columns-added-later.ts";
+import {
+  columnsAddedLater,
+  withoutColumnsAddedLater,
+} from "../../test-support/columns-added-later.ts";
 import {
   connectPostgres,
   createEmptyTestDatabase,
@@ -39,7 +42,8 @@ async function rowsOfEveryOldTable(
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,
       );
-    result[table.name] = rows;
+    // The rows a later migration made itself (the hosted runners of ADR 0007) are no change to a row that exists.
+    result[table.name] = withoutColumnsAddedLater(table.name, rows);
   }
   return result;
 }

@@ -11,6 +11,16 @@ import { migrateToLatest } from "../migrate.ts";
 import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
+import {
+  HOSTED_RUNNER_VCPUS,
+  hostedRunnerDefaultConcurrency,
+  hostedRunnerName,
+} from "../../named-runners/hosted.ts";
+import {
+  HOSTED_RUNNER_MIGRATION_VCPUS,
+  hostedRunnerMigrationConcurrency,
+  hostedRunnerMigrationName,
+} from "./support/hosted-runner-rules.ts";
 
 const THIS = "20261121100000_add_hosted_runners";
 const T = "2026-11-06T08:00:00.000Z";
@@ -243,5 +253,26 @@ describe("the hosted runners migration", () => {
       db,
     );
     expect(columns.rows).toEqual([]);
+  });
+});
+
+describe("the frozen rules of the hosted runners migration", () => {
+  // #1105-M05
+  it("are what the application knows today: the sizes, the names and the default concurrency", () => {
+    expect([...HOSTED_RUNNER_MIGRATION_VCPUS]).toEqual([
+      ...HOSTED_RUNNER_VCPUS,
+    ]);
+    for (const vcpus of HOSTED_RUNNER_VCPUS)
+      expect(hostedRunnerMigrationName(vcpus)).toBe(hostedRunnerName(vcpus));
+    for (const value of [undefined, "5", " 7 ", "0", "101", "x", "2.5", ""])
+      expect(
+        hostedRunnerMigrationConcurrency({
+          HOSTED_RUNNER_DEFAULT_CONCURRENCY: value,
+        }),
+      ).toBe(
+        hostedRunnerDefaultConcurrency({
+          HOSTED_RUNNER_DEFAULT_CONCURRENCY: value,
+        }),
+      );
   });
 });
