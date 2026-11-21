@@ -113,4 +113,4 @@ export function describeJiraFailure(
 }
 
 /** What the page of GitHub and Jira says where the Atlassian app is not set up, so the "Jira" of its name is not a promise without a card (#1108). */
-export const JIRA_NOT_SET_UP = "Jira is not set up for this instance.";
+export const JIRA_NOT_SET_UP = "Jira is not set up on this installation.";
