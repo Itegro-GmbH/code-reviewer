@@ -189,6 +189,8 @@ def parse_door_rule(document: object, where: str = "rule") -> NetworkRule:
     given: dict[str, Any] = {str(key): value for key, value in document.items()}  # type: ignore[reportUnknownVariableType]
     if "ports" not in given and "readOnly" not in given:
         return parse_rule(given, where)
+    # Present is present: a null is not "absent" (`ports: null` is refused, as it always was).
+    has_ports, has_read_only = "ports" in given, "readOnly" in given
     ports: object = given.pop("ports", None)
     read_only: object = given.pop("readOnly", None)
     rule = parse_rule(given, where)
@@ -197,7 +199,7 @@ def parse_door_rule(document: object, where: str = "rule") -> NetworkRule:
             f"{where}.ports and {where}.readOnly must be absent unless the mode is list"
         )
     numbers: list[int] = []
-    if ports is not None:
+    if has_ports:
         if not isinstance(ports, list) or not ports:
             raise RuleError(f"{where}.ports must be a non-empty list")
         for port in ports:  # type: ignore[reportUnknownVariableType]
@@ -205,7 +207,7 @@ def parse_door_rule(document: object, where: str = "rule") -> NetworkRule:
                 raise RuleError(f"{where}.ports has a port the door does not serve")
             numbers.append(port)
     names: list[str] = []
-    if read_only is not None:
+    if has_read_only:
         if not isinstance(read_only, list) or not read_only:
             raise RuleError(f"{where}.readOnly must be a non-empty list")
         for entry in read_only:  # type: ignore[reportUnknownVariableType]
