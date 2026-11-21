@@ -192,37 +192,6 @@ describe("the runner of an agent step (#1105)", () => {
     ).toEqual([]);
   });
 
-  // #1126-V04
-  it("refuses a wildcard that covers the model's host for the harness claude-code, and takes other wildcards", () => {
-    const claude = { harness: "claude-code", model: LOGIN, runner: DEVBOX.id };
-    expect(
-      codes(
-        lane(
-          step({
-            ...claude,
-            network: {
-              mode: "list",
-              hosts: ["lateinorum.de", "*.anthropic.com"],
-            },
-          }),
-        ),
-      ),
-    ).toEqual([["/steps/0/network/hosts/1", "network_host_invalid"]]);
-    expect(
-      codes(
-        lane(
-          step({
-            ...claude,
-            network: {
-              mode: "list",
-              hosts: ["*.gstatic.com", "api.anthropic.com"],
-            },
-          }),
-        ),
-      ),
-    ).toEqual([]);
-  });
-
   // #1105-R10
   it("holds a managed model to a hosted runner (runner_needs_own_key on a self-hosted one)", () => {
     expect(codes(lane(step({ model: MANAGED })))).toEqual([]);

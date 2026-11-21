@@ -764,8 +764,6 @@ function checkInlineSettings(
   checkHostedSettings(node, path, c);
 }
 
-const ANTHROPIC_API_HOST = "api.anthropic.com";
-
 /** The setup script and the network rule of an environment, now settings of the step (ADR 0007, decision 11, amended by #1126: any runner). */
 function checkHostedSettings(
   node: Record<string, unknown>,
@@ -822,27 +820,6 @@ function checkHostedSettings(
         'A step on the harness "claude-code" cannot have an open network: its login is inside the container, so any host could be a place to send it to. Use mode "list" with the hosts the work needs (they are only read: GET and HEAD), or "off".',
       ),
     );
-  // The model's own host is reached through a tunnel the runner pins; a wildcard that covers it would make it a read-only host, and
-  // Claude Code posts to it. The runner refuses the turn for it, so the lane is refused here.
-  if (
-    node.harness === CLAUDE_CODE_HARNESS &&
-    isRecord(node.network) &&
-    node.network.mode === "list" &&
-    Array.isArray(node.network.hosts)
-  )
-    for (const [index, host] of node.network.hosts.entries())
-      if (
-        typeof host === "string" &&
-        host.trim().toLowerCase().startsWith("*.") &&
-        ANTHROPIC_API_HOST.endsWith(host.trim().toLowerCase().slice(1))
-      )
-        c.report(
-          issue(
-            pointer(path, "network", "hosts", index),
-            "network_host_invalid",
-            `The entry ${shown(host)} covers ${ANTHROPIC_API_HOST}, the host of the model: it is reached as it is and cannot be read-only. Write the other hosts by name.`,
-          ),
-        );
 }
 
 /**
