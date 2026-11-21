@@ -64,8 +64,7 @@ export const FORM_COPY = {
   environment: "Environment",
   environmentPlaceholder: "Choose an environment",
   environmentHint:
-    "A size and a setup script for this task. The script runs once in a container of its own, before the agent starts. Without a choice the standard applies. Environments are managed under",
-  environmentLink: "Environments",
+    "A size and a setup script for this task. The script runs once in a container of its own, before the agent starts. Without a choice the standard applies. Environments are set up through the API.",
   environmentRunnerNote:
     "The task runs on a runner of the workspace that has the labels of this environment, with your own API key. It waits for one and is cancelled, free of charge, if no runner takes it in time.",
   environmentScriptNote:

@@ -97,6 +97,8 @@ export function ProjectSettingsPageContent({
   nativeCatalog,
   billingOn = true,
   canConfirmProviderAddress = false,
+  readOnly = false,
+  readOnlyNote,
   data,
   api,
 }: {
@@ -116,6 +118,10 @@ export function ProjectSettingsPageContent({
   billingOn?: boolean;
   /** The person may manage the workspace's LLM key, so they may confirm a new address of the project's catalog provider (#588). */
   canConfirmProviderAddress?: boolean;
+  /** The settings are shown and not changed here: in the factory an AI sets them through the API (ADR 0007, decision 8, #1108). */
+  readOnly?: boolean;
+  /** What the form says while it is read only (the default tells it is the role). */
+  readOnlyNote?: string;
   data: Extract<ProjectSettingsPageData, { kind: "ready" }>;
   /** Only tests pass this: a server component cannot hand functions to the client form. */
   api?: SettingsApi;
@@ -149,6 +155,8 @@ export function ProjectSettingsPageContent({
           {...(nativeCatalog === undefined ? {} : { nativeCatalog })}
           billingOn={billingOn}
           canConfirmProviderAddress={canConfirmProviderAddress}
+          readOnly={readOnly}
+          {...(readOnlyNote === undefined ? {} : { readOnlyNote })}
           {...(api === undefined ? {} : { api })}
         />
       </div>

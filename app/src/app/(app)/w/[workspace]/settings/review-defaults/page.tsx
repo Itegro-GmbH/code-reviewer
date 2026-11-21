@@ -16,6 +16,8 @@ import {
 import { requireWorkspace } from "@/workspaces/access-runtime";
 import { can } from "@/workspaces/permissions";
 import { getProductIdentity } from "@/product-identity/current";
+import { getCapabilities } from "@/capabilities/shared";
+import { FACTORY_READ_ONLY_NOTE } from "@/review-settings/ui/read-only-note";
 
 export const metadata: Metadata = { title: "Settings · Review defaults" };
 
@@ -27,6 +29,7 @@ export default async function ReviewDefaultsSettingsPage({
   const { workspace: slug } = await params;
   const { workspace, role } = await requireWorkspace(slug);
   const workspaceId = workspace.id;
+  const factory = getCapabilities().has("implementer");
   const [data, showPlan, showBilling, billingOn] = await Promise.all([
     loadGlobalSettingsPage({
       settings: reviewSettingsServiceFor(workspaceId),
@@ -45,7 +48,9 @@ export default async function ReviewDefaultsSettingsPage({
     <GlobalSettingsPageContent
       product={getProductIdentity()}
       workspaceSlug={workspace.slug}
-      canEdit={can(role, "manage_review_defaults")}
+      // In the factory the defaults are read only: an AI sets them through the API (#1108).
+      canEdit={can(role, "manage_review_defaults") && !factory}
+      {...(factory ? { readOnlyNote: FACTORY_READ_ONLY_NOTE } : {})}
       showPlan={showPlan}
       showBilling={showBilling}
       billingOn={billingOn}

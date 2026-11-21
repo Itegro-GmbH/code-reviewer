@@ -3,7 +3,7 @@
 // @vitest-environment jsdom
 // A navigation entry of a capability the deployment does not have is not rendered, for anybody (#731): the workspace
 // sidebar, the settings sub-navigation and the admin menu all read the capability set the root layout hands down.
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
 
@@ -179,23 +179,53 @@ describe("the sidebar of the factory (#925)", () => {
     "implementer",
   ]);
 
-  // #925: the sidebar of the factory is the prototype's: ToDos, Projects, Runs, Profiles, Runners, Settings, in that order; #1050 adds MCP
-  // after Runners (the servers an agent may use, as the runners are the machines it runs on).
-  // #1050
-  it("is ToDos, Projects, Runs, Profiles, Runners, MCP and Settings for the factory, with the addresses of the pages", () => {
+  // #925, #1050, #1108: the factory has two areas and nothing else to configure (ADR 0007, decision 7): the control panel (ToDos, Projects,
+  // Runs), Setup (the integrations: GitHub and Jira, MCP servers, Runners, LLM keys) and the workspace's Settings; no Profiles.
+  // #1108
+  it("is the control panel, Setup and Settings for the factory, in three groups, with the addresses of the pages", () => {
+    const groups = navGroupsFor(
+      "/w/acme",
+      identityFor("factory"),
+      WITH_IMPLEMENTER,
+    );
+
     expect(
-      navItemsFor("/w/acme", identityFor("factory"), WITH_IMPLEMENTER).map(
-        (item) => [item.label, item.href],
-      ),
+      groups.map((group) => [
+        group.label,
+        group.items.map((item) => [item.label, item.href]),
+      ]),
     ).toEqual([
-      ["ToDos", "/w/acme/todos"],
-      ["Projects", "/w/acme/projects"],
-      ["Runs", "/w/acme/runs"],
-      ["Profiles", "/w/acme/profiles"],
-      ["Runners", "/w/acme/runners"],
-      ["MCP", "/w/acme/mcp"],
-      ["Settings", "/w/acme/settings"],
+      [
+        "Control panel",
+        [
+          ["ToDos", "/w/acme/todos"],
+          ["Projects", "/w/acme/projects"],
+          ["Runs", "/w/acme/runs"],
+        ],
+      ],
+      [
+        "Setup",
+        [
+          ["GitHub and Jira", "/w/acme/settings/integrations"],
+          ["MCP servers", "/w/acme/mcp"],
+          ["Runners", "/w/acme/runners"],
+          ["LLM keys", "/w/acme/settings/llm"],
+        ],
+      ],
+      ["Workspace", [["Settings", "/w/acme/settings"]]],
     ]);
+  });
+
+  // #1108
+  it("has no place for Profiles, Environments or the Implementer: an AI configures the lanes through the API", () => {
+    const names = navItemsFor(
+      "/w/acme",
+      identityFor("factory"),
+      WITH_IMPLEMENTER,
+    ).map((item) => item.label);
+
+    for (const gone of ["Profiles", "Environments", "Implementer", "MCP"])
+      expect(names).not.toContain(gone);
   });
 
   // #1050
@@ -249,7 +279,7 @@ describe("the sidebar of the factory (#925)", () => {
 
   // #925
   it("is what the rendered sidebar shows with the capability, marked as the current page on its page", () => {
-    navigation.pathname = "/w/acme/profiles";
+    navigation.pathname = "/w/acme/runners";
     const { rerender } = render(
       <CapabilitiesProvider
         capabilities={[...FACTORY, "implementer" satisfies Capability]}
@@ -261,18 +291,36 @@ describe("the sidebar of the factory (#925)", () => {
     );
 
     expect(labels()).toEqual(
-      expect.arrayContaining(["ToDos", "Projects", "Profiles", "Runners"]),
+      expect.arrayContaining(["ToDos", "Projects", "Runners", "MCP servers"]),
     );
-    expect(
-      screen
-        .getByRole("link", { name: "Profiles" })
-        .getAttribute("aria-current"),
-    ).toBe("page");
     expect(
       screen
         .getByRole("link", { name: "Runners" })
         .getAttribute("aria-current"),
+    ).toBe("page");
+    expect(
+      screen
+        .getByRole("link", { name: "MCP servers" })
+        .getAttribute("aria-current"),
     ).toBeNull();
+    // The groups of the factory have a heading, and the heading names the group for assistive technology (#1108).
+    expect(screen.getByText("Control panel")).toBeTruthy();
+    expect(screen.getByText("Setup")).toBeTruthy();
+    expect(
+      within(screen.getByRole("group", { name: "Control panel" }))
+        .getAllByRole("link")
+        .map((link) => link.textContent),
+    ).toEqual(expect.arrayContaining(["Projects", "Runs"]));
+    expect(
+      within(screen.getByRole("group", { name: "Setup" }))
+        .getAllByRole("link")
+        .map((link) => link.textContent),
+    ).toEqual(["GitHub and Jira", "MCP servers", "Runners", "LLM keys"]);
+    expect(
+      within(screen.getByRole("group", { name: "Workspace" }))
+        .getAllByRole("link")
+        .map((link) => link.textContent),
+    ).toEqual(["Settings"]);
 
     rerender(
       <CapabilitiesProvider capabilities={FACTORY}>
@@ -281,7 +329,22 @@ describe("the sidebar of the factory (#925)", () => {
         </AppShell>
       </CapabilitiesProvider>,
     );
-    expect(labels()).not.toContain("Profiles");
+    expect(labels()).not.toContain("Runners");
+  });
+
+  // #1108: code-review.com's groups have no heading, so no labelled group is added to its sidebar.
+  it("adds no labelled group to a sidebar without headings (code-review.com's groups)", () => {
+    navigation.pathname = "/w/acme/projects";
+    render(
+      <CapabilitiesProvider capabilities={FACTORY}>
+        <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
+          <h1>Page</h1>
+        </AppShell>
+      </CapabilitiesProvider>,
+    );
+
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).queryAllByRole("group")).toHaveLength(0);
   });
 
   // #925: Settings is the current place on every page of its tabs.
@@ -300,6 +363,30 @@ describe("the sidebar of the factory (#925)", () => {
         .getByRole("link", { name: "Settings" })
         .getAttribute("aria-current"),
     ).toBe("page");
+  });
+
+  // #1108: the pages that Setup lists sit below /settings, and Settings is not current on them.
+  it.each([
+    ["/w/acme/settings/integrations", "GitHub and Jira"],
+    ["/w/acme/settings/llm", "LLM keys"],
+  ])("marks Setup, not Settings, as the current place on %s", (path, place) => {
+    navigation.pathname = path;
+    render(
+      <CapabilitiesProvider capabilities={[...FACTORY, "implementer"]}>
+        <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
+          <h1>Page</h1>
+        </AppShell>
+      </CapabilitiesProvider>,
+    );
+
+    expect(
+      screen.getByRole("link", { name: place }).getAttribute("aria-current"),
+    ).toBe("page");
+    expect(
+      screen
+        .getByRole("link", { name: "Settings" })
+        .getAttribute("aria-current"),
+    ).toBeNull();
   });
 });
 
@@ -361,7 +448,7 @@ describe("the settings navigation of the factory (#925)", () => {
   const tabs = () =>
     screen
       .getAllByRole("link", {
-        name: /^(General|Members|Billing|Integrations)$/,
+        name: /^(General|Members|Billing)$/,
       })
       .map((link) => link.textContent);
   const links = () =>
@@ -389,16 +476,34 @@ describe("the settings navigation of the factory (#925)", () => {
         </CapabilitiesProvider>,
       );
 
-      expect(tabs()).toEqual(["General", "Members", "Integrations"]);
+      expect(tabs()).toEqual(["General", "Members"]);
       expect(links().includes("Advanced")).toBe(advanced);
     },
   );
+
+  // #1108, ADR 0007 decision 7: the integrations and the LLM keys are places of Setup, so no tab and no page of the settings lists them.
+  it("has the pages of General (Workspace, Review defaults, Advanced) and no Integrations tab, no GitHub App and no LLM link", () => {
+    render(
+      <CapabilitiesProvider capabilities={WITH_IMPLEMENTER}>
+        <SettingsNav workspaceSlug="acme" current="" showAdvanced />
+      </CapabilitiesProvider>,
+    );
+
+    expect(links()).toEqual(
+      expect.arrayContaining(["Workspace", "Review defaults", "Advanced"]),
+    );
+    for (const gone of ["Integrations", "GitHub App", "LLM"])
+      expect(links()).not.toContain(gone);
+    expect(
+      screen.getByRole("navigation", { name: "General pages" }),
+    ).toBeTruthy();
+  });
 
   // #731-T06, #925
   it("lists Review defaults only with review, and the Billing tab only with billing", () => {
     const { rerender } = render(
       <CapabilitiesProvider capabilities={["implementer"]}>
-        <SettingsNav workspaceSlug="acme" current="integrations" showBilling />
+        <SettingsNav workspaceSlug="acme" current="" showBilling />
       </CapabilitiesProvider>,
     );
     expect(links()).not.toContain("Review defaults");
@@ -406,7 +511,7 @@ describe("the settings navigation of the factory (#925)", () => {
 
     rerender(
       <CapabilitiesProvider capabilities={["review", "billing", "implementer"]}>
-        <SettingsNav workspaceSlug="acme" current="integrations" showBilling />
+        <SettingsNav workspaceSlug="acme" current="" showBilling />
       </CapabilitiesProvider>,
     );
     expect(links()).toContain("Review defaults");

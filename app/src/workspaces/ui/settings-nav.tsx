@@ -2,8 +2,8 @@
 
 "use client";
 // The sub-navigation of the workspace settings (#178): one link per sub-page, the current one carries `aria-current="page"`,
-// which the styling turns into an underline as well, so the location is never shown by colour alone. The factory (#925) has the four
-// tabs (General, Members, Billing, Integrations) and, for a tab that has more than one page, a second row with its pages.
+// which the styling turns into an underline as well, so the location is never shown by colour alone. The factory (#925) has the three
+// tabs (General, Members, Billing) and, for a tab that has more than one page, a second row with its pages.
 //
 // "Advanced" (#658) only holds the deletion of the workspace and is the Owner's alone, so only an Owner sees the link. The
 // settings layout (`app/(app)/w/[workspace]/settings/layout.tsx`) knows the role and hands it down through

@@ -7,13 +7,14 @@
 // Every link marks the current page with `aria-current="page"` and closes the narrow-screen drawer.
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Fragment, useEffect, useRef } from "react";
+import { Fragment, useEffect, useId, useRef } from "react";
 import { useCapabilities } from "@/capabilities/context";
 import {
   Sidebar,
   SidebarContent,
   SidebarGroup,
   SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -26,9 +27,10 @@ import type { ProductIdentity } from "@/product-identity/identity";
 import { workspaceSlugOfPath } from "@/workspaces/paths";
 import { TodoCount } from "../todo-badges/badges.tsx";
 import {
-  isCurrentPage,
+  isCurrentItem,
   navGroupsFor,
   SIDEBAR_LINK_CLASS,
+  type NavGroup,
   type NavItem,
 } from "./nav-items.ts";
 
@@ -53,18 +55,42 @@ export function NavLinks({
       {groups.map((group, index) => (
         <Fragment key={index}>
           {index > 0 ? <SidebarSeparator /> : null}
-          <SidebarGroup>
-            <SidebarGroupContent>
-              <SidebarMenu className="m-0 list-none p-0">
-                {group.items.map((item) => (
-                  <NavLink key={item.href} item={item} pathname={pathname} />
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
+          <NavGroupSection group={group} pathname={pathname} />
         </Fragment>
       ))}
     </SidebarContent>
+  );
+}
+
+/**
+ * One group of places. A group with a heading is a labelled group for assistive technology (`role="group"`, named by its heading), so a
+ * screen reader says which of the lists it is in; the heading of the factory's groups is a visible name only otherwise (#1108).
+ */
+function NavGroupSection({
+  group,
+  pathname,
+}: {
+  group: NavGroup;
+  pathname: string | null;
+}) {
+  const labelId = useId();
+  return (
+    <SidebarGroup
+      {...(group.label === undefined
+        ? {}
+        : { role: "group", "aria-labelledby": labelId })}
+    >
+      {group.label === undefined ? null : (
+        <SidebarGroupLabel id={labelId}>{group.label}</SidebarGroupLabel>
+      )}
+      <SidebarGroupContent>
+        <SidebarMenu className="m-0 list-none p-0">
+          {group.items.map((item) => (
+            <NavLink key={item.href} item={item} pathname={pathname} />
+          ))}
+        </SidebarMenu>
+      </SidebarGroupContent>
+    </SidebarGroup>
   );
 }
 
@@ -76,7 +102,7 @@ function NavLink({
   pathname: string | null;
 }) {
   const { setOpenMobile } = useSidebar();
-  const current = isCurrentPage(pathname, item.href);
+  const current = isCurrentItem(pathname, item);
   const slug = pathname === null ? undefined : workspaceSlugOfPath(pathname);
   return (
     <SidebarMenuItem>
