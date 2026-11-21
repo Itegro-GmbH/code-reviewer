@@ -66,13 +66,23 @@ describe("the address of an MCP server", () => {
       });
   });
 
-  it("refuses credentials and a query string in the address", () => {
+  it("refuses credentials in the address", () => {
     expect(checkMcpUrl("https://user:pw@mcp.example.com/", PRODUCTION)).toEqual(
       { ok: false, code: "mcp_url_credentials" },
     );
-    expect(checkMcpUrl("https://mcp.example.com/?key=abc", PRODUCTION)).toEqual(
-      { ok: false, code: "mcp_url_query" },
-    );
+  });
+
+  // #1122-T01
+  it("accepts an address with query parameters and keeps them", () => {
+    expect(
+      checkMcpUrl(
+        "https://mcp.example.com/mcp?connection=abc-123&x=1",
+        PRODUCTION,
+      ),
+    ).toEqual({
+      ok: true,
+      url: "https://mcp.example.com/mcp?connection=abc-123&x=1",
+    });
   });
 
   // #1050-T02
@@ -94,10 +104,7 @@ describe("the address of an MCP server", () => {
 
   it("lets a redirect target keep its query string", () => {
     expect(
-      checkMcpUrl("https://mcp.example.com/mcp?session=1", {
-        ...PRODUCTION,
-        allowQuery: true,
-      }).ok,
+      checkMcpUrl("https://mcp.example.com/mcp?session=1", PRODUCTION).ok,
     ).toBe(true);
   });
 });

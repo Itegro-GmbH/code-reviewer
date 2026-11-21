@@ -58,7 +58,6 @@ function refusedAddress(error: unknown): boolean {
 export function addressAllowed(url: string, http: OAuthHttp): boolean {
   return checkMcpUrl(url, {
     allowTestEndpoints: http.allowTestEndpoints,
-    allowQuery: true,
   }).ok;
 }
 

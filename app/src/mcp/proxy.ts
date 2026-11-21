@@ -295,7 +295,6 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
   const maxResponse = options.maxResponseBytes ?? MCP_PROXY_MAX_RESPONSE_BYTES;
   const policy = {
     allowTestEndpoints: options.allowTestEndpoints,
-    allowQuery: true,
   };
 
   async function forward({

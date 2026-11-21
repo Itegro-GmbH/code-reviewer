@@ -22,7 +22,6 @@ export const MCP_INPUT_CODES = [
   /** The address holds a user name or a password. */
   "mcp_url_credentials",
   /** The address has a query string: a key belongs in a header. */
-  "mcp_url_query",
   /** The address names this machine or a private, link-local or reserved place, or the metadata service. */
   "mcp_url_private",
   /** The authentication is not `none`, `header` or `oauth`. */
@@ -75,7 +74,6 @@ export const MCP_ERROR_STATUS: Record<McpErrorCode, number> = {
   mcp_url_invalid: 422,
   mcp_url_not_https: 422,
   mcp_url_credentials: 422,
-  mcp_url_query: 422,
   mcp_url_private: 422,
   mcp_auth_invalid: 422,
   mcp_oauth_client_invalid: 422,
@@ -108,7 +106,6 @@ export const MCP_INPUT_FIELD: Record<
   mcp_url_invalid: "url",
   mcp_url_not_https: "url",
   mcp_url_credentials: "url",
-  mcp_url_query: "url",
   mcp_url_private: "url",
   mcp_auth_invalid: "auth",
   mcp_oauth_client_invalid: "auth",

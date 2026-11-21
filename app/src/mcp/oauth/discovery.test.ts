@@ -7,7 +7,11 @@ import {
   type OAuthFakeOptions,
 } from "../../../../fakes/mcp/oauth.ts";
 import { createGuardedFetch } from "../../dispatch/guarded-fetch.ts";
-import { discoverOAuth, parseChallenge } from "./discovery.ts";
+import {
+  canonicalResource,
+  discoverOAuth,
+  parseChallenge,
+} from "./discovery.ts";
 
 const closers: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -244,5 +248,15 @@ describe("the discovery of the authorization server of an MCP server", () => {
       resourceMetadata: null,
       scope: null,
     });
+  });
+});
+
+describe("the canonical resource of an address with a query (#1122)", () => {
+  // #1122-T02
+  it("leaves the query of the server's address out, and still refuses a fragment", () => {
+    expect(
+      canonicalResource("https://MCP.example.com/mcp/?connection=abc-123"),
+    ).toBe("https://mcp.example.com/mcp");
+    expect(canonicalResource("https://mcp.example.com/mcp#x")).toBeNull();
   });
 });

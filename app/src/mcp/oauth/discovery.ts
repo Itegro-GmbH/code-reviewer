@@ -65,11 +65,12 @@ export function parseChallenge(header: string | null): Challenge {
   return found;
 }
 
-/** The canonical address of a resource: scheme, host and port in lower case, the path without a trailing slash, nothing else. */
+/** The canonical address of a resource: scheme, host and port in lower case, the path without a trailing slash, nothing else (a query
+ * string of the server's address, #1122, is not part of it). */
 export function canonicalResource(text: string): string | null {
   try {
     const url = new URL(text);
-    if (url.search !== "" || url.hash !== "") return null;
+    if (url.hash !== "") return null;
     return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
   } catch {
     return null;
