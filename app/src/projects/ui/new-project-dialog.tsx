@@ -6,8 +6,7 @@
 // is chosen (a repository without boards, or whose boards the App may not read, creates a project without one); the lanes to start with are
 // copies of the built-in ones. "Create" posts all three to `POST /projects` and opens the cockpit. The ticket source can also be a Jira project
 // (#1038): then the person picks the Jira site (a connection of the workspace), one of the projects the site has (read when the site is chosen)
-// and the repository the code lives in; the board does not apply, and only the lanes that need no ticket write-back are offered. A lane that could not be copied (it needs
-// the profiles and an environment) does not undo the project: the dialog says so and offers the way to the project. Only an Admin or an Owner
+// and the repository the code lives in; the board does not apply, and only the lanes that need no ticket write-back are offered. A lane that could not be copied does not undo the project: the dialog says so and offers the way to the project. Only an Admin or an Owner
 // may create a project (`manage_projects`); the page leaves the button out for a Member. Where the GitHub App is not configured nothing can
 // be switched on: the button is disabled and the reason stands next to it (`blockedReason`, the text of the project switch).
 import { useRouter } from "next/navigation";
@@ -52,6 +51,7 @@ const JIRA_SOURCE = "jira";
 
 /** The built-in lanes a new project can copy, by the key the route takes. */
 const LANE_KEYS = [
+  "one-off-task",
   "issue-to-pr",
   "issue-to-pr-status",
   "review-a-pull-request",
@@ -59,6 +59,7 @@ const LANE_KEYS = [
 
 /** The lanes ticked at the start: the status variant needs the board to have its statuses (#1036), so it is the project's choice. */
 const LANES_BY_DEFAULT: readonly string[] = [
+  "one-off-task",
   "issue-to-pr",
   "review-a-pull-request",
 ];

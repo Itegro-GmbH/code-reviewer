@@ -44,7 +44,11 @@ import {
   type ResultSchema,
 } from "../workflows/result-schema.ts";
 import { formatTicketRef, parseTicketRef } from "../workflows/ticket-ref.ts";
-import { TICKET_INPUT, isStartableKind } from "../workflows/triggers.ts";
+import {
+  TICKET_INPUT,
+  declaresTicket,
+  isStartableKind,
+} from "../workflows/triggers.ts";
 import {
   forTrigger,
   readRunDocument,
@@ -657,15 +661,20 @@ export function createWorkflowRunService(
         );
 
       // #1106: a trigger without `input` takes no fields; its run works on the repository of the lane's project.
-      const noInput = trigger.input === undefined;
-      const schema = noInput
-        ? NO_INPUT_SCHEMA
-        : validateResultSchema(trigger.input, "", { allowTicket: true }).schema;
+      const schema =
+        trigger.input === undefined
+          ? NO_INPUT_SCHEMA
+          : validateResultSchema(trigger.input, "", { allowTicket: true })
+              .schema;
       if (schema === undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_DOCUMENT_UNUSABLE",
           "The input of the trigger has no usable schema.",
         );
+      // A trigger that declares neither a `ticket` nor a `repo` (no input at all, or the one-off lane's text, ADR 0007 decision 15) has no
+      // source of the repository but the project's.
+      const noInput =
+        !declaresTicket(schema) && !Object.hasOwn(schema.properties, "repo");
       // #937: a lane of a project works in the repository of the project, so a manual or api start that declares `repo` and leaves it out
       // is given the project's repository (a start that names one still is held to it, below); a start that has a `ticket` has its repository.
       const project =
@@ -675,7 +684,7 @@ export function createWorkflowRunService(
       if (noInput && project === undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_PROJECT_REQUIRED",
-          "The trigger takes no input, so its run works on the repository of the project of the lane, and this lane has no project.",
+          "The trigger names no repository or ticket, so its run works on the repository of the project of the lane, and this lane has no project.",
         );
       // A switched-off project is never worked on, and a trigger without input has no other source of the repository (#1106).
       if (noInput && project !== undefined && !project.active)

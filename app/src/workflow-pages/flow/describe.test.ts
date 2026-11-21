@@ -61,4 +61,22 @@ describe("describing an agent step", () => {
       ).summary,
     ).toBe("implementer · new session");
   });
+
+  // #1105-T54
+  it("shows the runner of a step by its name, and the id when no name is known", () => {
+    const step = {
+      kind: "agent",
+      model: { provider: "anthropic", model: "claude-sonnet-5-5" },
+      canPush: true,
+      runner: "runner-1",
+    };
+
+    expect(
+      describeNode(step, "agent", { "runner-1": "Vercel Sandbox 4 vCPU" })
+        .summary,
+    ).toBe(
+      "opencode · anthropic/claude-sonnet-5-5 · may push · on Vercel Sandbox 4 vCPU · new session",
+    );
+    expect(describeNode(step, "agent").summary).toContain("on runner-1");
+  });
 });

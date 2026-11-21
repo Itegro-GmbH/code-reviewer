@@ -296,6 +296,8 @@ export type RunPageData =
        * lists the steps).
        */
       document: unknown;
+      /** The names of the workspace's runners by id (#1105): a step names its runner by id, the page shows the name. */
+      runnerNames: Record<string, string>;
     };
 
 async function laneOfVersion(
@@ -323,6 +325,8 @@ export async function loadRunPage(
   deps: {
     workflows: Pick<WorkflowService, "get">;
     runs: Pick<WorkflowRunService, "get">;
+    /** The runners of the workspace, for their names. Left out: the page shows the ids. */
+    runners?: { list(): Promise<readonly { id: string; name: string }[]> };
   },
 ): Promise<RunPageData> {
   const found = await orNotFound(async () => ({
@@ -343,6 +347,12 @@ export async function loadRunPage(
     workflow: { id: found.workflow.id, name: found.workflow.name },
     run: found.run,
     document,
+    runnerNames: Object.fromEntries(
+      ((await deps.runners?.list()) ?? []).map((runner) => [
+        runner.id,
+        runner.name,
+      ]),
+    ),
   };
 }
 
@@ -395,6 +405,7 @@ export function RunPageContent({
         initial={{ run }}
         laneName={workflow.name}
         document={data.document}
+        runnerNames={data.runnerNames}
         {...(api === undefined ? {} : { api })}
         {...(runsApi === undefined ? {} : { runsApi })}
       />

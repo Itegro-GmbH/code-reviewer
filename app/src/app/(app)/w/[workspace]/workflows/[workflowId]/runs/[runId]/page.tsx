@@ -2,6 +2,8 @@
 
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { createNamedRunnersRepository } from "@/db/repositories/named-runners-repository";
+import { getDatabase } from "@/db/startup";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { loadRunPage, RunPageContent } from "@/workflow-pages/pages";
 import { workflowRunServiceFor } from "@/workflow-runs/shared";
@@ -44,6 +46,7 @@ async function RunContent({
   const data = await loadRunPage(workflowId, runId, {
     workflows: workflowServiceFor(workspaceId),
     runs: workflowRunServiceFor(workspaceId),
+    runners: createNamedRunnersRepository(getDatabase(), workspaceId),
   });
   if (data.kind === "not_found") notFound();
   return <RunPageContent workspaceSlug={workspaceSlug} data={data} />;

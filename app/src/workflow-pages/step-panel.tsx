@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 "use client";
-// The details of the step selected in the flow (#1079): its state, times, cost and where the cost comes from, the profile, why it failed
+// The details of the step selected in the flow (#1079): its state, times, cost and where the cost comes from, the profile an earlier run recorded, why it failed
 // in words, the question it asked with the way to answer while it waits, what it returned (what the agent said first, then the fields),
 // every round of it, and for an agent step a link to its run in the Implementer with the MCP calls of that job. A node the run did not
 // reach has no rows: the panel says what the state means and what the lane says about the node. Everything from outside (the agent's
@@ -125,6 +125,7 @@ export function StepPanel({
   repository,
   api,
   runsApi,
+  runnerNames,
   headingId,
   inSheet,
 }: {
@@ -138,6 +139,8 @@ export function StepPanel({
   repository: string | undefined;
   api: WorkflowRunsApi;
   runsApi: RunsApi;
+  /** The names of the workspace's runners by id: a step names its runner by id, the panel shows the name. */
+  runnerNames: Readonly<Record<string, string>>;
   /** The id of the heading: the panel is named by it. */
   headingId: string;
   /** The panel is the content of a sheet: its heading is the title of the dialog. */
@@ -145,7 +148,7 @@ export function StepPanel({
 }) {
   const state = found?.state ?? "notReached";
   const latest = found?.latest;
-  const described = describeNode(node, kind);
+  const described = describeNode(node, kind, runnerNames);
   return (
     <div
       data-slot="step-panel"
@@ -225,7 +228,7 @@ export function StepPanel({
                 ? []
                 : [
                     {
-                      term: FLOW_COPY.profile,
+                      term: FLOW_COPY.profileRecorded,
                       // The name comes from the lane: text.
                       description: `${latest.profile.name} version ${String(latest.profile.version)}`,
                     },

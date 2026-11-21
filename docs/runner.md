@@ -65,7 +65,7 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
 
 ### Environments of the kind `runner`
 
-> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. A lane step will name one concrete runner instead of an environment; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Since #1105 (release A) a lane step names one concrete runner instead of an environment, and the Environments page is gone (its routes stay until release B); see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs".
 
 An environment is either `hosted` (a VM of the platform: a size, a setup script and a network rule, as before) or `runner`: **labels instead of all
 three**. A runner environment names at least one and at most twenty labels (lower case, `[a-z0-9][a-z0-9._:-]{0,39}`); a size, a script or a network
@@ -315,7 +315,7 @@ lease token (`/api/runners/v1/jobs/{id}/session`, `/resume-session`), their cont
 > `hosted_only_setting` (`setupScript` and `network` only on a hosted runner) are the validator's; see [`workflows.md`](workflows.md#settings-in-the-step-1105). A step saved with a runner
 > that is revoked afterwards ends `runner_not_found` when it starts, free, and does not wait. The table below is the rule at an environment, which stays for the old form.
 
-The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment and, for each profile version it runs, whether
+The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment (the **old form**: a step in the profile form; the Profiles and Environments pages are gone since #1105) and, for each profile version it runs, whether
 its model is managed and which harness it runs with. Since #919 the environment is part of the profile, so the same two rules are checked when a **profile** is saved
 (`POST .../profiles`, at `/environment`), and again for a step at its `/profile` (at its `/environment` for a profile version saved before #919, whose step names the environment):
 
@@ -325,7 +325,7 @@ its model is managed and which harness it runs with. Since #919 the environment 
 | `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's.                            |
 | `no_runner_announces`  | A profile (or an agent step) in a runner environment asks for a harness, auth and model that **no online runner of the workspace with the environment's labels announces** (#973). A **warning**, not an error (`severity: "warning"`, listed in `warnings`; the save goes through): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. With no such runner online nothing is said: the turn waits for one. |
 
-A profile names its harness (`opencode` or `claude-code`, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
+An agent step names its harness (`harness`: `opencode` or `claude-code`, [`workflows.md`](workflows.md#settings-in-the-step-1105); a profile of the old form did, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
 
 The validator says which combinations no online runner of the workspace announces (#973, as a warning that never stops a save): it asks the runners that are online (heard from within two minutes, base at the minimum) and have
 every label of the environment whether one has an entry for the profile's harness, auth and model (the claim's rule, `accessMatches`). A managed model is `runner_needs_own_key` and is not

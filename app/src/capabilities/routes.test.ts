@@ -135,8 +135,6 @@ describe("the route classification", () => {
         "implementer",
       "/api/w/[workspace]/implementer/models": "implementer",
       "/api/w/[workspace]/implementer/tasks": "implementer",
-      // #756-T09: the page of the form belongs to the capability too.
-      "/w/[workspace]/implementer": "implementer",
       // #1050: the MCP registry (page and routes) belongs to the capability: a deployment without it has no such path.
       "/w/[workspace]/mcp": "implementer",
       "/api/w/[workspace]/mcp/servers": "implementer",
@@ -165,13 +163,29 @@ describe("the Implementer routes", () => {
         "/api/w/[workspace]/implementer/repositories",
         "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches",
         "/api/w/[workspace]/implementer/tasks",
-        // #756-T09
-        "/w/[workspace]/implementer",
       ]),
     );
     expect(
       files.filter(({ route }) => classOfRoute(route) !== "implementer"),
     ).toEqual([]);
+  });
+
+  // #1105: a task is a run of the one-off lane, and an AI writes lanes through the API: the three pages are gone, their routes stay until release B.
+  it("have no page of the hand-started task, of profiles or of environments any more, while their API routes stay", () => {
+    const routes = discoverRoutes().map(({ route }) => route);
+    for (const gone of [
+      "/w/[workspace]/implementer",
+      "/w/[workspace]/profiles",
+      "/w/[workspace]/environments",
+    ])
+      expect(routes).not.toContain(gone);
+    expect(routes).toEqual(
+      expect.arrayContaining([
+        "/api/w/[workspace]/implementer/tasks",
+        "/api/w/[workspace]/profiles",
+        "/api/w/[workspace]/environments",
+      ]),
+    );
   });
 });
 

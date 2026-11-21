@@ -578,6 +578,28 @@ describe("the workflow service", () => {
     expect((await service.list(second.id)).workflows).toHaveLength(1);
   });
 
+  // #1105-T412 (ADR 0007 decision 15)
+  it("copies the one-off lane with the implementer's settings alone, on the hosted runner, and reports a second copy as taken", async () => {
+    const { rawServiceFor, projectIds, db, idA } = await setup();
+    const service = rawServiceFor(idA);
+    const mine = projectIds.get(idA)!;
+
+    // `reviewer` does not exist in this workspace: the one-off lane has no reviewer.
+    const first = await service.copyBuiltIn(USER, mine, ["one-off-task"]);
+    const again = await service.copyBuiltIn(USER, mine, ["one-off-task"]);
+
+    expect(first.map((r) => [r.key, r.ok])).toEqual([["one-off-task", true]]);
+    expect(again[0]).toMatchObject({ ok: false, code: "WORKFLOW_NAME_TAKEN" });
+    const lanes = (await service.list(mine)).workflows;
+    expect(lanes.map((w) => w.name)).toEqual(["One-off task"]);
+    const view = await service.get(lanes[0]!.id);
+    const hosted = (await createNamedRunnersRepository(db, idA).list()).find(
+      (runner) => runner.kind === "hosted" && runner.vcpus === 4,
+    );
+    expect(JSON.stringify(view.document)).toContain(`"runner":"${hosted!.id}"`);
+    expect(JSON.stringify(view.document)).not.toContain('"profile"');
+  });
+
   // #922-T13
   it("copies built-in lanes into a project and reports the ones that do not pass", async () => {
     const { rawServiceFor, projectIds, db, idA } = await setup();

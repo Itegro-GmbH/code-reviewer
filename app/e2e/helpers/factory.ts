@@ -122,3 +122,40 @@ export const LANE_DOCUMENT = {
     },
   ],
 } as const;
+
+/**
+ * A lane shaped like the built-in "One-off task" (#1105, ADR 0007 decision 15): a manual trigger whose only input is a text, with no ticket
+ * and no repository, so its run works on the project's repository. It writes the task as a comment, because the journey runs no agent.
+ */
+export const TASK_LANE_DOCUMENT = {
+  version: 1,
+  name: "Write the task down",
+  description: "Takes a task as text and writes it on the first issue.",
+  triggers: [
+    {
+      id: "manual",
+      kind: "manual",
+      input: {
+        type: "object",
+        required: ["task"],
+        properties: {
+          task: {
+            type: "string",
+            maxLength: 8000,
+            description: "What the agent should do, in your own words.",
+          },
+        },
+      },
+      steps: [],
+    },
+  ],
+  steps: [
+    {
+      id: "note",
+      kind: "action",
+      connector: "ticket.comment",
+      ticket: 1,
+      body: "{{trigger.input.task}}",
+    },
+  ],
+} as const;

@@ -12,20 +12,29 @@ code-review.com has none of it: no page, no route, no job kind, and its Dispatch
 
 ## What it is
 
-A member of the workspace opens `/w/<slug>/implementer`, picks a repository, a base branch, a **new** branch name, writes
-the task, picks a model and, if they want, a lower cost limit. The task becomes one job. A fresh Sandbox VM starts, an
+> **Amended (ADR 0007, decision 15; #1105, release A).** A task is no longer started by hand outside a lane. The page `/w/<slug>/implementer`, its form (repository,
+> base branch, new branch, task, model, cost limit, environment and profile selects) and every link to it are gone: no page, no navigation entry, no link from the Lanes tab (the address
+> answers `404`). In its place the built-in lane **"One-off task"** ([`workflows.md`](workflows.md#built-in-lanes)) takes a text, the task, and runs one agent step on the
+> project's repository, then opens the pull request; a person starts it from the control panel's start form like any lane. The routes behind the old form
+> (`POST /api/w/<slug>/implementer/tasks`, the follow-up route, the model, repository and branch lists) **stay until release B**, so a script that uses them and the follow-up
+> form of an earlier task keep working; no page uses the start route any more. Sessions, turns and runs of earlier tasks stay readable where they are shown today (the
+> Runs page, the run page, the "Continue" form of the newest turn).
+
+A person describes the change, an agent works on a new branch in a throw-away VM, and the commits arrive on that branch on GitHub.
+(Until release A the person did it on a page of its own: it picked a repository, a base branch, a **new** branch name, wrote
+the task, picked a model and, if they wanted, a lower cost limit. A lane step now carries the model and the other settings itself.) The task becomes one job. A fresh Sandbox VM starts, an
 OpenCode agent works in a full clone (every branch of the repository, its whole history and its tags, #909), in a container of its own with its own Docker, and starts on the new branch. Git is free for
 the agent inside that clone, and it has no way to push: when the turn ends, **the runner pushes every local branch of the
-clone** to GitHub, the new branch among them (section "The git rules"). It does not open a pull request and does not merge.
+clone** to GitHub, the new branch among them (section "The git rules"). It does not open a pull request and does not merge (a lane's `pullRequest.open` step does, as in "One-off task").
 The person finds the branches on GitHub and the run on the Runs page, and can **continue the session** there with a next instruction on a new VM
 (section "Session and Turn").
 
-A task may name an **environment** (section "Environments"): a size for the VM and a setup script. The script runs once, before the agent
+A turn runs on a **runner**, a hosted sandbox type or a self-hosted machine (section "Environments" for the old form): a size for the VM and a setup script. The script runs once, before the agent
 starts, in a container of its own with full internet access and no secret of any kind (section "The environment's setup script"); what it
 leaves behind, installed packages, browsers and the images its Docker pulled, is what the agent starts with. A task without an environment
 is the task of before.
 
-Every member of a workspace may start a task (the permission `start_implementer_task`, minimum role member; one line in
+Every member of a workspace may start a task, that is a run of a lane, and answer a follow-up (the permission `start_implementer_task`, minimum role member; one line in
 `app/src/workspaces/permissions.ts` raises it). The App pushes with its own identity whatever GitHub rights the person has, so
 this is a decision for internal use: before outside users arrive, move it to Admin and up.
 
@@ -46,6 +55,12 @@ keys go through the model door (#807).
   are running; raise it and the Dispatcher entry's `maxRunning` together).
 
 ### Follow-ups
+
+> **What a follow-up is after the one-off lane (ADR 0007 decision 15, an open point settled in #1105).** A follow-up of a run of the lane "One-off task" is **a new run of that lane**: start it
+> again and write the next task, naming the earlier branch in the text (the agent works in a full clone with every branch, so it can check it out). The lane has no `session.continue` step
+> because a run is one agent step; the loop of "Issue to PR" is where a lane continues a session, and an agent that needs an answer **asks** (ToDos). The "Continue" form below stays for the
+> sessions of tasks started before release A and of lanes that already exist, and goes with the follow-up route in release B. Keeping the earlier branch as an optional input of the lane
+> is a later step, not part of release A.
 
 When a turn has ended the session is idle, and any member of the workspace may give it the next instruction. The form is "Continue"
 on the Runs page of the **newest** turn of the session; the route and its checks are in "Follow-up turns: the API and the form (#841)".
@@ -1600,9 +1615,9 @@ first ran into it).
 > A hosted runner is a row of the table of environments (kind `hosted`, with a `concurrency`) that is **no environment of a person**: this page, its routes and the picker of the task form
 > do not list, count, change or delete it. Environments stay accepted for a step in release A, and for tasks started by hand; both go in release B (decisions 11, 15 and 16).
 
-An environment is a start configuration for a task: a **name**, a **size**, a **setup script** and (step 7) a **network** setting. They are kept per workspace on
-the page `/w/<slug>/environments` (no navigation entry since #1108: the navigation of the factory has no place for environments, ADR 0007; the page and its routes stay until release B; only in a deployment with the
-capability `implementer`, anywhere else the path is a 404 like an unknown one).
+An environment is a start configuration for a task: a **name**, a **size**, a **setup script** and (step 7) a **network** setting. They were kept per workspace on
+the page `/w/<slug>/environments`. **The page is gone (#1105, ADR 0007): no page, no navigation entry, no link; the address answers `404`.** Its routes stay until release B,
+for a step that still names an environment and for the follow-up of an earlier task; an AI or an operator reads and writes them through the API only, and a lane step names a runner instead.
 
 - **Who:** every member sees the list and the scripts, because every member may use one. Owners and Admins create, change and
   delete (`manage_implementer_environments`). A workspace holds at most 50.
@@ -1624,8 +1639,7 @@ capability `implementer`, anywhere else the path is a 404 like an unknown one).
   internet afterwards.
 - **The network** is `off` (the default), a list of hosts or `open`: what the agent can reach once the script is done (section "The network door (step 7)"). Only Owners and Admins can change it, like every other field. The form says that network access can be used to send out anything the agent can read.
 - **Names** are unique within a workspace, whatever the case.
-- **The form** has an optional picker "Environment". It lists the standard first and then the environments with their size and memory,
-  and says "setup script" next to those that have one and "network: listed hosts" or "network: any host" next to those that give the agent a network. A task that names none is the task of before.
+- **The picker** of the old task form (gone with the form) listed the standard first and then the environments with their size and memory; the "Continue" form of an earlier task still has it. A task that names none is the task of before.
 - **The task keeps its own copy.** When the task is sent, its turn copies the environment's name, size and script
   (`implementer_turns.environment_*`, no foreign key). Changing or deleting the environment later touches no running or past task, and
   sending the same request again after the environment was deleted still gives the first task back. The Runs page shows which environment
@@ -1673,11 +1687,11 @@ What does not depend on the size: the work volume is a directory of the VM's dis
 
 ## Profiles
 
-> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step of the lane; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Proposal" and "Migration path".
+> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. Profiles are removed: harness, model, push right, cost limit and instructions move into the agent step of the lane; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Proposal" and "Migration path". The Profiles page and the profile select of the old task form are gone since #1105 (release A); the routes, and the profile copy of an earlier turn (history), stay until release B. [`profiles.md`](profiles.md) is the redirect page.
 
 A task can run with a **profile** (#843, [`docs/profiles.md`](profiles.md)): a workspace's own, versioned data with the model, standing
-instructions, cost limit and **push right** a turn runs with. The task is sent with `profile` in the body of the route behind the form (the form
-on the page does not offer one yet); the version it runs with is copied into the turn (`implementer_turns.profile_*`), like the environment, and the
+instructions, cost limit and **push right** a turn runs with. The task was sent with `profile` in the body of the route behind the form (the form
+on the page offered one from #843 to #1105); the version it runs with is copied into the turn (`implementer_turns.profile_*`), like the environment, and the
 model and cost limit of the version are the turn's own. A task **without** a profile is the Implementer of before: no extra text, every local branch
 pushed. A profile with `canPush: false` makes Control skip everything about the push: no leftover commit, no listing, no push, no commits or files in
 the result, and the turn is a success when the agent ended well. The text of the profile is appended last to the instruction file the runner writes
@@ -1766,8 +1780,8 @@ merges nothing; side effects happen only in the actions of a workflow.
 | Cost of a turn | The operator's maximum per turn: 5.00 USD once the owner has set it in the factory's admin portal (General, Limits, "Maximum cost per review"); the default is 1.00 USD until then, which is too low for a task. A person may ask for a lower limit on the form (never above that maximum or 100 USD). Without one, the maximum applies | Claim, and the proxy of the Worker: it refuses the next model call once the calls so far cost that much, so a turn can end slightly above it by the last call |
 | Steps of the agent | None. There is no step limit, no plan, no approach rule: the cost limit is the brake | |
 | Time of a turn | 3600 seconds, **the environment's setup script included** (it runs inside them; section "The environment's setup script"). The runner keeps the last 270 seconds for the commit of what is left and the final push of all branches (a third of a short limit; the split is in "The git rules"). The Dispatcher stops the Worker at 3600 seconds (`DISPATCHER_WORKER_CONFIG`, `implementer.timeoutSeconds`, 60 to 21600) and the App fails a turn still running after 70 minutes with `timeout`; the App cannot read the Dispatcher's setting, so change the constants with it (`docs/dispatcher.md`). The runner holds a turn to the smaller of its time limit and `RUNNER_JOB_TIMEOUT_SECONDS`. A turn that a workflow started has the `turnTimeLimitMinutes` of the workflow instead of the 3600 (15 to 60 minutes, #918: [`workflows.md`](workflows.md#the-limits-of-a-lane)); the App fails it ten minutes after its limit | Dispatcher, runner, App |
-| Stop | On SIGTERM the engine is ended at once, all committed branches are pushed (if the lease is still held; nothing uncommitted is committed) and the turn ends `runner_shutdown`. The job process gets a grace of 120 seconds, ends itself after 115 (the final push gets 25 of them), and the container's stop timeout is 150 seconds; each lease question (before the listing and before each push) is retried for 30 seconds at a normal end and 20 on a stop, and
-never beyond the time that is left of the final push | Runner, container spec |
+| Stop                                                 | On SIGTERM the engine is ended at once, all committed branches are pushed (if the lease is still held; nothing uncommitted is committed) and the turn ends `runner_shutdown`. The job process gets a grace of 120 seconds, ends itself after 115 (the final push gets 25 of them), and the container's stop timeout is 150 seconds; each lease question (before the listing and before each push) is retried for 30 seconds at a normal end and 20 on a stop, and                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| never beyond the time that is left of the final push | Runner, container spec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Task text | 20,000 characters | Form and route |
 | Branch name | At most 200 characters and 255 bytes, each part between slashes at most 240 bytes, no leading `-` or `+`, no white space or control character (the C1 block too), no lone surrogate half, git's rules, not the base branch (the Worker's push policy refuses the rest, #838) | Form and route |
 | Base branches offered | 100 names, default first; a base beyond that can be typed | Route |

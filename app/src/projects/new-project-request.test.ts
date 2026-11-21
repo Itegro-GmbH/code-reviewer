@@ -138,10 +138,21 @@ describe("the ticket source in the body of a new project (#1038)", () => {
           path: "lanes/1",
           code: "lane_not_for_jira",
           message: expect.stringContaining("issue-to-pr"),
-          available: ["issue-to-pr-status", "review-a-pull-request"],
+          available: [
+            "one-off-task",
+            "issue-to-pr-status",
+            "review-a-pull-request",
+          ],
         },
       ],
     });
+    // #1105: the one-off lane needs no ticket, so a Jira project takes it.
+    expect(
+      read(
+        { repositoryId: "r1", ticketSource: JIRA, lanes: ["one-off-task"] },
+        [...LANES, "one-off-task"],
+      ).ok,
+    ).toBe(true);
     // #1040: the status lane works for a Jira project.
     expect(
       read(

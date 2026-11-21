@@ -177,7 +177,8 @@ const CRON_MAX_LENGTH = 100;
 /**
  * A run works on one repository. A label trigger brings it (the ticket's); a manual or api one that declares `input` gets it from it: a
  * required `ticket` (the run works in the repository of the ticket) or, as before #916, a required text `repo` (owner/name). A manual or
- * api trigger without `input` (#1106) works on the repository of the project of its lane.
+ * api trigger without `input` (#1106), or with an input that declares neither (the one-off lane's text, ADR 0007 decision 15), works on
+ * the repository of the project of its lane: a `ticket` or a `repo` that is declared is held to its rules, nothing else is asked.
  */
 function checkRepositoryInput(
   schema: ResultSchema,
@@ -195,18 +196,10 @@ function checkRepositoryInput(
       );
     return;
   }
-  const repo = Object.hasOwn(schema.properties, "repo")
-    ? schema.properties.repo
-    : undefined;
-  if (repo === undefined)
-    report(
-      issue(
-        where,
-        "repo_required",
-        "A run works on one repository. Declare the input 'ticket' (type ticket, in required): the run works in the repository of the ticket. Or declare the input 'repo' (a text, owner/name) in properties and in required: the caller names the repository.",
-      ),
-    );
-  else if (repo.type !== "string")
+  // Neither a ticket nor a `repo`: the run works on the repository of the lane's project, on its default branch.
+  if (!Object.hasOwn(schema.properties, "repo")) return;
+  const repo = schema.properties.repo;
+  if (repo?.type !== "string")
     report(
       issue(
         pointer(where, "properties", "repo"),

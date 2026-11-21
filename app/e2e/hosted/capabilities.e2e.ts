@@ -89,20 +89,16 @@ test.describe("a deployment with the capabilities review and dynamic-review", ()
       `/api/w/${slug}/implementer/repositories/x/branches`,
       `/api/w/${slug}/implementer/models`,
       `/api/w/${slug}/implementer/tasks`,
-      // The page of the form (#756-T09).
-      `/w/${slug}/implementer`,
-      // The environments of the Implementer (#818): the routes and the page.
+      // The environments of the Implementer (#818): the routes.
       `/api/w/${slug}/environments`,
       `/api/w/${slug}/environments/x`,
-      `/w/${slug}/environments`,
-      // The shell of the factory (#925): the ToDos and the profiles, the count on the sidebar link, the tabs of a project's cockpit and
+      // The shell of the factory (#925): the ToDos, the count on the sidebar link, the tabs of a project's cockpit and
       // of the settings (code-review.com keeps `/connections` and `/members`), and the review settings below a project.
       `/w/${slug}/settings/integrations`,
       `/w/${slug}/settings/members`,
       `/w/${slug}/projects/x/review`,
       `/w/${slug}/todos`,
       `/api/w/${slug}/todos/count`,
-      `/w/${slug}/profiles`,
       `/w/${slug}/projects/x/todos`,
       `/w/${slug}/projects/x/lanes`,
       `/w/${slug}/projects/x/runs`,

@@ -19,12 +19,13 @@ const SOURCE_PROVIDERS = ["github", "jira"] as const;
 /** What can be a Jira project key (the same rule as the stored source: `projects-repository.ts`). */
 const JIRA_PROJECT_KEY = /^[A-Z][A-Z0-9_]{1,99}$/;
 /**
- * The built-in lanes a project on a Jira project may start with (#1040): the review lane needs no ticket, and "Issue to PR (status)" starts
+ * The built-in lanes a project on a Jira project may start with (#1040): the one-off task and the review lane need no ticket, and "Issue to PR (status)" starts
  * by a move of the ticket into a status and writes back to Jira (comments, transitions). "Issue to PR" starts by a LABEL, which a Jira project
  * does not offer: the factory follows the status changes of a Jira project (the owner's decision, epic #1034), not its labels. The dialog
  * offers these only; the route refuses the rest.
  */
 export const LANES_FOR_JIRA: readonly string[] = [
+  "one-off-task",
   "issue-to-pr-status",
   "review-a-pull-request",
 ];

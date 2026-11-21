@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it } from "vitest";
+import { builtInLaneDocument } from "../workflows/built-in-lanes.ts";
+import { EXAMPLE_BUILT_IN_AGENTS } from "../workflows/test-fixtures.ts";
 import { startFormOf } from "./start-form-spec.ts";
 import {
   actionResultOf,
@@ -438,6 +440,25 @@ describe("the form that starts a run", () => {
         triggers: [{ id: "go", kind: "manual" }],
       }),
     ).toEqual({ kind: "form", fields: [], trigger: "go" });
+  });
+
+  // #1105-T420
+  it("makes the form of the one-off lane: one required text, the task, and nothing about a repository", () => {
+    expect(
+      startFormOf(builtInLaneDocument("one-off-task", EXAMPLE_BUILT_IN_AGENTS)),
+    ).toEqual({
+      kind: "form",
+      trigger: "manual",
+      fields: [
+        {
+          name: "task",
+          required: true,
+          kind: "string",
+          long: true,
+          description: expect.stringContaining("What the agent should do"),
+        },
+      ],
+    });
   });
 
   // #916-T110

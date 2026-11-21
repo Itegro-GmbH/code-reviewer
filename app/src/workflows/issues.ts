@@ -122,7 +122,7 @@ export const SEMANTIC_ISSUE_CODES = [
   "mcp_server_broken",
   /** The result of the step names a field the platform fills in itself. */
   "result_field_reserved",
-  /** The run has no repository: a manual trigger that declares an `input` must declare `ticket` or `repo` (a required text). */
+  /** The input of a manual or api trigger declares a `ticket` or a `repo` that cannot name the run's repository (not required, or not a text). */
   "repo_required",
   /** An input that decides a target (an issue, a branch, a label, the environment) holds a value that is not a literal or one reference to the trigger or to the branch of an agent step. */
   "target_from_untrusted_value",

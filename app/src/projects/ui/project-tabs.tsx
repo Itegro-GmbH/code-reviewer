@@ -93,12 +93,6 @@ export function LanesTab({
       <p className="text-xs text-muted-foreground">
         {provider === "jira" ? LANES_COPY.noteJira : LANES_COPY.note}
       </p>
-      <p className="text-sm text-muted-foreground">
-        {LANES_COPY.taskNote}{" "}
-        <Link href={workspacePath(workspaceSlug, "/implementer")}>
-          {LANES_COPY.taskLink}
-        </Link>
-      </p>
     </section>
   );
 }
