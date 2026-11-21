@@ -346,6 +346,10 @@ test.describe("the pages of the factory", () => {
       page.getByRole("heading", { level: 1, name: "LLM" }),
     ).toBeVisible();
     await nav.getByRole("link", { name: "Settings" }).click();
+    // Wait for the page of Settings itself: the tab row of the LLM page has the same links and would be clicked while it goes away.
+    await expect(
+      page.getByRole("heading", { level: 1, name: "General" }),
+    ).toBeVisible();
     const sections = page.getByRole("navigation", {
       name: "Settings sections",
     });
