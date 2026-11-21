@@ -263,11 +263,11 @@ describe("an agent step with settings of its own (#1105)", () => {
   });
 
   // #1105-T13
-  it("names an environment: without one it is environment_required, and a name nobody knows is environment_unknown", () => {
+  it("names a runner or an environment: with neither it is runner_required, and an environment nobody knows is environment_unknown", () => {
     const noEnvironment = step();
     delete noEnvironment.environment;
     expect(codes(lane(noEnvironment))).toEqual([
-      ["/steps/0/environment", "environment_required"],
+      ["/steps/0/runner", "runner_required"],
     ]);
     expect(codes(lane(step({ environment: "nowhere" })))).toEqual([
       ["/steps/0/environment", "environment_unknown"],

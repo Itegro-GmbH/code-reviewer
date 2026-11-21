@@ -123,6 +123,7 @@ import { migration as workflowRunsWorkspaceListIndexes } from "./20261118120000_
 import { migration as workflowStepRunsTurnIndex } from "./20261118140000_workflow_step_runs_turn_index.ts";
 import { migration as addImplementerSessionRepos } from "./20261118160000_add_implementer_session_repos.ts";
 import { migration as addWorkflowVersionChangeDescription } from "./20261120200000_add_workflow_version_change_description.ts";
+import { migration as addHostedRunners } from "./20261121100000_add_hosted_runners.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -276,6 +277,7 @@ const migrations: Record<string, Migration> = {
   "20261118160000_add_implementer_session_repos": addImplementerSessionRepos,
   "20261120200000_add_workflow_version_change_description":
     addWorkflowVersionChangeDescription,
+  "20261121100000_add_hosted_runners": addHostedRunners,
 };
 
 export const migrationProvider: MigrationProvider = {

@@ -48,6 +48,7 @@ async function claimAs(
     ["implementer"],
     {
       customerRunner: {
+        runnerId: runner.runnerId,
         workspaceId: h.workspaceId,
         labels,
         access: OPENCODE_ACCESS,
@@ -430,6 +431,7 @@ describe("the pairs of a job that went back to the queue, and the dispatchers th
       ["implementer"],
       {
         customerRunner: {
+          runnerId: a.runnerId,
           workspaceId: h.workspaceId,
           labels: ["linux"],
           access: OPENCODE_ACCESS,

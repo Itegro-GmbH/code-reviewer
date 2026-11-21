@@ -12,6 +12,7 @@
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type { TurnProfile } from "../db/repositories/implementer-repository.ts";
 import { NETWORK_OFF, type NetworkRule } from "../network-rule/network.ts";
+import type { NamedRunner } from "../named-runners/types.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -29,6 +30,7 @@ import {
   BRANCH_CONFLICT,
   BRANCH_EXISTS,
   copyEnvironment,
+  copyRunner,
   copyProfile,
   modelNeedsCatalog,
   requireRunnerForHarness,
@@ -122,6 +124,12 @@ export type StartTaskOptions = {
     profile: TurnProfile;
     setupScript?: string;
     network?: NetworkRule;
+    /**
+     * #1105 (ADR 0007): the concrete runner the step names, already read by the engine; the body's `environmentId` is its id. Left out for
+     * a step that names an environment (release A keeps those). A hosted runner contributes its size, a self-hosted one the label that
+     * routes the job to it.
+     */
+    runner?: NamedRunner;
   };
 };
 
@@ -559,9 +567,15 @@ export function createImplementerService(
       // The environment is read now and copied into the turn: what it says at this moment is what the task runs with, whatever
       // is done to it afterwards. An id of another workspace, or of one that is gone, is the same refusal.
       const copiedEnv =
-        task.environmentId === null
-          ? { environment: null, runnerEnvironment: null }
-          : await copyEnvironment(deps.environments, task.environmentId, model);
+        options.inline?.runner !== undefined
+          ? copyRunner(options.inline.runner, model)
+          : task.environmentId === null
+            ? { environment: null, runnerEnvironment: null }
+            : await copyEnvironment(
+                deps.environments,
+                task.environmentId,
+                model,
+              );
       const { runnerEnvironment } = copiedEnv;
       requireRunnerForHarness(profile, runnerEnvironment);
       // #1105: the script and the network rule are the step's (ADR 0007, decision 11); the hosted environment keeps its size.

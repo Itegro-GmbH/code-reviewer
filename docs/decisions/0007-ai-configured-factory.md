@@ -160,8 +160,8 @@ tasks stay readable as history.
 can start is its own **type**, and each type is its own hosted runner. The types are the platform sizes the launcher starts:
 `PLATFORM_VCPUS` in `dispatcher/src/core/size-labels.ts` (1, 2, 4, 6, 8) held to `contracts/environment-sizes.v1.json` (`vcpus`, with
 `environmentVcpus` naming the sizes an environment may use: 2, 4, 6, 8). **1 vCPU is refused by the launcher as
-`sandbox_size_unsupported`** (it leaves the agent no memory), so in practice the types are **2, 4, 6 and 8 vCPU**. The list is read from
-that contract file, not written a second time. A hosted runner is **one type with a fixed size** (a property of the type, not a setting
+`sandbox_size_unsupported`** (it leaves the agent no memory), so in practice the types are **2, 4, 6 and 8 vCPU**. The list is held to
+that contract file by a test (the code keeps a typed copy, and the migration its own frozen one, so a size added later is a new migration). A hosted runner is **one type with a fixed size** (a property of the type, not a setting
 of the user) and **its own concurrency**; a step picks "Vercel Sandbox 4 vCPU" the way it picks a DevBox, and a step that needs more
 memory names a bigger type.
 

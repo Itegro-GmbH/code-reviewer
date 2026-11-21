@@ -2255,6 +2255,8 @@ export async function handleClaim(
      * that an entry of its manifest (`access`) can run: the harness, the auth and the model the turn asks for.
      */
     customerRunner?: {
+      /** #1105: the id of the runner row of the credential; the claim carries its label `cr:runner:<id>` (ADR 0007, decision 10). */
+      runnerId: string;
       workspaceId: string;
       labels: readonly string[];
       access: readonly HarnessAccess[];

@@ -49,6 +49,19 @@ export type EnvironmentInfo = {
   labels?: readonly string[];
 };
 
+/**
+ * #1105 (ADR 0007, decisions 6, 14 and 16): a concrete runner a step may name, by the id the lane stores. A hosted runner is one type of the
+ * provided Vercel Sandbox (a fixed size); a self-hosted one is a machine the customer registered. A revoked runner is still known, so the
+ * validator can say "revoked" instead of "unknown"; it is listed in no `available`.
+ */
+export type RunnerInfo = {
+  id: string;
+  name: string;
+  kind: "hosted" | "self_hosted";
+  /** A self-hosted runner a member revoked. */
+  revoked?: boolean;
+};
+
 /** An MCP server of the workspace as a lane may name it (#1052). */
 export type McpServerInfo = {
   /** The id a lane names the server by. */
@@ -65,6 +78,11 @@ export type WorkflowResolver = {
   /** The names of the profiles of the workspace that are archived: a reference to one is not "unknown" (#843). */
   archivedProfiles?(): readonly string[];
   environments(): readonly EnvironmentInfo[];
+  /**
+   * #1105: the runners of the workspace a step may name: the hosted runners (smallest first), then the self-hosted ones (a revoked one with
+   * `revoked`). Left out: the workspace's runners are not known, and a step that names one is refused (it fails closed).
+   */
+  runners?(): readonly RunnerInfo[];
   connectors(): readonly ConnectorSpec[];
   /**
    * #1052: the MCP servers of the workspace, so a lane can name only those. Left out: the workspace has none (a lane that names a server is
@@ -90,13 +108,16 @@ export function createResolver(options: {
   profiles: readonly ProfileInfo[];
   archivedProfiles?: readonly string[];
   environments: readonly EnvironmentInfo[];
+  runners?: readonly RunnerInfo[];
   onlineRunners?: readonly OnlineRunner[];
   mcpServers?: readonly McpServerInfo[];
   modelCheck?: (model: ModelChoice) => string | null | undefined;
 }): WorkflowResolver {
   const runners = options.onlineRunners;
   const servers = options.mcpServers;
+  const named = options.runners;
   return {
+    ...(named === undefined ? {} : { runners: () => named }),
     ...(servers === undefined ? {} : { mcpServers: () => servers }),
     ...(runners === undefined ? {} : { onlineRunners: () => runners }),
     ...(options.modelCheck === undefined

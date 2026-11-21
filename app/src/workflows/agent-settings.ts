@@ -194,27 +194,53 @@ export function inlineModelsIn(
   limit: number,
 ): ModelChoice[] {
   const found = new Map<string, ModelChoice>();
-  // Children go on the stack reversed, so the models come in the order the document names them and the bound keeps the first ones.
+  for (const node of agentNodesOf(document)) {
+    if (found.size >= limit) break;
+    if (node.profile !== undefined) continue;
+    const model = readModel(node.model);
+    if (model !== undefined) found.set(JSON.stringify(model), model);
+  }
+  return [...found.values()];
+}
+
+/**
+ * The distinct runner ids the agent steps of a document name (#1105), so the service can look them up (a revoked runner too) before the
+ * validator runs. The same bounded walk as `inlineModelsIn`; a value that is no text, and a text that is not a literal, is nothing to look up
+ * (the validator reports it), and the walk stops once it holds `limit` ids.
+ */
+export function runnerIdsIn(document: unknown, limit: number): string[] {
+  const found = new Set<string>();
+  for (const node of agentNodesOf(document)) {
+    if (found.size >= limit) break;
+    if (node.profile === undefined && typeof node.runner === "string")
+      found.add(node.runner);
+  }
+  return [...found];
+}
+
+/**
+ * The objects of a document whose `kind` is `agent`, in document order. The document is untrusted: the walk is iterative (no depth to
+ * overflow) and starts only at the places steps live (`steps`, `onFailure` and the pre-steps of `triggers`), so an agent-shaped object in a
+ * description or an input default is not a step. A caller that wants only some of them stops reading.
+ */
+function* agentNodesOf(document: unknown): Generator<Record<string, unknown>> {
+  // Children go on the stack reversed, so the nodes come in the order the document names them.
   const pending: unknown[] = isRecord(document)
     ? [document.triggers, document.steps, document.onFailure]
         .filter((place) => place !== undefined)
         .toReversed()
     : [];
-  while (pending.length > 0 && found.size < limit) {
+  while (pending.length > 0) {
     const value = pending.pop();
     if (Array.isArray(value)) {
       pending.push(...(value as unknown[]).toReversed());
       continue;
     }
     if (!isRecord(value)) continue;
-    if (value.kind === "agent" && value.profile === undefined) {
-      const model = readModel(value.model);
-      if (model !== undefined) found.set(JSON.stringify(model), model);
-    }
+    if (value.kind === "agent") yield value;
     for (const child of Object.values(value).toReversed())
       if (typeof child === "object" && child !== null) pending.push(child);
   }
-  return [...found.values()];
 }
 
 /** The name an inline step's profile copy carries when the lane has none that fits (an empty or all-symbol name). */
@@ -236,7 +262,10 @@ export function inlineProfileName(laneName: string | undefined): string {
   return PROFILE_NAME_PATTERN.test(slug) ? slug : INLINE_PROFILE_FALLBACK_NAME;
 }
 
-/** The keys of an agent step that are its own settings instead of a profile's (#1105, ADR 0007). */
+/**
+ * The keys of an agent step that are its own settings instead of a profile's (#1105, ADR 0007). `runner` (the id of the concrete runner the
+ * step runs on) is one of them: it is what an environment is for a profile, so a step that names a profile cannot have it.
+ */
 export const INLINE_SETTING_KEYS = [
   "harness",
   "model",
@@ -244,6 +273,7 @@ export const INLINE_SETTING_KEYS = [
   "instructions",
   "setupScript",
   "network",
+  "runner",
 ] as const;
 
 /**

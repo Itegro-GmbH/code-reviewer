@@ -1379,7 +1379,18 @@ export interface ImplementerEnvironmentsTable {
   kind: ColumnType<string, string | undefined, string>;
   /** The labels a runner must have, one on each line, lower case and sorted; empty for the kind `hosted`. */
   labels: ColumnType<string, string | undefined, string>;
-  created_by: string;
+  /**
+   * #1105 (ADR 0007, decisions 5 and 16): set only on a **hosted runner**, the row that stands for one type of the provided Vercel Sandbox
+   * (`vcpus` is its fixed size, one such row per size in each workspace, made by the platform): how many turns it may run at the same time.
+   * Null for every environment a person made (`hosted` with a script of its own, or `runner`), which are not runners.
+   */
+  concurrency: ColumnType<
+    number | null,
+    number | null | undefined,
+    number | null
+  >;
+  /** Null for a row the platform made (a hosted runner). */
+  created_by: string | null;
   /** ISO 8601 UTC. */
   created_at: string;
   updated_at: string;

@@ -49,7 +49,14 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   // #854: the kind (`hosted`) and the labels (none) of every environment that exists.
-  implementer_environments: ["network_mode", "network_hosts", "kind", "labels"],
+  // #1105: how many turns a hosted runner may run at the same time; null for every environment of a person (only the rows the platform made have one).
+  implementer_environments: [
+    "network_mode",
+    "network_hosts",
+    "kind",
+    "labels",
+    "concurrency",
+  ],
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
   job_vm_runs: ["vcpus"],
   // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
@@ -93,6 +100,18 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   ],
 };
 
+/**
+ * Rows a migration after the one under test made itself, which are no change to a row that exists: the hosted runners (#1105) that the
+ * migration of ADR 0007 makes for every workspace, recognised by what only they have, a `concurrency` and no maker.
+ */
+const ROWS_ADDED_LATER: Record<
+  string,
+  (row: Record<string, unknown>) => boolean
+> = {
+  implementer_environments: (row) =>
+    row.concurrency != null && row.created_by === null,
+};
+
 /** What a column added later holds on an existing row when it is not null: a constant default. */
 const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
   implementer_environments: {
@@ -117,8 +136,13 @@ export function withoutColumnsAddedLater(
   rows: readonly unknown[],
 ): unknown[] {
   const added = COLUMNS_ADDED_LATER[table] ?? [];
-  if (added.length === 0) return [...rows];
-  return rows.map((row) => {
+  const madeLater = ROWS_ADDED_LATER[table];
+  const kept =
+    madeLater === undefined
+      ? rows
+      : rows.filter((row) => !madeLater(row as Record<string, unknown>));
+  if (added.length === 0) return [...kept];
+  return kept.map((row) => {
     const copy = { ...(row as Record<string, unknown>) };
     for (const column of added) {
       const expected = DEFAULTS_OF_COLUMNS[table]?.[column] ?? null;

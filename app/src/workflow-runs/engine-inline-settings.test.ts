@@ -15,6 +15,7 @@ import type {
 import { createConnectorRegistry } from "./connectors.ts";
 import { createWorkflowEngine, type EngineDependencies } from "./engine.ts";
 import { STEP_STALE_MS } from "./limits.ts";
+import type { NamedRunner } from "../named-runners/types.ts";
 
 const NOW = new Date("2026-11-20T12:00:00.000Z");
 const RUN_ID = "7f0c1b3e-aaaa-4bbb-8ccc-0123456789ab";
@@ -55,6 +56,8 @@ function harness(options: {
   step: Json;
   claimed?: boolean;
   laneName?: string;
+  /** #1105: the concrete runners of the workspace (the engine finds a step's `runner` among them). */
+  runners?: NamedRunner[];
 }) {
   const run: StoredWorkflowRun = {
     id: RUN_ID,
@@ -155,6 +158,9 @@ function harness(options: {
     profiles: { findByName: findByName as never },
     environments: {
       listSummaries: async () => ENVIRONMENTS.map((e) => e as never),
+    },
+    runners: {
+      find: async (id) => (options.runners ?? []).find((r) => r.id === id),
     },
     implementer: {
       startTask,
@@ -383,5 +389,76 @@ describe("an agent step with settings of its own, in the engine (#1105)", () => 
       expect.objectContaining({ errorCode: "profile_not_found" }),
     );
     expect(app.startTask).not.toHaveBeenCalled();
+  });
+
+  // #1105-R30
+  it("starts a step that names a runner on it: the runner's id is the place, and the runner itself goes to the Implementer", async () => {
+    const hosted: NamedRunner = {
+      kind: "hosted",
+      id: "h-4",
+      name: "Vercel Sandbox 4 vCPU",
+      vcpus: 4,
+      concurrency: 2,
+    };
+    const step = inlineStep({ runner: "h-4", setupScript: "npm ci" });
+    delete step.environment;
+    const app = harness({ step, runners: [hosted] });
+
+    await app.engine.advance(RUN_ID);
+
+    const [, body, options] = app.startTask.mock.calls[0] ?? [];
+    expect(body).toMatchObject({ environmentId: "h-4", model: OWN_MODEL });
+    expect(options?.inline).toMatchObject({
+      runner: hosted,
+      setupScript: "npm ci",
+    });
+  });
+
+  // #1105-R31
+  it("ends the step runner_not_found, free and before a turn, for a runner that is gone or was revoked since the lane was saved", async () => {
+    const revoked: NamedRunner = {
+      kind: "self_hosted",
+      id: "r-old",
+      name: "Old box",
+      labels: [],
+      baseVersion: "1.0.0",
+      manifest: { harnesses: [], capabilities: [] },
+      limits: {},
+      lastSeenAt: NOW.toISOString(),
+      revokedAt: NOW.toISOString(),
+    };
+    for (const runner of ["r-old", "nowhere"]) {
+      const step = inlineStep({ runner });
+      delete step.environment;
+      const app = harness({ step, runners: [revoked] });
+
+      await app.engine.advance(RUN_ID);
+
+      expect(app.startTask).not.toHaveBeenCalled();
+      expect(app.settleOwnStep).toHaveBeenCalledWith(
+        "step-0",
+        expect.objectContaining({ errorCode: "runner_not_found" }),
+      );
+    }
+  });
+
+  // #1105-R32
+  it("takes the place of a step that names both from the runner, never from the environment", async () => {
+    const hosted: NamedRunner = {
+      kind: "hosted",
+      id: "h-2",
+      name: "Vercel Sandbox 2 vCPU",
+      vcpus: 2,
+      concurrency: 1,
+    };
+    const app = harness({
+      step: inlineStep({ runner: "h-2", environment: "vm" }),
+      runners: [hosted],
+    });
+
+    await app.engine.advance(RUN_ID);
+
+    const [, body] = app.startTask.mock.calls[0] ?? [];
+    expect(body).toMatchObject({ environmentId: "h-2" });
   });
 });

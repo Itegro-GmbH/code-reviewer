@@ -9,6 +9,7 @@ import type { Kysely, Selectable } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database, RunnersTable } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
+import { lockRunnerNames, nameTaken } from "./named-runners-repository.ts";
 import {
   labelsFromText,
   limitsFromText,
@@ -50,6 +51,15 @@ export type RunnersRepository = {
   ): Promise<TokenOutcome>;
   /** Whether there was a runner of this workspace, not yet revoked, to revoke. */
   revoke(id: string): Promise<boolean>;
+  /**
+   * #1105 (ADR 0007, decision 14): gives a runner that is not revoked another name. A lane stores the runner's id, so no lane changes. The name
+   * must be free among the runners that are not revoked and the hosted runners of the workspace, without regard to case; its own old name
+   * (in another case) is free for it.
+   */
+  rename(
+    id: string,
+    name: string,
+  ): Promise<"renamed" | "name_taken" | "not_found">;
 };
 
 export function runnerFrom(row: Selectable<RunnersTable>): StoredRunner {
@@ -123,6 +133,31 @@ export function createRunnersRepository(
           })
           .execute();
         return { ok: true, id, expiresAt };
+      };
+      return db.isTransaction ? run(db) : db.transaction().execute(run);
+    },
+
+    rename(id, name) {
+      const run = async (trx: Kysely<Database>) => {
+        // Everything that makes or renames a runner of the workspace takes turns: two of them cannot both find a name free.
+        await lockRunnerNames(trx, workspaceId);
+        const own = await trx
+          .selectFrom("runners")
+          .select("id")
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", id)
+          .where("revoked_at", "is", null)
+          .executeTakeFirst();
+        if (own === undefined) return "not_found" as const;
+        if (await nameTaken(trx, workspaceId, name, id))
+          return "name_taken" as const;
+        await trx
+          .updateTable("runners")
+          .set({ name })
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", id)
+          .execute();
+        return "renamed" as const;
       };
       return db.isTransaction ? run(db) : db.transaction().execute(run);
     },

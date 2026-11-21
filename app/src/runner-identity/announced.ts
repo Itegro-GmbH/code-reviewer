@@ -12,6 +12,8 @@ import { hasAllLabels } from "./labels.ts";
 
 /** A runner of the workspace that is online (heard from lately and not below the minimum base): what it can take. */
 export type OnlineRunner = {
+  /** #1105: the id of the runner, which a step of a lane names (ADR 0007); left out by a caller that has no use for it. */
+  id?: string;
   labels: readonly string[];
   access: readonly HarnessAccess[];
 };
@@ -49,4 +51,19 @@ export function announcedBy(
   return candidates.some((runner) => accessMatches(runner.access, demand))
     ? "announced"
     : "not_announced";
+}
+
+/**
+ * #1105 (ADR 0007): the same question for ONE runner, the one a step names (its id), instead of every runner with some labels. `unknown`: that
+ * runner is not online (it may be asleep), so nothing can be said; the turn waits for it. `not_announced`: it is online and none of its
+ * entries has the harness, the auth and the model the step asks for.
+ */
+export function announcedByRunner(
+  runners: readonly OnlineRunner[],
+  runnerId: string,
+  demand: AccessDemand,
+): Announcement {
+  const runner = runners.find((candidate) => candidate.id === runnerId);
+  if (runner === undefined) return "unknown";
+  return accessMatches(runner.access, demand) ? "announced" : "not_announced";
 }

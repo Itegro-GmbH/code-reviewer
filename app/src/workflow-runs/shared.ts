@@ -6,6 +6,7 @@
 import { repositoryByName } from "./repository-by-name.ts";
 import { targetOfNamedRepository } from "./repository-target.ts";
 import "server-only";
+import { createNamedRunnersRepository } from "../db/repositories/named-runners-repository.ts";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -231,6 +232,7 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
     members: createWorkspaceMembersRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
+    runners: createNamedRunnersRepository(db, workspaceId),
     implementer: implementerServiceFor(workspaceId),
     jobs: jobQueueFor(workspaceId),
     turns: createTurnReader({

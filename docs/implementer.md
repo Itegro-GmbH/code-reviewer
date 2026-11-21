@@ -1594,7 +1594,11 @@ first ran into it).
 
 ## Environments
 
-> **Superseded (ADR 0007, epic #1103).** This section describes the behaviour until #1105 and the release after it. A lane step will name one concrete runner (a hosted runner, one per sandbox type with a fixed size and its own concurrency, or a self-hosted runner) instead of an environment and labels, and the setup script and network rule move into the agent step; tasks started by hand are replaced by a one-off lane; see [ADR 0007](decisions/0007-ai-configured-factory.md), "Where an agent runs" and decisions 11, 15 and 16.
+> **Amended in part (ADR 0007, epic #1103; #1105, release A).** An agent step of a lane with settings of its own no longer needs an environment: it names one **concrete runner** by its id
+> (`runner`, [`workflows.md`](workflows.md#settings-in-the-step-1105)), and the setup script and network rule are the step's own. A runner is a **hosted runner** (one type of the provided
+> Vercel Sandbox: **2, 4, 6 or 8 vCPU**, a fixed size, stating only its `concurrency`) or a **self-hosted runner**; see [`runner.md`](runner.md#named-runners-1105-adr-0007-decisions-10-14-and-16).
+> A hosted runner is a row of the table of environments (kind `hosted`, with a `concurrency`) that is **no environment of a person**: this page, its routes and the picker of the task form
+> do not list, count, change or delete it. Environments stay accepted for a step in release A, and for tasks started by hand; both go in release B (decisions 11, 15 and 16).
 
 An environment is a start configuration for a task: a **name**, a **size**, a **setup script** and (step 7) a **network** setting. They are kept per workspace on
 the page `/w/<slug>/environments` (no navigation entry since #1108: the navigation of the factory has no place for environments, ADR 0007; the page and its routes stay until release B; only in a deployment with the

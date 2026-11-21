@@ -180,6 +180,7 @@ describe("the manifest of a runner and the claim", () => {
       ["implementer"],
       {
         customerRunner: {
+          runnerId: withClaude.runnerId,
           workspaceId: h.workspaceId,
           labels: ["box"],
           access: manifestOf(claude()).harnesses,
@@ -297,6 +298,7 @@ describe("the claim and the pairing of the rings", () => {
         ["implementer"],
         {
           customerRunner: {
+            runnerId: box.runnerId,
             workspaceId: h.workspaceId,
             labels: ["box"],
             access: announced.harnesses,
@@ -340,6 +342,7 @@ describe("the manifest as the rings and the claim read it", () => {
       select manifest from runners where id = ${runnerId}`.execute(h.db);
     return h.queue.claimNext(customerRunnerId(runnerId), ["implementer"], {
       customerRunner: {
+        runnerId,
         workspaceId: h.workspaceId,
         labels: ["box"],
         access: customerAccess(
@@ -463,6 +466,7 @@ describe("the manifest as the rings and the claim read it", () => {
         ["implementer"],
         {
           customerRunner: {
+            runnerId: handWritten.runnerId,
             workspaceId: h.workspaceId,
             labels: ["box"],
             access: [MANAGED_OPENCODE],

@@ -19,6 +19,7 @@ function handlers(service: Partial<RunnerFleetService> = {}) {
     }),
     createToken: async () => ({ token: "crt_x", expiresAt: "t" }),
     revoke: async () => undefined,
+    rename: async () => undefined,
     ...service,
   };
   return {

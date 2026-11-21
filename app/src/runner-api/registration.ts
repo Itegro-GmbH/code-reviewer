@@ -227,6 +227,12 @@ export function createRunnerRegistrationApi(
               : {}),
           },
         );
+        // #1105 (ADR 0007): a name that a runner of the workspace that is not revoked, or a hosted runner, already has is a name the body cannot
+        // use. The token is not used, so it registers the same runner again with another name (or after the old one was revoked).
+        if (!outcome.ok && outcome.reason === "name_taken")
+          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+            fields: fieldErrors([{ field: "name", code: "invalid" }]),
+          });
         if (!outcome.ok)
           return errorResponse(401, "RUNNER_REGISTRATION_TOKEN_INVALID");
         deps.logger.info(

@@ -25,6 +25,7 @@ import {
   isReservedLabel,
   MANAGED_LABEL,
   PLATFORM_LABELS,
+  runnerLabel,
 } from "../../runner-identity/labels.ts";
 
 /** Everything a claim writes onto the job it hands out. */
@@ -54,6 +55,12 @@ export type JobClaim = {
  */
 export type ClaimScope = {
   customerRunner: {
+    /**
+     * #1105 (ADR 0007, decision 10): the id of the runner row the credential belongs to. The claim adds the label `cr:runner:<id>` to the
+     * runner's labels, so a job of a step that names this runner is its alone. It comes from the authenticated credential, never from what
+     * the runner announced.
+     */
+    runnerId: string;
     workspaceId: string;
     labels: readonly string[];
     /** The entries of its manifest: what it can run. */
@@ -125,11 +132,17 @@ function claimQuery(
     sql`, `,
   );
   // #971: the labels of the caller. The platform identity has the reserved ones and a customer's runner its own, from which the reserved
-  // namespace is dropped again here: it is the identity that may carry them, never the text a runner once announced.
+  // namespace is dropped again here: it is the identity that may carry them, never the text a runner once announced. #1105: and the one
+  // reserved label of its own id (`cr:runner:<id>`), which is derived from the credential's row and which no other runner has.
   const callerLabels =
     scope === undefined
       ? [...PLATFORM_LABELS]
-      : scope.customerRunner.labels.filter((label) => !isReservedLabel(label));
+      : [
+          ...scope.customerRunner.labels.filter(
+            (label) => !isReservedLabel(label),
+          ),
+          runnerLabel(scope.customerRunner.runnerId),
+        ];
   const labels =
     callerLabels.length === 0
       ? sql`'{}'::text[]`

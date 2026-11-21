@@ -85,6 +85,7 @@ describe("who may say that a job ran on a subscription", () => {
       IMPLEMENTER,
       {
         customerRunner: {
+          runnerId: runner.runnerId,
           workspaceId: h.workspaceId,
           labels: ["box"],
           access: CLAUDE_CODE_ACCESS,
@@ -129,6 +130,7 @@ describe("who may say that a job ran on a subscription", () => {
       IMPLEMENTER,
       {
         customerRunner: {
+          runnerId: runner.runnerId,
           workspaceId: h.workspaceId,
           labels: ["box"],
           access: OPENCODE_ACCESS,

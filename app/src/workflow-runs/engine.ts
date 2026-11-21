@@ -19,6 +19,8 @@
 // A failure of the engine never reaches the code that ended the turn: `jobEnded` catches everything and logs a code.
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import type { NamedRunnersRepository } from "../db/repositories/named-runners-repository.ts";
+import { isRevoked, type NamedRunner } from "../named-runners/types.ts";
 import type {
   RunLock,
   StepOutcome,
@@ -134,6 +136,11 @@ export type EngineDependencies = {
   members: Pick<WorkspaceMembersRepository, "get">;
   profiles: Pick<ProfilesRepository, "findByName">;
   environments: Pick<ImplementerEnvironmentsRepository, "listSummaries">;
+  /**
+   * #1105 (ADR 0007): the concrete runners of the workspace, which a step with settings of its own names by id. Left out: no runner is
+   * known, and a step that names one ends `runner_not_found`.
+   */
+  runners?: Pick<NamedRunnersRepository, "find">;
   implementer: Pick<
     ImplementerService,
     "startTask" | "continueSession" | "discardRequested"
@@ -1277,24 +1284,16 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     };
   }
 
-  /** A turn in a session of its own: the profile, the environment and the instruction of the step, on a branch the platform names. */
-  async function beginSession(
-    run: StoredWorkflowRun,
-    step: StoredStepRun,
+  /**
+   * The environment a step in the old form runs in. #919: a profile says where it works. The environment is the profile version's; only a
+   * version saved before profiles had one (and so every document written before) runs where its step says. A step that names another
+   * environment than its profile version's is not overridden: the lane was saved against an older version, and the version it runs now has
+   * moved.
+   */
+  async function environmentOfStep(
     node: RunDocument["steps"][number],
-    values: RunValues,
-    context: RoundContext,
     profile: { name: string; version: number } | null,
-    timeLimitMinutes: number,
-  ): Promise<Begun> {
-    // #1105 (ADR 0007): a step with settings of its own carries what a profile held, so no profile is read: the turn gets the copy built
-    // from the step, under the name and version of the lane. The environment is the step's own (there is no profile to say where it works).
-    const inline =
-      profile === null ? await inlineSettingsOf(run, node) : undefined;
-    if (inline !== undefined && "outcome" in inline) return inline;
-    // #919: a profile says where it works. The environment is the profile version's; only a version saved before profiles had one
-    // (and so every document written before) runs where its step says. A step that names another environment than its profile
-    // version's is not overridden: the lane was saved against an older version, and the version it runs now has moved.
+  ): Promise<{ id: string } | { outcome: StepOutcome }> {
     const ownId =
       profile === null
         ? undefined
@@ -1329,6 +1328,42 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           `The step names the environment "${environmentName}", but version ${String(profile.version)} of the profile ${profile.name} runs in "${environment.name}". Take the environment out of the step, or name the one of the profile.`,
         ),
       };
+    return { id: environment.id };
+  }
+
+  /** A turn in a session of its own: the profile, the environment and the instruction of the step, on a branch the platform names. */
+  async function beginSession(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    node: RunDocument["steps"][number],
+    values: RunValues,
+    context: RoundContext,
+    profile: { name: string; version: number } | null,
+    timeLimitMinutes: number,
+  ): Promise<Begun> {
+    // #1105 (ADR 0007): a step with settings of its own carries what a profile held, so no profile is read: the turn gets the copy built
+    // from the step, under the name and version of the lane. The environment is the step's own (there is no profile to say where it works).
+    const inline =
+      profile === null ? await inlineSettingsOf(run, node) : undefined;
+    if (inline !== undefined && "outcome" in inline) return inline;
+    // #1105 (ADR 0007, decisions 6 and 14): a step with settings of its own names a concrete runner by its id. It is read now: a runner that
+    // was revoked after the lane was saved ends the step here (`runner_not_found`), instead of a turn that waits for a machine nobody has.
+    let runner: NamedRunner | undefined;
+    if (inline !== undefined && typeof node.runner === "string") {
+      runner = await deps.runners?.find(node.runner);
+      if (runner === undefined || isRevoked(runner))
+        return {
+          outcome: failed(
+            "runner_not_found",
+            "The runner of this step is not one of the workspace, or it was revoked. Save a new version of the lane that names a runner that exists.",
+          ),
+        };
+    }
+    const placed =
+      runner === undefined
+        ? await environmentOfStep(node, profile)
+        : { id: runner.id };
+    if ("outcome" in placed) return placed;
     // The instruction is built from the values of earlier steps. They are text in it and nothing else: the profile, the environment,
     // the repository and the branch are not.
     const instruction = renderText(
@@ -1388,7 +1423,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           ...(start === undefined ? {} : { startBranch: start }),
           branch: sessionBranchOf(run, step),
           instruction,
-          environmentId: environment.id,
+          environmentId: placed.id,
           ...(inline === undefined
             ? { profile: `${profile?.name}@${profile?.version}` }
             : { model: inline.model }),
@@ -1399,7 +1434,14 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           costCapCents: capCents(step.capMicroUsd),
           timeLimitMinutes,
           workflowStep: true,
-          ...(inline === undefined ? {} : { inline: inline.options }),
+          ...(inline === undefined
+            ? {}
+            : {
+                inline: {
+                  ...inline.options,
+                  ...(runner === undefined ? {} : { runner }),
+                },
+              }),
         },
       );
       return { runId: started.runId };

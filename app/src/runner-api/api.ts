@@ -231,6 +231,8 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
                 ? {}
                 : { llmProviders: parsed.value.llmProviders }),
               customerRunner: {
+                // #1105: from the credential's row; the label `cr:runner:<id>` routes the jobs of the steps that name this runner.
+                runnerId: customer.runner.id,
                 workspaceId: customer.runner.workspaceId,
                 labels: customer.runner.labels,
                 // #973: what it announced; a turn that asks for another harness, auth or model is not its to take.

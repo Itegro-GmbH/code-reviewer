@@ -42,6 +42,10 @@ import { createTrackerRepository } from "./tracker-repository.ts";
 import { createWorkflowRunsRepository } from "./workflow-runs-repository.ts";
 import { implementerDeliveryId } from "../implementer-job-shape.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
+import {
+  createNamedRunnersRepository,
+  ensureHostedRunners,
+} from "./named-runners-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
 import { createJiraConnectionsRepository } from "./jira-connections-repository.ts";
 import { createJiraWebhooksRepository } from "./jira-webhooks-repository.ts";
@@ -88,6 +92,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     tracker: createTrackerRepository(db, workspaceId),
     agentProfiles: createProfilesRepository(db, workspaceId),
     runners: createRunnersRepository(db, workspaceId),
+    namedRunners: createNamedRunnersRepository(db, workspaceId),
     jira: createJiraConnectionsRepository(db, workspaceId),
     jiraWebhooks: createJiraWebhooksRepository(db, workspaceId),
     mcp: createMcpServersRepository(db, workspaceId),
@@ -646,6 +651,13 @@ async function seed(
       revoked_at: null,
     })
     .execute();
+  // The hosted runners (#1105) a workspace has from its creation (made here as the creation of a workspace does), one for each type of the provided Vercel Sandbox: the other
+  // workspace's are there to be found and to have their concurrency set.
+  await ensureHostedRunners(db, workspaceId);
+  const hostedRunner = (await repos.namedRunners.list()).find(
+    (runner) => runner.kind === "hosted",
+  );
+  if (hostedRunner === undefined) throw new Error("seeding failed");
   // A Jira Cloud connection (#1037) in every workspace: the other workspace's is there to be read, broken and removed.
   await repos.jira.save({
     id: `jira-${tag}`,
@@ -744,6 +756,7 @@ async function seed(
     jiraConnectionId: `jira-${tag}`,
     jiraCloudId: `cloud-${tag}`,
     runnerId: `runner-${tag}`,
+    hostedRunnerId: hostedRunner.id,
     environment: created.environment,
     workflow: secondVersion.workflow,
     project,
@@ -3061,6 +3074,37 @@ const CASES: Case[] = [
     name: "runners.revoke",
     run: (a, b) => a.runners.revoke(b.runnerId),
     expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  // named runners (#1105-T80): the hosted runners and the runners of B are not A's to find, and A sets only the concurrency of its own
+  {
+    name: "namedRunners.list",
+    run: (a) => a.namedRunners.list(),
+    expectAnswer: (answer, a) => {
+      const ids = (answer as Array<{ id: string }>).map((runner) => runner.id);
+      expect(ids).toContain(a.runnerId);
+      expect(ids).toContain(a.hostedRunnerId);
+      expect(ids).toHaveLength(5);
+    },
+  },
+  {
+    name: "namedRunners.find (a runner of B)",
+    run: (a, b) => a.namedRunners.find(b.runnerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "namedRunners.find (a hosted runner of B)",
+    run: (a, b) => a.namedRunners.find(b.hostedRunnerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "namedRunners.setHostedConcurrency",
+    run: (a, b) => a.namedRunners.setHostedConcurrency(b.hostedRunnerId, 7),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "runners.rename (a runner of B)",
+    run: (a, b) => a.runners.rename(b.runnerId, "taken over"),
+    expectAnswer: (answer) => expect(answer).toBe("not_found"),
   },
   // Jira connections (#1037-T04): B's connections are not A's to read, mend, break or remove, and a pair of A's is A's alone
   {
