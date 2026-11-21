@@ -1051,3 +1051,99 @@ describe("the outcomes of the check of the Dynamic model", () => {
     expect(screen.queryByText(/could not be checked/)).toBeNull();
   });
 });
+
+describe("a read only form keeps every control still (#1108)", () => {
+  function renderReadOnly(initial: SettingsFormModel) {
+    return render(
+      <SettingsForm
+        product={getProductIdentity()}
+        workspaceSlug="acme"
+        initial={initial}
+        api={fakeApi().api}
+        dynamicReviewEnabled
+        readOnly
+        readOnlyNote="An AI sets these through the API."
+      />,
+    );
+  }
+
+  // #1108: the factory shows the settings and an AI changes them; a click on a reset must not change what the page shows.
+  it("has no enabled reset next to an overridden value, and the value stays", async () => {
+    const user = userEvent.setup();
+    renderReadOnly(
+      projectModel({ maxFindings: 3 }, dynamicView({ reviewKind: "dynamic" })),
+    );
+
+    const reset = screen.getByRole("button", {
+      name: "Reset to default for Most findings per review",
+    });
+    expect(reset.hasAttribute("disabled")).toBe(true);
+    const field = screen.getByLabelText("Most findings per review");
+    await user.click(reset);
+    expect((field as HTMLInputElement).value).toBe("3");
+  });
+
+  // #1108: "Reset everything" sits below the form and is no part of its fieldsets.
+  it("offers no reset of the whole project where nothing is edited here", () => {
+    render(
+      <SettingsForm
+        product={getProductIdentity()}
+        workspaceSlug="acme"
+        initial={projectModel({}, dynamicView({ reviewKind: "dynamic" }))}
+        api={fakeApi().api}
+        dynamicReviewEnabled
+        readOnly
+        readOnlyNote="An AI sets these through the API."
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Reset everything" }),
+    ).toBeNull();
+  });
+
+  it("keeps that reset for a person whose role only reads (the review product)", () => {
+    render(
+      <SettingsForm
+        product={getProductIdentity()}
+        workspaceSlug="acme"
+        initial={projectModel({}, dynamicView({ reviewKind: "dynamic" }))}
+        api={fakeApi().api}
+        dynamicReviewEnabled
+        readOnly
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Reset everything" }),
+    ).toBeTruthy();
+  });
+
+  it("has no enabled Edit skill and no enabled reset of a custom skill, and the text cannot be typed into", async () => {
+    const user = userEvent.setup();
+    const shipped = renderReadOnly(
+      projectModel({}, dynamicView({ reviewKind: "dynamic" })),
+    );
+    const edit = screen.getByRole("button", { name: "Edit skill" });
+    expect(edit.hasAttribute("disabled")).toBe(true);
+    await user.click(edit);
+    expect(
+      (screen.getByLabelText("Review skill") as HTMLTextAreaElement).readOnly,
+    ).toBe(true);
+    shipped.unmount();
+
+    renderReadOnly(
+      projectModel(
+        {},
+        dynamicView({ reviewKind: "dynamic", reviewSkill: "A custom skill." }),
+      ),
+    );
+    expect(
+      screen
+        .getByRole("button", { name: "Reset review skill to default" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+    const skill = screen.getByLabelText("Review skill") as HTMLTextAreaElement;
+    expect(skill.readOnly).toBe(true);
+    await user.type(skill, "more");
+    expect(skill.value).toBe("A custom skill.");
+  });
+});

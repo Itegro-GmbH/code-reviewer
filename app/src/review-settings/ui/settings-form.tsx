@@ -293,13 +293,15 @@ function planOf(model: SettingsFormModel, state: FormState) {
     : planProjectSave(model, state);
 }
 
+const ROLE_READ_ONLY_NOTE = "Only Admins and Owners can change these values.";
+
 export function SettingsForm({
   product,
   workspaceSlug,
   initial,
   repositoryId,
   readOnly = false,
-  readOnlyNote = "Only Admins and Owners can change these values.",
+  readOnlyNote,
   dynamicReviewEnabled = false,
   keyedProviders,
   nativeCatalog,
@@ -321,7 +323,11 @@ export function SettingsForm({
    * save in any case, src/workspaces/permissions.ts).
    */
   readOnly?: boolean;
-  /** What the form says in place of the save button while it is read only. */
+  /**
+   * What the form says in place of the save button while it is read only. Giving one says that the values are managed elsewhere (the
+   * factory, where an AI sets them through the API, #1108): then no control changes anything, not even the reset of the whole project.
+   * Without one the note names the role, and the reset below the form stays as it was.
+   */
   readOnlyNote?: string;
   /**
    * Whether the instance has turned Dynamic Review on (the #195 gate). Unknown counts as off: the card
@@ -980,7 +986,9 @@ export function SettingsForm({
 
         <div className="flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between">
           {readOnly ? (
-            <p className="text-sm text-muted-foreground">{readOnlyNote}</p>
+            <p className="text-sm text-muted-foreground">
+              {readOnlyNote ?? ROLE_READ_ONLY_NOTE}
+            </p>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               <Button
@@ -1010,7 +1018,8 @@ export function SettingsForm({
         </div>
       </form>
 
-      {api.reset === undefined ? null : (
+      {api.reset === undefined ||
+      (readOnly && readOnlyNote !== undefined) ? null : (
         <DangerZone
           title="Reset to defaults"
           description="Removes every value set for this project — the Review kind, the Dynamic Review model, the review skill and the review verdict, together with the Diff settings — and follows the workspace defaults again."
