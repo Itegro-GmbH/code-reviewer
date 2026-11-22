@@ -2,8 +2,9 @@
 
 // What a delivery of a Jira Cloud dynamic webhook says (#1039). The events the factory registers for are `jira:issue_created`,
 // `jira:issue_updated`, `jira:issue_deleted` and `comment_created`; the payload of all of them carries the issue as the REST API reads it
-// (without `expand`), and an update carries a changelog whose `status` item says the move. Reads the payload and nothing else (no database,
+// (without `expand`), and an update carries a changelog whose `status` item says the move and whose `labels` item says the labels put on (#1129). Reads the payload and nothing else (no database,
 // no network); everything in it is untrusted.
+import { labelsAdded } from "../workflows/label-match.ts";
 import { adfToText } from "./adf.ts";
 import { jiraTime, readJiraIssue, type JiraIssue } from "./issue.ts";
 
@@ -46,6 +47,11 @@ export type JiraChange =
         fromId?: string;
         toId?: string;
       };
+      /**
+       * The labels this delivery put on the issue (#1129), as Jira spells them (no spaces): those a `labels` item of the changelog added, or
+       * for a created issue all it was created with. A label that was taken off, or kept, is not here. Empty for a delivery that adds none.
+       */
+      labelsAdded: string[];
       actor?: { accountId: string; name: string };
       /** Only for `commented`. */
       comment?: JiraComment;
@@ -166,6 +172,24 @@ function statusMoveOf(item: ChangelogItem) {
   };
 }
 
+/**
+ * The labels the delivery put on the issue. The changelog of an update has one `labels` item per change (`fromString` and `toString` are
+ * the label lists, separated by spaces): what the new list has and the old one had not is added, so a removal adds none. A creation has no
+ * changelog and puts on all the labels the issue starts with. A comment adds none.
+ */
+function labelsAddedBy(
+  event: string,
+  items: readonly ChangelogItem[],
+  issue: JiraIssue,
+): string[] {
+  if (event === "jira:issue_created") return [...new Set(issue.labels)];
+  const added: string[] = [];
+  for (const item of items)
+    if (item.field === "labels")
+      added.push(...labelsAdded(item.fromString, item.toString));
+  return [...new Set(added)];
+}
+
 export function parseJiraDelivery(
   body: unknown,
   siteUrl: string | undefined,
@@ -205,6 +229,7 @@ export function parseJiraDelivery(
     ...(statusItem === undefined || statusItem.toString === ""
       ? {}
       : { status: statusMoveOf(statusItem) }),
+    labelsAdded: labelsAddedBy(event, items, issue),
     ...(actor === undefined ? {} : { actor }),
     ...(comment === undefined ? {} : { comment }),
     matchedWebhookIds,

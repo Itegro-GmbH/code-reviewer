@@ -1731,6 +1731,14 @@ export interface JiraConnectionsTable {
   /** When the access token ends (not secret). */
   access_expires_at: string;
   connected_by: string | null;
+  /** The generation whose derived secret the connection's webhook address carries (#1131); a rotation counts it up. */
+  webhook_generation: ColumnType<number, number | undefined, number>;
+  /** When that address was put in place, that is when its generation began (what its rotation is measured from); null until a webhook is first registered under it. */
+  webhook_address_at: string | null;
+  /** When a bearer token that verified was first seen on a delivery of the connection's address (trust on first use); null while none was. */
+  webhook_bearer_seen_at: string | null;
+  /** The SHA-256 of the derived secret the address was registered with (never the secret): a change of the app secret shows as another one (#1131). Null until a webhook is registered under the address. */
+  webhook_secret_fingerprint: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1746,10 +1754,14 @@ export interface JiraWebhooksTable {
   connection_id: string;
   /** The key of the Jira project the webhook watches (`project = KEY`). */
   project_key: string;
-  /** SHA-256 (hex) of the secret in the address Jira calls. */
-  secret_hash: string;
-  /** SHA-256 (hex) of the secret of a registration under way, accepted next to `secret_hash`; null otherwise. */
+  /** SHA-256 (hex) of the secret in the per-project address Jira calls (`address` = `project`); null under the shared address of the connection. */
+  secret_hash: string | null;
+  /** SHA-256 (hex) of the secret of a registration under way under the per-project address, accepted next to `secret_hash`; null otherwise. */
   pending_secret_hash: string | null;
+  /** `project`: registered under its own per-project address (before #1131); `connection`: under the shared address (JIRA_WEBHOOK_ADDRESSES). */
+  address: ColumnType<string, string | undefined, string>;
+  /** The marker of a registration under way (two reconciles at the same moment); null otherwise. */
+  registration_attempt: string | null;
   /** When the webhook was registered; null until it is. */
   registered_at: string | null;
   /** When a bearer token that verified was first seen on a delivery; null while none was (trust on first use). */

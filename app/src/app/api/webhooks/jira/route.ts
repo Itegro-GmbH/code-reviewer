@@ -11,6 +11,7 @@ import {
 import { getJiraWebhookHandler } from "../../../../jira/webhook-shared.ts";
 import {
   jiraAnswersFor,
+  jiraLabelTriggerFor,
   jiraStatusTriggerFor,
 } from "../../../../workflow-runs/shared.ts";
 
@@ -22,6 +23,8 @@ export async function POST(request: Request): Promise<Response> {
         jiraTicketProvider,
         jiraStatusesFor(workspaceId),
       ),
+    labelsFor: (workspaceId) =>
+      jiraLabelTriggerFor(workspaceId, jiraTicketProvider),
     answersFor: jiraAnswersFor,
   })(request);
 }

@@ -135,6 +135,13 @@ export type WorkflowsRepository = {
   listProjectWithStatusTrigger(
     projectId: string,
   ): Promise<{ workflow: StoredWorkflow; current: StoredWorkflowVersion }[]>;
+  /**
+   * The lanes of ONE project by its id (#1129) whose current version names the label trigger, when the project is active: for a project
+   * whose tickets are a Jira project, which `listWithIssueTrigger` (GitHub issues of a repository) leaves out. A text match as well.
+   */
+  listProjectWithIssueTrigger(
+    projectId: string,
+  ): Promise<{ workflow: StoredWorkflow; current: StoredWorkflowVersion }[]>;
   /** The workflow with its current version, also when it is archived (its versions stay readable). */
   get(
     id: string,
@@ -328,6 +335,12 @@ export function createWorkflowsRepository(
 
     listWithStatusTrigger: (repositoryId) =>
       listWithTrigger({ repositoryId }, ['%"ticket.statusChanged"%']),
+
+    listProjectWithIssueTrigger: (projectId) =>
+      listWithTrigger({ projectId }, [
+        '%"ticket.labeled"%',
+        '%"github.issueLabeled"%',
+      ]),
 
     listProjectWithStatusTrigger: (projectId) =>
       listWithTrigger({ projectId }, ['%"ticket.statusChanged"%']),

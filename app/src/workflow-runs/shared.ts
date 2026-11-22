@@ -71,6 +71,10 @@ import {
   type JiraStatusTrigger,
   type JiraStatusTriggerDependencies,
 } from "./jira-status-trigger.ts";
+import {
+  createJiraLabelTrigger,
+  type JiraLabelTrigger,
+} from "./jira-label-trigger.ts";
 import { latestRunSamples } from "./samples.ts";
 import {
   createWorkflowRunService,
@@ -600,6 +604,38 @@ export function jiraStatusTriggerFor(
   const repositories = createRepositoriesRepository(db, workspaceId);
   return createJiraStatusTrigger({
     ...(statusesOf === undefined ? {} : { statusesOf }),
+    runs: createWorkflowRunsRepository(db, workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    async projectOf(projectId) {
+      const project = await projects.getById(projectId);
+      return project === undefined ? undefined : jiraProjectView(project);
+    },
+    async repositoryOf(repositoryId) {
+      const repository = await repositories.get(repositoryId);
+      if (repository === undefined || !repository.active) return undefined;
+      return reads.resolveRepository(repository.fullName);
+    },
+    readTicket: (source, key) => reads.readTicket(source.repositoryId, key),
+    kick: (runId) =>
+      runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+  });
+}
+
+/**
+ * The label trigger of a Jira project in one workspace (#1129): the webhook hands it the labels a person put on an issue; it finds the lanes
+ * of the registration's project that wait for one of them, asks Jira for the issue (the label must still be on it) and writes the runs. The
+ * first steps run after the response, as for a status.
+ */
+export function jiraLabelTriggerFor(
+  workspaceId: string,
+  /** The Jira ticket provider (`jira/shared.ts`): the route that wires the Jira webhook hands it in. */
+  jira: TicketProvider,
+): JiraLabelTrigger {
+  const db = getDatabase();
+  const projects = createProjectsRepository(db, workspaceId);
+  const reads = githubReads(workspaceId, ticketProvidersWith([jira]));
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  return createJiraLabelTrigger({
     runs: createWorkflowRunsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     async projectOf(projectId) {

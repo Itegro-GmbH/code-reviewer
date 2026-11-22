@@ -176,6 +176,7 @@ export function createJiraResync(deps: {
               kind: "issue_changed",
               event: "updated",
               issue,
+              labelsAdded: [],
               matchedWebhookIds: [],
             })) === "updated"
           )

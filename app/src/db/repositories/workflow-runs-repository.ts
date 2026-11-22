@@ -462,6 +462,15 @@ export type WorkflowRunsRepository = {
     limit: number,
   ): Promise<StoredWorkflowRun[]>;
   /**
+   * #1129: a run of this workflow (`running` or `waiting`) that is about this ticket (`jira:owner/repo#PROJ-7`, `workflow_runs.ticket_ref`),
+   * whatever started it: a run by hand or through the API holds no trigger key, so `createRun` cannot hold a start back for it. The newest
+   * one when there are several; undefined for none.
+   */
+  findActiveForTicket(
+    workflowId: string,
+    ticketRef: string,
+  ): Promise<StoredWorkflowRun | undefined>;
+  /**
    * #920: the runs of a repository that wait for an answer and are about no ticket (their question is on the pull request an earlier step
    * opened), the one that began to wait last first; at most `limit`.
    */
@@ -1319,6 +1328,21 @@ export function createWorkflowRunsRepository(
         .limit(limit)
         .execute();
       return rows.map(runFrom);
+    },
+
+    async findActiveForTicket(workflowId, ticketRef) {
+      const row = await db
+        .selectFrom("workflow_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("ticket_ref", "=", ticketRef)
+        .where("workflow_id", "=", workflowId)
+        .where("status", "in", ["running", "waiting"])
+        .orderBy("created_at", "desc")
+        .orderBy("id")
+        .limit(1)
+        .executeTakeFirst();
+      return row === undefined ? undefined : runFrom(row);
     },
 
     async listActiveOnRepository(repositoryId, limit) {

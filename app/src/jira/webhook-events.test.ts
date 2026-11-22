@@ -243,4 +243,120 @@ describe("parseJiraDelivery", () => {
     ])
       expect(parseJiraDelivery(body, SITE)).toMatchObject({ kind: "ignored" });
   });
+
+  // #1129-T01
+  it("reports the labels an update added, not those it removed or kept", () => {
+    const labelsItem = (from: string | null, to: string) => ({
+      field: "labels",
+      fieldtype: "jira",
+      from: null,
+      fromString: from,
+      to: null,
+      toString: to,
+    });
+    const labelsAddedBy = (from: string | null, to: string) => {
+      const change = parseJiraDelivery(
+        {
+          timestamp: 1,
+          webhookEvent: "jira:issue_updated",
+          issue: issue(),
+          changelog: { items: [labelsItem(from, to)] },
+        },
+        SITE,
+      );
+      return change.kind === "issue_changed" ? change.labelsAdded : undefined;
+    };
+    expect(labelsAddedBy("backend", "backend ready-for-agent")).toEqual([
+      "ready-for-agent",
+    ]);
+    expect(labelsAddedBy(null, "ready-for-agent")).toEqual(["ready-for-agent"]);
+    // A removal, and a list that stays as it is, put nothing on.
+    expect(labelsAddedBy("backend ready-for-agent", "backend")).toEqual([]);
+    expect(labelsAddedBy("backend", "backend")).toEqual([]);
+    expect(labelsAddedBy("backend ready-for-agent", "")).toEqual([]);
+  });
+
+  // #1129-T02
+  it("reads space-separated lists and several label items, ignores an item of another field, and reads a payload without a changelog", () => {
+    const change = parseJiraDelivery(
+      {
+        timestamp: 1,
+        webhookEvent: "jira:issue_updated",
+        issue: issue(),
+        changelog: {
+          items: [
+            statusItem("To Do", "In Progress"),
+            {
+              field: "labels",
+              fromString: "a  b",
+              toString: "a b ready-for-agent  needs-review",
+            },
+            { field: "labels", fromString: null, toString: "ready-for-agent" },
+            // An item of another field is no label item, even when its text looks like a list: `y` is added by none of the `labels` items.
+            { field: "Labels", fromString: "x", toString: "x y" },
+          ],
+        },
+      },
+      SITE,
+    );
+    expect(change).toMatchObject({
+      kind: "issue_changed",
+      labelsAdded: ["ready-for-agent", "needs-review"],
+      status: { to: "In Progress" },
+    });
+    const bare = parseJiraDelivery(
+      { timestamp: 1, webhookEvent: "jira:issue_updated", issue: issue() },
+      SITE,
+    );
+    expect(bare).toMatchObject({ labelsAdded: [] });
+  });
+
+  // #1129-T02
+  it("reports a label that one item put on and a later item of the same delivery took off again: the stale guard of the trigger drops it", () => {
+    const change = parseJiraDelivery(
+      {
+        timestamp: 1,
+        webhookEvent: "jira:issue_updated",
+        issue: issue(),
+        changelog: {
+          items: [
+            { field: "labels", fromString: "x", toString: "x y" },
+            { field: "labels", fromString: "x y", toString: "x" },
+          ],
+        },
+      },
+      SITE,
+    );
+    // The parser reads the items and nothing else: it does not know the issue now. Jira is asked for it before a lane starts
+    // (`jira-label-trigger.ts`, "the issue must still have the label").
+    expect(change).toMatchObject({ labelsAdded: ["y"] });
+  });
+
+  // #1129-T03
+  it("reports the labels a created issue starts with, and none for a comment", () => {
+    const labelled = {
+      ...issue(),
+      fields: { ...issue().fields, labels: ["backend", "ready-for-agent"] },
+    };
+    expect(
+      parseJiraDelivery(
+        { timestamp: 1, webhookEvent: "jira:issue_created", issue: labelled },
+        SITE,
+      ),
+    ).toMatchObject({
+      event: "created",
+      labelsAdded: ["backend", "ready-for-agent"],
+    });
+    expect(
+      parseJiraDelivery(
+        {
+          timestamp: 1,
+          webhookEvent: "comment_created",
+          issue: labelled,
+          comment: { id: "1", body: "hi", author: {} },
+        },
+        SITE,
+      ),
+    ).toMatchObject({ event: "commented", labelsAdded: [] });
+  });
 });

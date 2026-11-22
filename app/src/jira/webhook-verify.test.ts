@@ -5,6 +5,7 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  deriveWebhookSecret,
   hashWebhookSecret,
   newWebhookSecret,
   verifyJiraDelivery,
@@ -170,5 +171,49 @@ describe("trust on first use of the bearer token", () => {
     expect(verify({ ...both, urlSecret: newWebhookSecret() })).toMatchObject({
       ok: false,
     });
+  });
+});
+
+describe("the derived secret of the address of a connection (#1131)", () => {
+  // #1131-T09
+  it("is the same for one connection and generation and differs between connections, generations and app secrets", () => {
+    const secret = deriveWebhookSecret("app-secret", "conn-1", 1);
+    expect(deriveWebhookSecret("app-secret", "conn-1", 1)).toBe(secret);
+    expect(deriveWebhookSecret("app-secret", "conn-2", 1)).not.toBe(secret);
+    expect(deriveWebhookSecret("app-secret", "conn-1", 2)).not.toBe(secret);
+    expect(deriveWebhookSecret("another-app-secret", "conn-1", 1)).not.toBe(
+      secret,
+    );
+    // 256 bits, safe in a query string, and not a prefix of the input.
+    expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(secret).not.toContain("app-secret");
+  });
+
+  // #1131-T09
+  it("cannot be built by joining the connection and the generation another way", () => {
+    expect(deriveWebhookSecret("s", "a", 11)).not.toBe(
+      deriveWebhookSecret("s", "a1", 1),
+    );
+  });
+
+  // #1131-T03
+  it("verifies against the hash of the derived secret like any other secret", () => {
+    const secret = deriveWebhookSecret("app-secret", "conn-1", 1);
+    const base = {
+      storedSecretHash: hashWebhookSecret(secret),
+      authorization: null,
+      clientSecret: CLIENT_SECRET,
+      now: NOW,
+    };
+    expect(verifyJiraDelivery({ ...base, urlSecret: secret })).toEqual({
+      ok: true,
+      bearer: "absent",
+    });
+    expect(
+      verifyJiraDelivery({
+        ...base,
+        urlSecret: deriveWebhookSecret("app-secret", "conn-1", 2),
+      }),
+    ).toEqual({ ok: false, reason: "secret_mismatch" });
   });
 });

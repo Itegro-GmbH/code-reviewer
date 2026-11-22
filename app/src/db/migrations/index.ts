@@ -129,6 +129,7 @@ import { migration as addImplementerTurnEnvironment } from "./20261102150000_add
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
 import { migration as widenReviewKindChecksForImplementer } from "./20261030190000_widen_review_kind_checks_for_implementer.ts";
+import { migration as jiraWebhookSharedAddress } from "./20261122120000_jira_webhook_shared_address.ts";
 
 const migrations: Record<string, Migration> = {
   "0001_create_app_meta": createAppMeta,
@@ -280,6 +281,7 @@ const migrations: Record<string, Migration> = {
     addWorkflowVersionChangeDescription,
   "20261121100000_add_hosted_runners": addHostedRunners,
   "20261121140000_allow_runner_turn_setup": allowRunnerTurnSetup,
+  "20261122120000_jira_webhook_shared_address": jiraWebhookSharedAddress,
 };
 
 export const migrationProvider: MigrationProvider = {

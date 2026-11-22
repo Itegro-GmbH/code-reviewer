@@ -50,6 +50,8 @@ describe("app/vercel.json", () => {
     expect((config.crons ?? []).map(({ path }) => path).sort()).toEqual([
       "/api/internal/dispatch-sweep",
       "/api/internal/jira-webhooks",
+      // #1131: the same route, walking only the webhooks that wait for a registration after a move.
+      "/api/internal/jira-webhooks?retry=pending",
       "/api/internal/repository-sync",
       "/api/internal/tracker-resync",
     ]);
@@ -59,7 +61,9 @@ describe("app/vercel.json", () => {
   it("calls only routes that exist and that a cron without a session may reach, on a valid schedule", () => {
     const crons = config.crons ?? [];
     expect(crons.length).toBeGreaterThan(0);
-    for (const { path, schedule } of crons) {
+    for (const { path: address, schedule } of crons) {
+      // A query string is no part of the route.
+      const path = address.split("?")[0] ?? address;
       expect(existsSync(routeFile(path)), `${path} has a route file`).toBe(
         true,
       );

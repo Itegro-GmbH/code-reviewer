@@ -91,6 +91,29 @@ describe("registering a webhook", () => {
     ).toEqual({ ok: false, error: "jira_webhook_rejected" });
   });
 
+  // #1131-T08
+  it("tells Jira's refusal of a second address from every other rejection, in a 400 and in the results", async () => {
+    const text =
+      "Only a single URL per user is allowed to be registered via REST API.";
+    for (const answer of [
+      () => reply(400, { errorMessages: [text], errors: {} }),
+      () => reply(200, { webhookRegistrationResult: [{ errors: [text] }] }),
+      () => reply(400, { message: text.replace("user", "app") }),
+    ]) {
+      const { api } = apiAnswering(answer);
+      expect(
+        await api.register("c", { url: "u", jql: "x", events: [] }),
+      ).toEqual({ ok: false, error: "jira_webhook_url_conflict" });
+    }
+    // The text is Jira's: nothing of it is passed on.
+    const { api } = apiAnswering(() => reply(400, { errorMessages: [text] }));
+    expect(
+      JSON.stringify(
+        await api.register("c", { url: "u", jql: "x", events: [] }),
+      ),
+    ).not.toContain("single");
+  });
+
   // #1039
   it("maps an answer that is no success to a code and holds nothing of the body", async () => {
     for (const [status, error] of [
@@ -169,6 +192,82 @@ describe("extending and deleting webhooks", () => {
     expect(await apiAnswering(() => reply(403)).api.remove("c", ["1"])).toEqual(
       { ok: false, error: "jira_forbidden" },
     );
+  });
+
+  // #1131
+  it("asks Jira nothing when there is no id to delete (Jira answers 400 to an empty list)", async () => {
+    const { api, calls } = apiAnswering(() => reply(400));
+    expect(await api.remove("c", [])).toEqual({ ok: true });
+    expect(await api.remove("c", ["not-a-number"])).toEqual({ ok: true });
+    expect(calls).toEqual([]);
+  });
+
+  // #1131
+  it("deletes only the ids that exist when Jira answers 400 to a list with an id it no longer knows", async () => {
+    const live = [
+      {
+        id: 1001,
+        jqlFilter: "project = A",
+        expirationDate: "2026-12-14T10:00:00.000+0000",
+      },
+    ];
+    const { api, calls } = apiAnswering((call) => {
+      if (call.init?.method === "GET")
+        return reply(200, { values: live, isLast: true });
+      const ids = (
+        JSON.parse(String(call.init?.body)) as { webhookIds: number[] }
+      ).webhookIds;
+      return ids.every((id) => id === 1001)
+        ? reply(202)
+        : reply(400, { errorMessages: ["unknown id"] });
+    });
+    expect(await api.remove("c", ["999", "1001"])).toEqual({ ok: true });
+    expect(calls.map((call) => call.init?.method)).toEqual([
+      "DELETE",
+      "GET",
+      "DELETE",
+    ]);
+    expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
+      webhookIds: [1001],
+    });
+  });
+
+  // #1131
+  it("counts a 400 as done when none of the ids exists at Jira", async () => {
+    const { api, calls } = apiAnswering((call) =>
+      call.init?.method === "GET"
+        ? reply(200, { values: [], isLast: true })
+        : reply(400),
+    );
+    expect(await api.remove("c", ["999"])).toEqual({ ok: true });
+    expect(calls.map((call) => call.init?.method)).toEqual(["DELETE", "GET"]);
+  });
+
+  // #1131
+  it("stays a failure when the 400 cannot be explained (the list fails, or the retry is refused again)", async () => {
+    const noList = apiAnswering((call) =>
+      call.init?.method === "GET" ? reply(503) : reply(400),
+    );
+    expect(await noList.api.remove("c", ["1001"])).toEqual({
+      ok: false,
+      error: "jira_webhook_rejected",
+    });
+    const live = [
+      {
+        id: 1001,
+        jqlFilter: "project = A",
+        expirationDate: "2026-12-14T10:00:00.000+0000",
+      },
+    ];
+    const refused = apiAnswering((call) =>
+      call.init?.method === "GET"
+        ? reply(200, { values: live, isLast: true })
+        : reply(400),
+    );
+    expect(await refused.api.remove("c", ["1001"])).toEqual({
+      ok: false,
+      error: "jira_webhook_rejected",
+    });
   });
 
   // #1039
