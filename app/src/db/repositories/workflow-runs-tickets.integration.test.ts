@@ -410,3 +410,41 @@ describe("the runs that wait for an answer (#920)", () => {
     ).toEqual([]);
   });
 });
+
+describe("the active run of a lane for a ticket (#1129)", () => {
+  // #1129-T21
+  it("finds a running or waiting run of the workflow for the ticket, whatever started it, and no ended run, other ticket or other workspace", async () => {
+    const { runs, otherRuns, run, db, workflowId } = await setup();
+    const JIRA = "jira:acme/widgets#PROJ-7";
+    const ended = await run(JIRA, 0);
+    await db
+      .updateTable("workflow_runs")
+      .set({ status: "succeeded", finished_at: "2026-11-07T09:00:00.000Z" })
+      .where("id", "=", ended.id)
+      .execute();
+    await run("jira:acme/widgets#PROJ-8", 0);
+    expect(await runs.findActiveForTicket(workflowId, JIRA)).toBeUndefined();
+
+    // A run by hand holds no trigger key, and is found all the same.
+    const byHand = await run(JIRA, 0);
+    expect(byHand.triggerKind).toBe("manual");
+    expect((await runs.findActiveForTicket(workflowId, JIRA))?.id).toBe(
+      byHand.id,
+    );
+    await db
+      .updateTable("workflow_runs")
+      .set({ status: "waiting" })
+      .where("id", "=", byHand.id)
+      .execute();
+    expect((await runs.findActiveForTicket(workflowId, JIRA))?.id).toBe(
+      byHand.id,
+    );
+
+    expect(
+      await runs.findActiveForTicket("another-workflow", JIRA),
+    ).toBeUndefined();
+    expect(
+      await otherRuns.findActiveForTicket(workflowId, JIRA),
+    ).toBeUndefined();
+  });
+});

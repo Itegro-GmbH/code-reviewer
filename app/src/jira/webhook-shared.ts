@@ -15,6 +15,7 @@ import { getAtlassianConfig, jiraStatusesFor } from "./shared.ts";
 import {
   createJiraWebhookHandler,
   type JiraAnswerTaker,
+  type JiraLabelStarter,
   type JiraStatusStarter,
   type JiraWebhookHandler,
 } from "./webhook-handler.ts";
@@ -23,6 +24,8 @@ export function getJiraWebhookHandler(
   options: {
     /** What starts the lanes a status change in Jira starts in one workspace; the route passes it in. */
     statusesFor?: (workspaceId: string) => JiraStatusStarter;
+    /** What starts the lanes a label put on an issue in Jira starts in one workspace (#1129); the route passes it in. */
+    labelsFor?: (workspaceId: string) => JiraLabelStarter;
     /** What takes the answer of a comment `/answer …` in one workspace (#1040); the route passes it in. */
     answersFor?: (workspaceId: string) => JiraAnswerTaker;
   } = {},
@@ -50,6 +53,9 @@ export function getJiraWebhookHandler(
         ...(options.statusesFor === undefined
           ? {}
           : { statuses: options.statusesFor(workspaceId) }),
+        ...(options.labelsFor === undefined
+          ? {}
+          : { labels: options.labelsFor(workspaceId) }),
         ...(options.answersFor === undefined
           ? {}
           : { answers: options.answersFor(workspaceId) }),

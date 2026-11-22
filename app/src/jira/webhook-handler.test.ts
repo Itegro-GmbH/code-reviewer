@@ -87,6 +87,8 @@ function setup(
     registration?: DirectoryJiraWebhook | undefined;
     claim?: "claimed" | "duplicate" | "in_progress";
     statusFails?: boolean;
+    labelsFail?: boolean;
+    labelsMatch?: boolean;
     mirrorFails?: boolean;
     project?: StoredProject | undefined;
     configured?: boolean;
@@ -112,6 +114,12 @@ function setup(
     if (options.statusFails === true) throw new Error("db gone");
     return { matched: 1, started: 1, existing: 0, skipped: 0, busy: 0 };
   });
+  const labels = vi.fn(async () => {
+    if (options.labelsFail === true) throw new Error("db gone");
+    return options.labelsMatch === false
+      ? { matched: 0, started: 0, existing: 0, skipped: 0, busy: 0 }
+      : { matched: 1, started: 1, existing: 0, skipped: 0, busy: 0 };
+  });
   const apply = vi.fn(async () => {
     if (options.mirrorFails === true) throw new Error("db gone");
     return "updated" as const;
@@ -125,6 +133,7 @@ function setup(
     repositoryName: async () => "acme/shop",
     mirror: { apply },
     statuses: { start: statuses },
+    labels: { start: labels },
   };
   const lines: string[] = [];
   const handler = createJiraWebhookHandler({
@@ -164,7 +173,16 @@ function setup(
         body: typeof body === "string" ? body : JSON.stringify(body),
       },
     );
-  return { handler, request, calls, statuses, apply, lines, markBearerSeen };
+  return {
+    handler,
+    request,
+    calls,
+    statuses,
+    labels,
+    apply,
+    lines,
+    markBearerSeen,
+  };
 }
 
 describe("the Jira webhook handler", () => {
@@ -319,6 +337,98 @@ describe("the Jira webhook handler", () => {
     expect(t.calls).toEqual([
       "claim:jira-reg-1-id-1",
       "complete:jira-reg-1-id-1:workflow_runs_started",
+    ]);
+  });
+
+  // #1129-T08
+  it("hands the labels an update added to the label starter and answers that runs started", async () => {
+    const t = setup();
+    const body = payload({
+      changelog: {
+        items: [
+          {
+            field: "labels",
+            fromString: "backend",
+            toString: "backend ready-for-agent",
+          },
+        ],
+      },
+    });
+    expect(await (await t.handler(t.request(body))).json()).toEqual({
+      status: "accepted",
+      outcome: "workflow_runs_started",
+    });
+    expect(t.labels).toHaveBeenCalledWith("reg-1-id-1", {
+      projectId: "proj-1",
+      connectionId: "conn-1",
+      projectKey: "PROJ",
+      issueKey: "PROJ-7",
+      labels: ["ready-for-agent"],
+      actor: { accountId: "acc-1", name: "Grace" },
+    });
+    // No status item: the status starter is not asked.
+    expect(t.statuses).not.toHaveBeenCalled();
+    expect(t.calls).toEqual([
+      "claim:jira-reg-1-id-1",
+      "complete:jira-reg-1-id-1:workflow_runs_started",
+    ]);
+  });
+
+  // #1129-T01
+  it("does not ask the label starter for a removed label, a status change or a comment", async () => {
+    const removed = setup();
+    await removed.handler(
+      removed.request(
+        payload({
+          changelog: {
+            items: [
+              {
+                field: "labels",
+                fromString: "backend ready-for-agent",
+                toString: "backend",
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const moved = setup();
+    await moved.handler(moved.request());
+    expect(removed.labels).not.toHaveBeenCalled();
+    expect(moved.labels).not.toHaveBeenCalled();
+  });
+
+  // #1129-T03
+  it("hands the labels of a created issue to the label starter", async () => {
+    const t = setup({ labelsMatch: false });
+    const created = payload({ webhookEvent: "jira:issue_created" });
+    delete (created as { changelog?: unknown }).changelog;
+    (created.issue.fields as Record<string, unknown>).labels = [
+      "ready-for-agent",
+    ];
+    expect(await (await t.handler(t.request(created))).json()).toEqual({
+      status: "accepted",
+      outcome: "tracker_updated",
+    });
+    expect(t.labels).toHaveBeenCalledWith(
+      "reg-1-id-1",
+      expect.objectContaining({ labels: ["ready-for-agent"] }),
+    );
+  });
+
+  // #1129
+  it("releases the claim and answers 503 when the lanes of a label cannot be started", async () => {
+    const t = setup({ labelsFail: true });
+    const body = payload({
+      changelog: {
+        items: [{ field: "labels", fromString: null, toString: "x" }],
+      },
+    });
+    const response = await t.handler(t.request(body));
+    expect(response.status).toBe(503);
+    expect(t.calls).toEqual([
+      "claim:jira-reg-1-id-1",
+      "release:jira-reg-1-id-1",
     ]);
   });
 

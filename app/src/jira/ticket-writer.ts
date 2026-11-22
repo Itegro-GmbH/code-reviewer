@@ -17,6 +17,7 @@ import {
   type TicketProvider,
   type TicketProviderErrorCode,
 } from "../integrations/ticket-provider.ts";
+import { jiraLabel } from "../workflows/label-match.ts";
 import { statusIdsNamed } from "../workflows/status-match.ts";
 import { isJiraIssueKey } from "./issue.ts";
 import {
@@ -51,11 +52,6 @@ async function jsonOf(response: Response): Promise<unknown> {
   } catch {
     return undefined;
   }
-}
-
-/** A label Jira takes: no whitespace (a run of it becomes one hyphen), at most 255 characters. */
-export function jiraLabel(label: string): string {
-  return label.trim().replace(/\s+/g, "-").slice(0, 255);
 }
 
 const fail = (code: TicketProviderErrorCode): TicketProviderError =>

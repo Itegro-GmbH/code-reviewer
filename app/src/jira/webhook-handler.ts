@@ -22,6 +22,8 @@
 //   8. mirror    the issue is written into the ticket mirror (`mirror.ts`); a failure is logged and never stops the trigger
 //   9. trigger   a change of the status starts the lanes that wait for the new status (`workflow-runs/jira-status-trigger.ts`); a failure
 //                releases the claim and answers 503 (Jira retries up to five times)
+//   9b. labels   labels a person put on the issue (the `labels` item of the changelog; for a created issue the labels it has) start the lanes
+//                that wait for such a label (`workflow-runs/jira-label-trigger.ts`, #1129); a failure releases the claim as well
 //  10. answer    a comment that starts with `/answer` (a person's, not an app's) answers the question the run that waits on this issue asks
 //                (#1040, `workflow-runs/ticket-answers.ts`); an answer that was not taken is not final: a redelivery looks at it again
 //
@@ -109,6 +111,27 @@ export type JiraStatusStarter = {
   }>;
 };
 
+/** What starts the lanes a label put on an issue in Jira starts (#1129): `JiraLabelTrigger` of `src/workflow-runs/`, wired in by the route. */
+export type JiraLabelStarter = {
+  start(
+    deliveryId: string,
+    added: {
+      projectId: string;
+      connectionId: string;
+      projectKey: string;
+      issueKey: string;
+      labels: readonly string[];
+      actor?: { accountId: string; name: string };
+    },
+  ): Promise<{
+    matched: number;
+    started: number;
+    existing: number;
+    skipped: number;
+    busy: number;
+  }>;
+};
+
 /**
  * What takes the answer a comment `/answer …` gives to the question a run waits for (#1040): `TicketAnswers` of `src/workflow-runs/`, which
  * this module does not import (the route wires the two together), in the shape of a Jira comment.
@@ -149,6 +172,8 @@ export type JiraWorkspaceCollaborators = {
   }): Promise<readonly StatusRef[] | undefined>;
   /** Left out where a server has no workflow engine: a status change is then only written into the ticket mirror. */
   statuses?: JiraStatusStarter;
+  /** Left out where a server has no workflow engine: a label put on an issue is then only written into the ticket mirror (#1129). */
+  labels?: JiraLabelStarter;
   /** Left out where a server has no workflow engine: a comment `/answer …` is then only written into the ticket mirror's issue. */
   answers?: JiraAnswerTaker;
 };
@@ -379,6 +404,27 @@ export function createJiraWebhookHandler(
             `[jira-webhook] delivery=${deliveryId} an issue moved to a status that ${result.matched} lane(s) wait for: started=${result.started} existing=${result.existing} skipped=${result.skipped} busy=${result.busy}`,
           );
         started = result.started + result.existing;
+      }
+
+      // A label put on the issue starts the lanes that wait for it (#1129); the same delivery may have moved the status as well.
+      if (
+        change.kind === "issue_changed" &&
+        change.labelsAdded.length > 0 &&
+        workspace.labels !== undefined
+      ) {
+        const result = await workspace.labels.start(deliveryId, {
+          projectId: project.id,
+          connectionId: registration.connectionId,
+          projectKey: registration.projectKey,
+          issueKey: change.issue.key,
+          labels: change.labelsAdded,
+          ...(change.actor === undefined ? {} : { actor: change.actor }),
+        });
+        if (result.matched > 0)
+          logger.info(
+            `[jira-webhook] delivery=${deliveryId} a label was put on an issue that ${result.matched} lane(s) wait for: started=${result.started} existing=${result.existing} skipped=${result.skipped} busy=${result.busy}`,
+          );
+        started += result.started + result.existing;
       }
 
       // A comment that begins with `/answer` answers the question of the run that waits on this issue. Whoever can comment on the issue in

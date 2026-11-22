@@ -162,6 +162,21 @@ and is announced again is, as far as the lane can tell, in that status.
   it**, the factory's own transitions included. A creation is no change of status and starts nothing. Before a run starts the factory
   asks Jira for the issue and checks that it **still has that status** (a late or repeated delivery starts nothing). Statuses are compared **by id**: Jira answers REST calls with names in the connected person's language (`Zu erledigen`) but a delivery carries the name Jira keeps for every language (`To Do`); a lane may name a status either way (#1058).
 
+- **A label put on** (the `labels` item of the changelog of a `jira:issue_updated`, and the labels of a `jira:issue_created`) starts the lanes of the
+  project that wait for it (trigger `ticket.labeled`, [`docs/workflows.md`](workflows.md#a-label-in-a-jira-project), #1129). Nothing is set up in Jira for it:
+  the webhook already delivers both events. What to know:
+  - **Only an addition starts a run.** A label taken off, or left on while another changes, starts nothing. An issue **created with** the label starts the lane,
+    and so does a **clone** or a **move** of an issue that carries it, and an issue an automation or the factory creates with it; keep the trigger label out of
+    clone and move rules and out of templates unless that is meant. Several `ticket.labeled` triggers in one lane start one run, through the first matching one.
+  - **The hyphen rule.** Jira labels hold no spaces, and the factory writes a label with a space as a hyphen, so the lane label `ready for agent` starts when
+    `ready-for-agent` is put on, and a lane that names `ready-for-agent` does too. Case counts (`Ready-for-agent` is another label). The lane editor warns
+    (`label_retriggers_workflow`) when a step adds the lane's own label, in either spelling.
+  - **The factory's own label writes arrive on this webhook** (`agent-working`, `agent-waiting`, and any label a step adds): Jira shows them as the connected
+    person's, so they cannot be told from a person's. They start a lane only if a lane waits for that label; never use one the factory writes as a trigger label.
+  - **The lane's own label write starts no second run.** A run started by hand (or through the API) whose pre-step puts the lane's label on the ticket, as the
+    demo lane "Ticket zu PR" does ("ready for agent" first), is the lane's one active run for that ticket; the delivery its label write causes finds it and
+    starts nothing (log line `is still running for ticket`). Before a run starts, the factory asks Jira for the issue and checks that it **still has the label**.
+
 ### What the factory writes to Jira (#1040)
 
 The OAuth scopes `read:jira-work` and `write:jira-work` let the factory write **as the person who connected the site** (3LO acts as that
@@ -232,6 +247,11 @@ connection of a site must keep working through all of it:
       webhooks already on the connection the rotation fails (`jira_webhook_limit`) and the old webhook keeps working.
 - [ ] **Status into a lane.** A lane with `ticket.statusChanged` to a Jira status: move an issue into it in Jira (person, then an automation
       rule): one run each, `trigger.ticket` has key, title, description as text, status, type, labels, assignee, link.
+- [ ] **Label into a lane (#1129).** A lane with `ticket.labeled` "ready for agent" in a Jira project: (a) put `ready-for-agent` on an issue in Jira: **one** run,
+      `trigger.ticket` filled; (b) take the label off: no run; (c) put another label on while this one stays: no run; (d) create an issue that already has the
+      label: one run; (e) start the demo lane "Ticket zu PR" **by hand** on an issue (its pre-step puts "ready for agent" on the ticket): **exactly one** run in
+      the lane's run list, and the log has `is still running for ticket` for the delivery of that label; (f) after that run has ended, take the label off and put
+      it on again: a new run. Also look at what the lane's own writes (`agent-working`) do: they must start nothing.
 - [ ] **Extension and expiry.** Call `GET /api/internal/jira-webhooks` with the cron secret: a young webhook is `unchanged`; set `expires_at`
       of the row to a date within ten days and call again: `extended`, and Jira's `GET /rest/api/3/webhook` shows the later end. Delete the
       webhook in Jira's API and call the job: it registers a new one. Find out what `PUT /rest/api/3/webhook/refresh` answers for a webhook
