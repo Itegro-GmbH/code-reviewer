@@ -142,7 +142,7 @@ export const statusRequestId = (
 export type MatchedStatusLane = {
   workflowId: string;
   version: number;
-  trigger: { id: string; kind: typeof STATUS_TRIGGER_KIND };
+  trigger: { id: string; kind: RunTriggerKind };
   budgetMicroUsd: number;
 };
 
@@ -222,6 +222,10 @@ export async function writeStatusRuns(
     actorLogin: string;
     ticketKey: string;
     requestId(workflowId: string): string;
+    /** What the runs are recorded as; the status trigger when left out. The Jira label trigger (#1129) writes its runs the same way. */
+    triggerKind?: RunTriggerKind;
+    /** The start of the log lines; the status trigger's when left out. */
+    logPrefix?: string;
   },
 ): Promise<void> {
   const log = deps.log ?? ((line) => console.info(line));
@@ -237,7 +241,7 @@ export async function writeStatusRuns(
         triggerInput: input.triggerInput,
         budgetMicroUsd: workflow.budgetMicroUsd,
         clientRequestId: input.requestId(workflow.workflowId),
-        triggerKind: STATUS_TRIGGER_KIND,
+        triggerKind: input.triggerKind ?? STATUS_TRIGGER_KIND,
         triggerId: workflow.trigger.id,
         triggerKey: input.triggerKey,
         ticketRef: input.ticketRef,
@@ -247,7 +251,7 @@ export async function writeStatusRuns(
       if (created.status === "busy") {
         result.busy += 1;
         log(
-          `[status-trigger] workflow=${workflow.workflowId} starts no run: run=${created.run.id} is still running for ticket ${input.ticketKey.slice(0, 40)}`,
+          `${input.logPrefix ?? "[status-trigger]"} workflow=${workflow.workflowId} starts no run: run=${created.run.id} is still running for ticket ${input.ticketKey.slice(0, 40)}`,
         );
         continue;
       }

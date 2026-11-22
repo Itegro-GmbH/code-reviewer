@@ -243,4 +243,99 @@ describe("parseJiraDelivery", () => {
     ])
       expect(parseJiraDelivery(body, SITE)).toMatchObject({ kind: "ignored" });
   });
+
+  // #1129-T01
+  it("reports the labels an update added, not those it removed or kept", () => {
+    const labelsItem = (from: string | null, to: string) => ({
+      field: "labels",
+      fieldtype: "jira",
+      from: null,
+      fromString: from,
+      to: null,
+      toString: to,
+    });
+    const labelsAddedBy = (from: string | null, to: string) => {
+      const change = parseJiraDelivery(
+        {
+          timestamp: 1,
+          webhookEvent: "jira:issue_updated",
+          issue: issue(),
+          changelog: { items: [labelsItem(from, to)] },
+        },
+        SITE,
+      );
+      return change.kind === "issue_changed" ? change.labelsAdded : undefined;
+    };
+    expect(labelsAddedBy("backend", "backend ready-for-agent")).toEqual([
+      "ready-for-agent",
+    ]);
+    expect(labelsAddedBy(null, "ready-for-agent")).toEqual(["ready-for-agent"]);
+    // A removal, and a list that stays as it is, put nothing on.
+    expect(labelsAddedBy("backend ready-for-agent", "backend")).toEqual([]);
+    expect(labelsAddedBy("backend", "backend")).toEqual([]);
+    expect(labelsAddedBy("backend ready-for-agent", "")).toEqual([]);
+  });
+
+  // #1129-T02
+  it("reads space-separated lists, several label items and a payload without a changelog", () => {
+    const change = parseJiraDelivery(
+      {
+        timestamp: 1,
+        webhookEvent: "jira:issue_updated",
+        issue: issue(),
+        changelog: {
+          items: [
+            statusItem("To Do", "In Progress"),
+            {
+              field: "labels",
+              fromString: "a  b",
+              toString: "a b ready-for-agent  needs-review",
+            },
+            { field: "labels", fromString: null, toString: "ready-for-agent" },
+            // The label that was added and taken off again in one delivery is in the last list only: its item adds it once.
+            { field: "Labels", fromString: "x", toString: "x y" },
+          ],
+        },
+      },
+      SITE,
+    );
+    expect(change).toMatchObject({
+      kind: "issue_changed",
+      labelsAdded: ["ready-for-agent", "needs-review"],
+      status: { to: "In Progress" },
+    });
+    const bare = parseJiraDelivery(
+      { timestamp: 1, webhookEvent: "jira:issue_updated", issue: issue() },
+      SITE,
+    );
+    expect(bare).toMatchObject({ labelsAdded: [] });
+  });
+
+  // #1129-T03
+  it("reports the labels a created issue starts with, and none for a comment", () => {
+    const labelled = {
+      ...issue(),
+      fields: { ...issue().fields, labels: ["backend", "ready-for-agent"] },
+    };
+    expect(
+      parseJiraDelivery(
+        { timestamp: 1, webhookEvent: "jira:issue_created", issue: labelled },
+        SITE,
+      ),
+    ).toMatchObject({
+      event: "created",
+      labelsAdded: ["backend", "ready-for-agent"],
+    });
+    expect(
+      parseJiraDelivery(
+        {
+          timestamp: 1,
+          webhookEvent: "comment_created",
+          issue: labelled,
+          comment: { id: "1", body: "hi", author: {} },
+        },
+        SITE,
+      ),
+    ).toMatchObject({ event: "commented", labelsAdded: [] });
+  });
 });
