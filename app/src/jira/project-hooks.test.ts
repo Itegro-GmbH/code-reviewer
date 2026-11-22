@@ -76,6 +76,7 @@ function setup(options: {
       kind: "issue_changed",
       event: "updated",
       issue: issue(key),
+      labelsAdded: [],
       matchedWebhookIds: [],
     });
   const activated = () =>

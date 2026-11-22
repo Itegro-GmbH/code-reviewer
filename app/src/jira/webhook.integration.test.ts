@@ -25,6 +25,7 @@ import {
   createJiraStatusTrigger,
   jiraProjectView,
 } from "../workflow-runs/jira-status-trigger.ts";
+import { createJiraLabelTrigger } from "../workflow-runs/jira-label-trigger.ts";
 import { createJiraIssueReader } from "./issue-reader.ts";
 import { createJiraMirror } from "./mirror.ts";
 import { createJiraProjectReader } from "./projects.ts";
@@ -210,21 +211,27 @@ async function world(options: { german?: boolean } = {}) {
   const statusesOf = createJiraStatusDirectory({
     reader: createJiraProjectReader({ tokens }),
   }).statusesOf;
-  const statuses = createJiraStatusTrigger({
-    statusesOf,
+  const shared = {
     runs,
     workflows,
-    async projectOf(projectId) {
+    async projectOf(projectId: string) {
       const project = await projects.getById(projectId);
       return project === undefined ? undefined : jiraProjectView(project);
     },
-    async repositoryOf(repositoryId) {
+    async repositoryOf(repositoryId: string) {
       const row = await repositories.get(repositoryId);
       return row === undefined
         ? undefined
         : { id: row.id, fullName: row.fullName, defaultBranch: "main" };
     },
-    async readTicket(source, key) {
+    async readTicket(
+      source: {
+        connectionId: string;
+        projectKey: string;
+        repositoryId: string;
+      },
+      key: string,
+    ) {
       const row = await repositories.get(source.repositoryId);
       if (row === undefined) return undefined;
       return (
@@ -241,9 +248,11 @@ async function world(options: { german?: boolean } = {}) {
         )) ?? undefined
       );
     },
-    kick: (runId) => void kicked.push(runId),
+    kick: (runId: string) => void kicked.push(runId),
     log: h.logs.push.bind(h.logs),
-  });
+  };
+  const statuses = createJiraStatusTrigger({ statusesOf, ...shared });
+  const labels = createJiraLabelTrigger(shared);
   const logger = {
     info: (line: string) => h.logs.push(line),
     warn: (line: string) => h.logs.push(line),
@@ -262,6 +271,7 @@ async function world(options: { german?: boolean } = {}) {
       mirror: createJiraMirror({ tracker }),
       statusesOf: statusesOf,
       statuses,
+      labels,
     }),
     logger,
     // The fake signs its bearer tokens with the wall clock, the harness clock is the one the tests move: a token is judged by the first.
@@ -312,6 +322,42 @@ async function world(options: { german?: boolean } = {}) {
     });
   }
 
+  /** A lane of the project that waits for a label put on a Jira issue (#1129). */
+  async function addLabelLane(
+    projectId: string,
+    label: string,
+    name = "Label",
+  ) {
+    const lane = await workflows.create(
+      {
+        name,
+        document: JSON.stringify({
+          version: 1,
+          name,
+          triggers: [{ id: "labeled", kind: "ticket.labeled", label }],
+          steps: [
+            {
+              id: "implement",
+              kind: "agent",
+              profile: "worker",
+              environment: "Python",
+              instruction: "{{trigger.ticket.key}} {{trigger.ticket.url}}",
+            },
+          ],
+        }),
+        createdBy: owner.id,
+        projectId,
+      },
+      100,
+    );
+    if (!lane.ok) throw new Error("seeding failed");
+    return lane;
+  }
+  const labelsChanged = (from: string | null, to: string) => ({
+    webhookEvent: "jira:issue_updated" as const,
+    issueKey: "PROJ-7",
+    changelog: [{ field: "labels", fromString: from, toString: to }],
+  });
   const moveTo = (status: string, from = "To Do") => ({
     webhookEvent: "jira:issue_updated" as const,
     issueKey: "PROJ-7",
@@ -342,6 +388,9 @@ async function world(options: { german?: boolean } = {}) {
     changeAppSecret: (next: string) => (appSecret = next),
     createJiraProject,
     createSecondJiraProject,
+    addLabelLane,
+    runs,
+    labelsChanged,
     moveTo,
     runsOf,
     async hook() {
@@ -783,6 +832,159 @@ describe("a delivery of Jira", () => {
     expect(answer.status).toBe(200);
     expect(await w.runsOf()).toEqual([]);
     expect(w.h.logs.join("\n")).toContain("no longer has the status");
+  });
+
+  // #1129-T04
+  it('starts the lane that waits for "ready for agent" when a person puts the label ready-for-agent on the issue, with the ticket filled', async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    await w.addLabelLane(project.id, "ready for agent");
+    const hook = await w.hook();
+    w.h.atlassian.setIssues(SITE.id, [
+      { ...ISSUE, labels: ["backend", "ready-for-agent"] },
+    ]);
+
+    const answer = await w.h.atlassian.deliver(
+      hook.id,
+      w.labelsChanged("backend", "backend ready-for-agent"),
+    );
+
+    expect(answer.body).toEqual({
+      status: "accepted",
+      outcome: "workflow_runs_started",
+    });
+    const runs = await w.runsOf();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      trigger_kind: "ticket.labeled",
+      trigger_id: "labeled",
+      ticket_ref: "jira:acme/shop#PROJ-7",
+      repository_id: w.repository.id,
+      actor_login: "Ada Lovelace",
+    });
+    const input = JSON.parse(String(runs[0]?.trigger_input)) as {
+      ticket: Record<string, unknown>;
+    };
+    expect(input.ticket).toMatchObject({
+      key: "PROJ-7",
+      title: "Fix the login",
+      url: "https://acme.atlassian.net/browse/PROJ-7",
+      labels: ["backend", "ready-for-agent"],
+    });
+    expect(w.kicked).toHaveLength(1);
+  });
+
+  // #1129-T01
+  it("starts nothing when the label is taken off, kept, or another one is put on, and nothing for a lane of another label", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    await w.addLabelLane(project.id, "ready for agent");
+    const hook = await w.hook();
+    w.h.atlassian.setIssues(SITE.id, [
+      { ...ISSUE, labels: ["backend", "ready-for-agent"] },
+    ]);
+
+    for (const [from, to] of [
+      ["backend ready-for-agent", "backend"],
+      ["backend ready-for-agent", "backend ready-for-agent"],
+      ["backend ready-for-agent", "backend ready-for-agent needs-review"],
+    ] as const)
+      await w.h.atlassian.deliver(hook.id, w.labelsChanged(from, to));
+
+    expect(await w.runsOf()).toEqual([]);
+  });
+
+  // #1129-T06
+  it("does not start a run for a late delivery whose label the issue no longer has, and starts none a second time while the run goes on", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    await w.addLabelLane(project.id, "ready for agent");
+    const hook = await w.hook();
+
+    // The label was taken off again after the delivery was made.
+    await w.h.atlassian.deliver(
+      hook.id,
+      w.labelsChanged("backend", "backend ready-for-agent"),
+    );
+    expect(await w.runsOf()).toEqual([]);
+    expect(w.h.logs.join("\n")).toContain("no longer has the label");
+
+    // The label is on: it starts once, and put on again while the run goes on starts no second one.
+    w.h.atlassian.setIssues(SITE.id, [
+      { ...ISSUE, labels: ["backend", "ready-for-agent"] },
+    ]);
+    for (let round = 0; round < 2; round += 1)
+      await w.h.atlassian.deliver(
+        hook.id,
+        w.labelsChanged("backend", "backend ready-for-agent"),
+      );
+    expect(await w.runsOf()).toHaveLength(1);
+  });
+
+  // #1129-T21 (review of #1130, finding 1): a start by hand names the ticket and holds no trigger key; its pre-step puts the lane's own label on
+  // the ticket, and on Jira that write reaches the webhook as a person's label. The run by hand is the one run: the delivery starts no second.
+  it("starts no second run for the label a run started by hand put on the ticket itself, and starts one when that run is over", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    const lane = await w.addLabelLane(project.id, "ready for agent");
+    const hook = await w.hook();
+    w.h.atlassian.setIssues(SITE.id, [
+      { ...ISSUE, labels: ["backend", "ready-for-agent"] },
+    ]);
+    const byHand = await w.runs.createRun({
+      workflowId: lane.workflow.id,
+      workflowVersion: lane.saved.version,
+      repositoryId: w.repository.id,
+      baseBranch: "main",
+      triggerInput: "{}",
+      budgetMicroUsd: 1_000_000,
+      clientRequestId: "by-hand-1",
+      triggerKind: "manual",
+      createdBy: w.owner.id,
+      actorLogin: "owner",
+      ticketRef: "jira:acme/shop#PROJ-7",
+    });
+    expect(byHand.status).toBe("created");
+
+    const answer = await w.h.atlassian.deliver(
+      hook.id,
+      w.labelsChanged("backend", "backend ready-for-agent"),
+    );
+
+    expect(answer.status).toBe(200);
+    expect(await w.runsOf()).toHaveLength(1);
+    expect(w.h.logs.join("\n")).toContain("is still running for ticket");
+
+    // Once that run is over, the same label starts the lane again (another delivery).
+    await w.h.db
+      .updateTable("workflow_runs")
+      .set({ status: "succeeded", finished_at: "2026-11-14T10:00:00.000Z" })
+      .where("id", "=", byHand.run.id)
+      .execute();
+    await w.h.atlassian.deliver(
+      hook.id,
+      w.labelsChanged("backend", "backend ready-for-agent"),
+    );
+    expect(await w.runsOf()).toHaveLength(2);
+  });
+
+  // #1129-T03
+  it("starts the lane for an issue that is created with the label", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    await w.addLabelLane(project.id, "ready for agent");
+    const hook = await w.hook();
+    w.h.atlassian.setIssues(SITE.id, [
+      { ...ISSUE, labels: ["ready-for-agent"] },
+    ]);
+
+    const answer = await w.h.atlassian.deliver(hook.id, {
+      webhookEvent: "jira:issue_created",
+      issueKey: "PROJ-7",
+    });
+
+    expect(answer.body).toMatchObject({ outcome: "workflow_runs_started" });
+    expect(await w.runsOf()).toHaveLength(1);
   });
 
   // #1039

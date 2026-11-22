@@ -2549,6 +2549,12 @@ const CASES: Case[] = [
     run: (a, b) => a.workflows.listWithStatusTrigger(b.repository.id),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
+  // #1129: the lanes a label put on a Jira issue starts are read in the workspace of the registration only
+  {
+    name: "workflows.listProjectWithIssueTrigger",
+    run: (a, b) => a.workflows.listProjectWithIssueTrigger(b.project.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
   {
     name: "workflows.listProjectWithStatusTrigger",
     run: (a, b) => a.workflows.listProjectWithStatusTrigger(b.project.id),
@@ -2682,6 +2688,16 @@ const CASES: Case[] = [
         10,
       ),
     expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // #1129: B's ticket holds no run of A that is active for the workflow.
+    name: "workflowRuns.findActiveForTicket",
+    run: (a, b) =>
+      a.workflowRuns.findActiveForTicket(
+        b.workflowRun.workflowId,
+        b.workflowRun.ticketRef ?? "none",
+      ),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
     // #924: the seeded workspaces have no run that waits, no answered question and no pull request a lane opened; what the three read

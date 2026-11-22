@@ -30,6 +30,7 @@ const changed = (i: JiraIssue): JiraChange => ({
   kind: "issue_changed",
   event: "updated",
   issue: i,
+  labelsAdded: [],
   matchedWebhookIds: [],
 });
 

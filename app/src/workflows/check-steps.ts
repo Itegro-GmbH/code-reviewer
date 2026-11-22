@@ -48,6 +48,7 @@ import {
   ON_FAILURE_KINDS,
 } from "./failure.ts";
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
+import { jiraLabel } from "./label-match.ts";
 import {
   DESCRIPTION_MAX_LENGTH,
   ID_MAX_LENGTH,
@@ -1956,7 +1957,12 @@ function checkReviewers(
   });
 }
 
-/** Adding the label that starts the workflow would start it again, and again. */
+/**
+ * Adding the label that starts the workflow would start it again, and again. The same label is meant when only the spelling differs by
+ * what Jira does to whitespace (#1129): Jira labels hold none, and the factory writes "ready for agent" as "ready-for-agent", which is the
+ * label a lane for "ready for agent" waits for (`label-match.ts`). The identical text (any case) is an error as it always was. The text
+ * that is the same label on Jira only is a warning: on GitHub those are two labels, and the validator does not know the provider.
+ */
 function checkNoRetrigger(
   node: Record<string, unknown>,
   path: string,
@@ -1965,15 +1971,27 @@ function checkNoRetrigger(
   const labels = c.retriggerLabels;
   if (labels === undefined || labels.length === 0 || !Array.isArray(node.add))
     return;
+  const jiraSpelled = new Set(labels.map((label) => jiraLabel(label)));
   node.add.forEach((entry: unknown, position) => {
     if (typeof entry !== "string") return;
     const literal = literalText(parseTemplate(entry))?.trim().toLowerCase();
-    if (literal !== undefined && labels.includes(literal))
+    if (literal === undefined || literal === "") return;
+    if (labels.includes(literal)) {
       c.report(
         issue(
           pointer(path, "add", position),
           "label_retriggers_workflow",
           `Adding the label ${shown(literal)} puts the label that starts this workflow on the issue again, and the workflow would start again. Remove it instead, or add another label.`,
+        ),
+      );
+      return;
+    }
+    if (jiraSpelled.has(jiraLabel(literal)))
+      c.report(
+        warning(
+          pointer(path, "add", position),
+          "label_retriggers_workflow",
+          `Adding the label ${shown(literal)} puts the label that starts this workflow on a Jira issue again (Jira labels hold no spaces, so "ready for agent" and "ready-for-agent" are one label there), and the workflow would start again. Remove it instead, or add another label.`,
         ),
       );
   });
