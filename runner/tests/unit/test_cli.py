@@ -43,11 +43,12 @@ def test_without_a_mode_nothing_starts_and_the_usage_is_named(
 def test_worker_features_prints_what_the_worker_reads_and_starts_nothing(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+    from code_reviewer_runner.job_loop.worker_api import IMAGE_FEATURES, WORKER_FEATURES
 
     exit_code = main(["--worker-features"], environment={})
 
     assert exit_code == 0
     printed = capsys.readouterr().out.strip().split(",")
-    assert tuple(printed) == WORKER_FEATURES
+    # What the app is told, and what only the golden image says of its Worker (#1136).
+    assert tuple(printed) == (*WORKER_FEATURES, *IMAGE_FEATURES)
     assert "implementer_multi_repo" in printed

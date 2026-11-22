@@ -78,7 +78,13 @@ _T = TypeVar("_T")
 _JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # A heartbeat interval above this would let the 2 minute lease run out between two beats.
 MAX_HEARTBEAT_INTERVAL_SECONDS = 60
+# #1136: on the Incus backend the Worker puts the data root of the agent container's own Docker on a
+# volume (`agent_container.inner_docker_mount`). Not a field of a job and not a claim feature of the
+# contract: `--worker-features` adds it (`IMAGE_FEATURES`), the golden build records it in the image
+# and the Factory-Runner announces `agent-docker` only for an image whose Worker has it (the probe
+# runs the service's code, the jobs run the image's).
 FEATURE_INNER_DOCKER_VOLUME = "inner_docker_volume"
+IMAGE_FEATURES: tuple[str, ...] = (FEATURE_INNER_DOCKER_VOLUME,)
 # What this Worker understands beyond the plain job (`features` of the details request): an app
 # sends an optional job field only to a Worker that names it.
 WORKER_FEATURES: tuple[str, ...] = (
@@ -116,11 +122,6 @@ WORKER_FEATURES: tuple[str, ...] = (
     # to the agent) and reads the step's network rule for it (the hosts besides the model's own are
     # read-only). Without it the app ends such a turn, free, instead of the Worker ignoring them.
     "implementer_subscription_setup",
-    # #1136: on the Incus backend the Worker puts the data root of the agent container's own Docker
-    # on a volume (`agent_container.inner_docker_mount`). Not a field of a job: the Factory-Runner
-    # reads it from the golden image's property and announces `agent-docker` only for an image
-    # whose Worker has it (the probe runs the service's code, the jobs run the image's).
-    FEATURE_INNER_DOCKER_VOLUME,
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

@@ -28,7 +28,11 @@ from code_reviewer_runner.factory_runner.incus.settings import IncusSettings
 from code_reviewer_runner.factory_runner.selftest import CHECK_AGENT_DOCKER, Check
 from code_reviewer_runner.implementer.agent_container import INNER_DOCKER_DIRECTORY
 from code_reviewer_runner.implementer.docker_api import DockerApi
-from code_reviewer_runner.job_loop.worker_api import FEATURE_INNER_DOCKER_VOLUME, WORKER_FEATURES
+from code_reviewer_runner.job_loop.worker_api import (
+    FEATURE_INNER_DOCKER_VOLUME,
+    IMAGE_FEATURES,
+    WORKER_FEATURES,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -284,5 +288,8 @@ def test_an_image_whose_worker_lacks_the_volume_feature_is_not_probed_and_says_r
 
 
 # #1136-T16
-def test_the_worker_names_the_feature_the_golden_build_records_for_the_image() -> None:
-    assert FEATURE_INNER_DOCKER_VOLUME in WORKER_FEATURES
+def test_the_feature_is_for_the_golden_image_only_and_never_a_claim_feature_of_the_contract() -> (
+    None
+):
+    assert FEATURE_INNER_DOCKER_VOLUME in IMAGE_FEATURES
+    assert FEATURE_INNER_DOCKER_VOLUME not in WORKER_FEATURES, "the app's contract does not know it"
