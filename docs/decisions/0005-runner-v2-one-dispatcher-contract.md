@@ -255,4 +255,4 @@ kept files and images and **lost every process**, and hosted must match.
 - **Alternatives considered.** A second container from a *copy* of the setup's (the Incus "copy of the stopped instance"): processes are gone. Keeping the commit and restarting the setup's containers by a start script the customer writes: not "the same environment". Running the script in the agent's container on
   the model network behind the door: the setup would lose raw TCP and the wide rule's meaning.
 - **Not done:** a lane test with a real Postgres in the inner Docker (the Docker lane runs under `runc`, where the container has no inner Docker; the lane proves a database-like process, and the KVM lane's whole job covers the real Sysbox path), what the Worker's hardening flags do to a database container in the inner Docker (not tried, as in #1005),
-  the Claude Code harness with a setup script (still refused: `subscription_setup_script`).
+  the Claude Code harness with a setup script (refused with `subscription_setup_script` then; allowed since #1126, ADR 0007 decision 11 as amended: the script runs before the login is placed).

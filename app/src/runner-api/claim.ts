@@ -36,6 +36,7 @@ import type { IntegrationsRepository } from "../db/repositories/integrations-rep
 import type {
   StoredImplementerSession,
   StoredImplementerTurn,
+  TurnRunnerEnvironment,
 } from "../db/repositories/implementer-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import {
@@ -43,6 +44,7 @@ import {
   providerHostOf,
   type NetworkRule,
 } from "../network-rule/network.ts";
+import { isSharedWildcard } from "../network-rule/shared-domains.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
 import type { SessionRepo } from "../db/session-repos.ts";
@@ -422,6 +424,15 @@ export type Checked = {
       /** #745, step 7: the rule for the agent's network; `off` when the turn has none. */
       network: NetworkRule;
     } | null;
+    /**
+     * #1126: the script and the network rule of a step on a self-hosted runner (ADR 0007, decision 11 as amended). A turn has this or
+     * `environment`, never both; null when the step has neither.
+     */
+    runnerSetup: {
+      name: string;
+      setupScript: string;
+      network: NetworkRule;
+    } | null;
     /** #843: the profile version the turn copied when it started; null for a task without one (the platform's defaults). */
     profile: {
       name: string;
@@ -469,6 +480,20 @@ function multiRepoDeps(deps: ClaimDeps, job: Job): MultiRepoDeps {
     },
     now: deps.now,
   };
+}
+
+/**
+ * #1126: the script and the network rule a step on a self-hosted runner carries (ADR 0007, decision 11 as amended), as the Worker
+ * reads them; null when the turn is not on a runner or the step has neither.
+ */
+function runnerSetupOf(
+  runner: TurnRunnerEnvironment | null,
+): { name: string; setupScript: string; network: NetworkRule } | null {
+  if (runner === null) return null;
+  const setupScript = runner.setupScript ?? "";
+  const network = runner.network ?? NETWORK_OFF;
+  if (setupScript === "" && network.mode === "off") return null;
+  return { name: runner.name, setupScript, network };
 }
 
 function refuse(errorCode: string, detail?: string): Refusal {
@@ -1177,6 +1202,7 @@ export async function checkJob(
                 setupScript: turn.turn.environment.setupScript,
                 network: turn.turn.environment.network ?? NETWORK_OFF,
               },
+        runnerSetup: runnerSetupOf(turn.turn.runnerEnvironment),
         profile:
           turn.turn.profile === null
             ? null
@@ -1295,12 +1321,13 @@ export async function buildJobInput(
     return refuse("implementer_engine_unavailable");
   // #818: a script that the Worker cannot read would be skipped, and the turn would run on a base the person did not choose: it ends
   // here, free, before any credential or token exists, like a Worker that cannot enforce the cost limit.
-  const script = implementer?.environment?.setupScript ?? "";
+  const setup = implementer?.environment ?? implementer?.runnerSetup ?? null;
+  const script = setup?.setupScript ?? "";
   if (script !== "" && !features.includes("implementer_environment"))
     return refuse("implementer_engine_unavailable", "reason=environment");
   // #745, step 7: the same for the rule for the agent's network. A Worker that does not read it would give the agent a network the
   // person did not choose, or none where one was asked for; `off` is what a Worker without the feature does anyway.
-  const network = implementer?.environment?.network ?? NETWORK_OFF;
+  const network = setup?.network ?? NETWORK_OFF;
   if (network.mode !== "off" && !features.includes("implementer_network"))
     return refuse("implementer_engine_unavailable", "reason=network");
   // #843: the same for the profile. A Worker that does not read it would push the work of a profile that may not push, and would run
@@ -1504,12 +1531,11 @@ export async function buildJobInput(
             modelEntry,
             // #818: only a script travels to the Worker, and only to one that reads it (the refusal above).
             // A script, a rule other than `off`, or both. The script is left out when empty (the contract has no empty script).
-            ...(implementer.environment === null ||
-            (script === "" && network.mode === "off")
+            ...(setup === null || (script === "" && network.mode === "off")
               ? {}
               : {
                   environment: {
-                    name: implementer.environment.name,
+                    name: setup.name,
                     ...(script === "" ? {} : { setupScript: script }),
                     ...(network.mode === "off" ? {} : { network }),
                   },
@@ -1769,6 +1795,29 @@ export async function buildSubscriptionJob(
     return refuse("implementer_config_invalid", "reason=subscription_model");
   if (!features.includes("implementer_profile"))
     return refuse("implementer_engine_unavailable", "reason=profile");
+  // #1126: a Worker that does not name `implementer_subscription_setup` would refuse the script (and read the network rule as the
+  // old one-host rule): it ends here, free, with a reason, before any credential exists, as for the features above.
+  const setup = runnerSetupOf(turn.turn.runnerEnvironment);
+  // #1126, defence in depth beside the validator (at save) and the runner (at start): the login lives in the container, so a rule the
+  // runner would refuse is refused here, free, before the git token is minted. A lane saved before the validator knew it, or a row
+  // written by hand, ends the same way.
+  if (setup !== null) {
+    if (setup.network.mode === "open")
+      return refuse(
+        "implementer_config_invalid",
+        "reason=subscription_network_open",
+      );
+    if (setup.network.hosts.some(isSharedWildcard))
+      return refuse(
+        "implementer_config_invalid",
+        "reason=subscription_network_wildcard",
+      );
+  }
+  if (setup !== null && !features.includes("implementer_subscription_setup"))
+    return refuse(
+      "implementer_engine_unavailable",
+      "reason=subscription_setup",
+    );
   if (
     turn.turn.resultSchema != null &&
     !features.includes("implementer_result")
@@ -1920,6 +1969,20 @@ export async function buildSubscriptionJob(
         : { repos: multi.repos }),
       instruction: multi?.instruction ?? turn.turn.instruction,
       limits: { timeLimitSeconds: timeLimitSecondsOf(turn.turn) },
+      // #1126: the step's script and network rule, for a Worker that reads a script on this harness (the refusal above).
+      ...(setup === null
+        ? {}
+        : {
+            environment: {
+              name: setup.name,
+              ...(setup.setupScript === ""
+                ? {}
+                : { setupScript: setup.setupScript }),
+              ...(setup.network.mode === "off"
+                ? {}
+                : { network: setup.network }),
+            },
+          }),
       subscription: {
         model: choice.model,
         maxBudgetUsd: (cents / 100).toFixed(2),

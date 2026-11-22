@@ -17,6 +17,7 @@ import {
   isNetworkMode,
   normalizeHostEntry,
 } from "../network-rule/network.ts";
+import { isSharedWildcard } from "../network-rule/shared-domains.ts";
 import {
   INLINE_SETTING_KEYS,
   MODEL_HINT,
@@ -764,7 +765,7 @@ function checkInlineSettings(
   checkHostedSettings(node, path, c);
 }
 
-/** The setup script and the network rule of a hosted environment, now settings of the step (ADR 0007, decision 11). */
+/** The setup script and the network rule of an environment, now settings of the step (ADR 0007, decision 11, amended by #1126: any runner). */
 function checkHostedSettings(
   node: Record<string, unknown>,
   path: string,
@@ -805,26 +806,39 @@ function checkHostedSettings(
   }
   if (node.network !== undefined)
     checkNetworkRule(node.network, pointer(path, "network"), c);
-  // A runner's setup and network are its owner's: the step cannot promise either there. What is not known (no such environment or
-  // runner, a computed name) is reported elsewhere.
-  const known = environmentOf(node, c.resolver)?.info;
-  const named = runnerOfStep(node, c.resolver)?.info;
-  const report = (key: string, message: string): void =>
-    c.report(issue(pointer(path, key), "hosted_only_setting", message));
-  for (const key of ["setupScript", "network"] as const) {
-    if (node[key] === undefined) continue;
-    if (named !== undefined && named.revoked !== true) {
-      if (named.kind === "self_hosted")
-        report(
-          key,
-          `${shown(key)} applies to a hosted runner. The runner ${shown(named.name)} is self-hosted, and its setup and network are its owner's. Take it out, or name a hosted runner.`,
-        );
-    } else if (known?.kind === "runner")
-      report(
-        key,
-        `${shown(key)} applies to a hosted environment. The environment ${shown(known.name)} runs on a runner, whose setup and network are its owner's. Take it out, or name a hosted environment.`,
+  // #1126 (ADR 0007, decision 11 as amended): a self-hosted runner takes the script and the rule too. What it cannot honour is an
+  // open network for the harness whose login lives in the container: the runner would refuse the turn when it starts, so the lane is
+  // refused when it is saved.
+  if (
+    node.harness === CLAUDE_CODE_HARNESS &&
+    isRecord(node.network) &&
+    node.network.mode === "open"
+  )
+    c.report(
+      issue(
+        pointer(path, "network"),
+        "subscription_network_open",
+        'A step on the harness "claude-code" cannot have an open network: its login is inside the container, so any host could be a place to send it to. Use mode "list" with the hosts the work needs (they are only read: GET and HEAD), or "off".',
+      ),
+    );
+  // A suffix entry on a domain whose subdomains anybody can get is a place a GET can carry the login to as well as `open` is.
+  if (
+    node.harness === CLAUDE_CODE_HARNESS &&
+    isRecord(node.network) &&
+    Array.isArray(node.network.hosts)
+  )
+    for (const [index, host] of node.network.hosts.entries()) {
+      if (typeof host !== "string") continue;
+      const form = normalizeHostEntry(host);
+      if (form === null || !isSharedWildcard(form)) continue;
+      c.report(
+        issue(
+          pointer(path, "network", "hosts", index),
+          "subscription_network_wildcard",
+          `${shown(host)} covers a domain whose subdomains anybody can get: the login of a step on the harness "claude-code" is inside the container, so a GET to any of them could carry it. Name the exact hosts the work needs.`,
+        ),
       );
-  }
+    }
 }
 
 /**

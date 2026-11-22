@@ -3,6 +3,9 @@
 """The gates of a turn that runs on the device's login (#856): the network of the agent's
 container, no new privileges, and the check that the device can run the harness at all."""
 
+import re
+from pathlib import Path
+
 import pytest
 
 from code_reviewer_runner.implementer.agent_container import agent_document
@@ -10,9 +13,22 @@ from code_reviewer_runner.implementer.claude_code.gates import (
     ANTHROPIC_HOST,
     NETWORK_HOSTS_REASON,
     NETWORK_OPEN_REASON,
+    NETWORK_WILDCARD_REASON,
+    SHARED_SUFFIXES,
+    is_shared_wildcard,
     subscription_rule,
 )
-from code_reviewer_runner.implementer.network_rule import MODE_LIST, NetworkRule
+from code_reviewer_runner.implementer.netdoor.registries import (
+    intercepted_domains,
+    interceptor_for,
+    rule_has_registries,
+)
+from code_reviewer_runner.implementer.network_rule import (
+    MODE_LIST,
+    NetworkRule,
+    RuleError,
+    parse_door_rule,
+)
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.result import ErrorCode
 
@@ -54,30 +70,141 @@ def test_an_open_environment_refuses_the_turn_with_a_clear_reason() -> None:
     assert refused.value.detail.startswith(NETWORK_OPEN_REASON)
 
 
-# #856-N02
+# #1126-T01
+def test_the_hosts_a_step_lists_are_read_only_and_on_443_beside_the_api_host() -> None:
+    rule = subscription_rule(
+        NetworkRule(MODE_LIST, ("fonts.googleapis.com", "*.gstatic.com", "lateinorum.de"))
+    )
+
+    assert rule.mode == MODE_LIST and rule.ports == (443,)
+    assert rule.hosts == (
+        "api.anthropic.com",
+        "fonts.googleapis.com",
+        "*.gstatic.com",
+        "lateinorum.de",
+    )
+    # The API host stays a tunnel (Claude Code posts to it); everything else is only read.
+    assert rule.read_only == ("fonts.googleapis.com", "*.gstatic.com", "lateinorum.de")
+    assert ANTHROPIC_HOST not in rule.read_only
+
+
+# #1126-T02
 @pytest.mark.parametrize(
     "hosts",
     [
         ("api.anthropic.com", "registry.npmjs.org"),
-        ("*.anthropic.com",),
         ("*.github.com", "api.anthropic.com"),
         ("example.org",),
     ],
 )
-def test_an_environment_that_lists_other_hosts_refuses_the_turn(hosts: tuple[str, ...]) -> None:
+def test_a_list_with_other_hosts_is_no_longer_refused(hosts: tuple[str, ...]) -> None:
+    rule = subscription_rule(NetworkRule(MODE_LIST, hosts))
+
+    assert rule.hosts[0] == ANTHROPIC_HOST
+    assert set(rule.read_only) == set(hosts) - {ANTHROPIC_HOST}
+
+
+# #1126-T07
+@pytest.mark.parametrize("entry", ["*.anthropic.com"])
+def test_a_wildcard_over_the_model_host_refuses_the_turn(entry: str) -> None:
     with pytest.raises(JobError) as refused:
-        subscription_rule(NetworkRule(MODE_LIST, hosts))
+        subscription_rule(NetworkRule(MODE_LIST, (entry, "example.org")))
 
     assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
     assert refused.value.detail.startswith(NETWORK_HOSTS_REASON)
+    # A wildcard that does not cover it is only another read-only host.
+    assert subscription_rule(NetworkRule(MODE_LIST, ("*.example.org",))).read_only == (
+        "*.example.org",
+    )
 
 
-# #856-N02
-def test_the_refusal_does_not_name_the_hosts_of_the_environment() -> None:
+# #1126-T56
+@pytest.mark.parametrize(
+    "entry", ["*.github.io", "*.pages.dev", "*.vercel.app", "*.githubusercontent.com", "*.co.uk"]
+)
+def test_a_wildcard_on_a_domain_anybody_can_get_a_subdomain_of_refuses_the_turn(
+    entry: str,
+) -> None:
     with pytest.raises(JobError) as refused:
-        subscription_rule(NetworkRule(MODE_LIST, ("secret-internal.example.org",)))
+        subscription_rule(NetworkRule(MODE_LIST, ("registry.npmjs.org", entry)))
+    assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
+    assert refused.value.detail.startswith(NETWORK_WILDCARD_REASON)
 
-    assert "secret-internal" not in refused.value.detail
+
+# #1126-T56
+@pytest.mark.parametrize(
+    "entry",
+    ["*.gstatic.com", "*.pythonhosted.org", "*.mine.github.io", "raw.githubusercontent.com"],
+)
+def test_a_suffix_of_ones_own_and_an_exact_host_on_a_shared_domain_stay_the_owners_choice(
+    entry: str,
+) -> None:
+    assert not is_shared_wildcard(entry)
+    assert subscription_rule(NetworkRule(MODE_LIST, (entry,))).read_only == (entry,)
+
+
+# #1126-T56
+def test_the_list_is_kept_in_step_with_the_apps() -> None:
+    """`app/src/network-rule/shared-domains.ts` holds the same suffixes (validator and claim)."""
+    source = (
+        Path(__file__).resolve().parents[3] / "app/src/network-rule/shared-domains.ts"
+    ).read_text(encoding="utf-8")
+    listed = re.search(r"SHARED_SUFFIXES: readonly string\[\] = \[(.*?)\];", source, re.S)
+    assert listed is not None
+    assert tuple(re.findall(r'"([^"]+)"', listed.group(1))) == SHARED_SUFFIXES
+
+
+# #1126-T03
+def test_the_read_only_hosts_travel_in_the_door_document_and_come_back() -> None:
+    rule = subscription_rule(NetworkRule(MODE_LIST, ("example.org",)))
+
+    assert rule.to_json() == {
+        "mode": "list",
+        "hosts": ["api.anthropic.com", "example.org"],
+        "ports": [443],
+        "readOnly": ["example.org"],
+    }
+    assert parse_door_rule(rule.to_json()) == rule
+
+
+# #1126-T04
+def test_a_rule_without_extra_hosts_has_nothing_read_only() -> None:
+    assert subscription_rule(OFF).read_only == ()
+    assert "readOnly" not in subscription_rule(OFF).to_json()
+
+
+# #1126-T05
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"mode": "list", "hosts": ["a.example.org"], "readOnly": ["b.example.org"]},
+        {"mode": "list", "hosts": ["a.example.org"], "readOnly": []},
+        {"mode": "list", "hosts": ["a.example.org"], "readOnly": "a.example.org"},
+        {"mode": "open", "hosts": [], "readOnly": ["a.example.org"]},
+    ],
+)
+def test_the_door_refuses_a_read_only_set_that_is_not_part_of_the_list(
+    document: dict[str, object],
+) -> None:
+    with pytest.raises(RuleError):
+        parse_door_rule(document)
+
+
+# #1126-T06
+def test_the_door_reads_the_registries_and_the_read_only_hosts_and_tunnels_the_rest() -> None:
+    rule = subscription_rule(NetworkRule(MODE_LIST, ("fonts.googleapis.com", "*.gstatic.com")))
+    intercepts = interceptor_for(rule)
+
+    assert rule_has_registries(rule)
+    assert intercepts("fonts.googleapis.com") and intercepts("fonts.gstatic.com")
+    assert not intercepts("gstatic.com"), "a suffix entry is the names below it"
+    assert not intercepts(ANTHROPIC_HOST), "the API host is a tunnel: Claude Code posts to it"
+    assert intercepts("registry.npmjs.org"), "registries are read-only as before"
+    # The door's certificate is limited to what it is for: the listed names, not their parents.
+    domains = intercepted_domains(rule)
+    assert "fonts.googleapis.com" in domains and "gstatic.com" in domains
+    assert "googleapis.com" not in domains and ANTHROPIC_HOST not in domains
+    assert not rule_has_registries(subscription_rule(OFF))
 
 
 # #856-P01

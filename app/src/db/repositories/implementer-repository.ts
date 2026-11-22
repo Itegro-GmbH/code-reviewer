@@ -149,12 +149,19 @@ export type TurnEnvironment = {
 
 /**
  * The runner environment a turn started with (#854): which one it was and the labels a runner must have to take the turn. A turn has
- * this or a `TurnEnvironment`, never both; it has no size, script or network rule of its own, the runner decides how it works.
+ * this or a `TurnEnvironment`, never both; it has no size of its own, the runner decides how it works. A step's script and network rule
+ * travel with it since #1126.
  */
 export type TurnRunnerEnvironment = {
   id: string;
   name: string;
   labels: string[];
+  /**
+   * #1126 (ADR 0007, decision 11 as amended): the script and the network rule of a step on a self-hosted runner, copied with it.
+   * Left out when the step has none (`""` and `off`).
+   */
+  setupScript?: string;
+  network?: NetworkRule;
 };
 
 /**
@@ -482,6 +489,15 @@ function readDiscarded(text: string | null): DiscardedInstruction | null {
   }
 }
 
+/** #1126: the rule a runner turn was stored with, only when it is not `off` (a turn written before it reads `off`). */
+function runnerNetworkOf(
+  mode: string | null,
+  hosts: string | null,
+): { network?: NetworkRule } {
+  const rule = ruleOf(mode, hosts);
+  return rule.mode === "off" ? {} : { network: rule };
+}
+
 function turnFrom(
   row: Selectable<ImplementerTurnsTable>,
 ): StoredImplementerTurn {
@@ -506,6 +522,13 @@ function turnFrom(
             id: row.environment_id,
             name: row.environment_name,
             labels: labelsFromText(row.environment_labels),
+            ...(row.environment_setup_script
+              ? { setupScript: row.environment_setup_script }
+              : {}),
+            ...runnerNetworkOf(
+              row.environment_network_mode,
+              row.environment_network_hosts,
+            ),
           }
         : null,
     environment:
@@ -634,16 +657,29 @@ export function createImplementerRepository(
           task.environment?.name ?? task.runnerEnvironment?.name ?? null,
         environment_vcpus: task.environment?.vcpus ?? null,
         environment_setup_script:
-          task.environment?.setupScript ?? (task.runnerEnvironment ? "" : null),
+          task.environment?.setupScript ??
+          (task.runnerEnvironment
+            ? (task.runnerEnvironment.setupScript ?? "")
+            : null),
         // Both or neither; a task without an environment has neither, and one without a rule has `off`.
         environment_network_mode:
           (task.environment ?? task.runnerEnvironment) == null
             ? null
-            : (task.environment?.network ?? NETWORK_OFF).mode,
+            : (
+                task.environment?.network ??
+                task.runnerEnvironment?.network ??
+                NETWORK_OFF
+              ).mode,
         environment_network_hosts:
           (task.environment ?? task.runnerEnvironment) == null
             ? null
-            : hostsToText((task.environment?.network ?? NETWORK_OFF).hosts),
+            : hostsToText(
+                (
+                  task.environment?.network ??
+                  task.runnerEnvironment?.network ??
+                  NETWORK_OFF
+                ).hosts,
+              ),
         // #854: the kind and the labels of a runner environment; hosted copies keep the null of a turn written before the kind.
         environment_kind: task.runnerEnvironment ? "runner" : null,
         environment_labels: task.runnerEnvironment

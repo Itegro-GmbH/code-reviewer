@@ -312,7 +312,7 @@ lease token (`/api/runners/v1/jobs/{id}/session`, `/resume-session`), their cont
 > `no_runner_announces` are checked **at the runner the step names**: a managed model on a self-hosted runner is `runner_needs_own_key`; a harness other than OpenCode on a
 > hosted runner is `harness_needs_runner`; `no_runner_announces` is a warning over **that runner's own announcement** (only when it is online). Besides them `runner_unknown` (an id
 > of no runner of the workspace, or of a revoked one, with the ids in `available`; a revoked runner is never offered), `runner_required`, `runner_with_environment` and
-> `hosted_only_setting` (`setupScript` and `network` only on a hosted runner) are the validator's; see [`workflows.md`](workflows.md#settings-in-the-step-1105). A step saved with a runner
+> `subscription_network_open` and `subscription_network_wildcard` (#1126: `network.mode` `open`, or a `*.suffix` entry on a shared domain, on the harness `claude-code`; `setupScript` and `network` themselves are taken on every runner since #1126) are the validator's; see [`workflows.md`](workflows.md#settings-in-the-step-1105). A step saved with a runner
 > that is revoked afterwards ends `runner_not_found` when it starts, free, and does not wait. The table below is the rule at an environment, which stays for the old form.
 
 The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment (the **old form**: a step in the profile form; the Profiles and Environments pages are gone since #1105) and, for each profile version it runs, whether
@@ -1240,13 +1240,72 @@ and to guard the exits):
 | ---- | ----- | ---- |
 | Push guard | `implementer/push_guard.py`, `GitWorkspace._login_secret_in` | Before a branch is pushed the runner reads what it adds beyond where the turn started (`git rev-list --objects` and `git cat-file --batch` in the mirror: commits, trees with their names, blobs, and the name of the branch) for the token and its spellings (`redaction.secret_forms`: as it is, URL-quoted, and base64 and base64url, with and without padding, at each of the three alignments the token can have inside a larger base64 text). Found: the branch gets the reason `login_secret` and is not pushed; the task's branch ends the turn `push_rejected`. Not read to the end (too large, a failed git, a timeout): `unchecked`, not pushed (it fails closed). Bounds: 300 s per read, a 64 MiB object list, 4 GiB of content. **It is a net, not a wall**: it finds the token and the spellings above, in plain text. It does not find the token hex-encoded, compressed (gzip, tar, a packed or zipped file), rot13 or otherwise shifted, reversed, or split over several lines or files. An agent that is told to hide the login can; the guard stops the accident and the lazy case, and the decision to accept the login in the agent's environment (follow-up 5) stands on the network gate, the owner's own device and the owner's own subscription. **Time**: the final push keeps 40 % of its seconds for the guard (`GUARD_SHARE`: 10 of the 25 s of a stop, 40 of the 100 s of a normal end); the fetch of a branch, the question to the lease and the push stop before that slice, and what the guard does not use goes back to the push of the last branch. So a stop (a cancelled run, a stopped Worker) or a slow fetch cannot leave the guard a second and turn committed work into `unchecked`. |
 | Redaction | `claude_code/agent.py`, `job_run.result_of` | The agent's `Redactor` knows the login: the step records, the turn's text and note are redacted in the agent; the job's secrets (the login included) are taken out of every text of the report (branch names, commit subjects, paths, the summary) and of the log line. Exact forms only for the facts of the report: a commit subject "fix authorization header" is not a secret. No snapshot export and no transcript volume exist for this harness yet (design: "Resume across containers"), so there is nothing else to scrub; the design redacts the transcript with the login too and scans it again before it is stored. |
-| Network | `claude_code/gates.py`, `session._start_network`, `job_run.production_setup` | A subscription turn is forced onto the network door with the rule `list` and exactly `api.anthropic.com` (an exact name, no suffix). An environment that is `open`, or lists any other host, refuses the turn (`implementer_config_invalid`, detail starting `subscription_network_open` or `subscription_network_hosts`), free, before the container exists. The door dials ports 80 and 443 only (`netdoor/proxy.py`), and a listed host has both in every rule; **the entry of a subscription turn has 443 only**: the runner's `NetworkRule` has an optional `ports` (a subset of the door's two, a list only; empty = both), it travels in the door's start document (`parse_door_rule`) and not in the contract (a job's or an environment's rule is still exactly `mode` and `hosts`, so no app change), and the door refuses port 80 for it with `port_not_allowed` (CONNECT and plain HTTP alike). The door container's own firewall table still lets 80 and 443 out; the proxy is what narrows it, so the narrowing is the proxy's word, not the kernel's. The rule applies to all hosts of its list (the subscription rule has one). **The model network.** A turn on this harness has no model door, and the model door is what otherwise makes the model network that the network door and the agent's container join; the unit tests had always made the network by hand, so this path never ran against a daemon that did not have it. The network door now makes it when it is missing (`netdoor_launcher._ensure_network`, the same document and labels as the model door's, so the runner's sweep finds a leftover) and removes it with itself only when it made it; beside a model door nothing changes. Proven against the fake daemon (`test_netdoor_launcher.py`) and, on a real one, by the lane test `test_network_door_alone.py` (CI). |
+| Network | `claude_code/gates.py`, `session._start_network`, `job_run.production_setup` | A subscription turn is forced onto the network door with the rule `list`: `api.anthropic.com` (an exact name, no suffix) on **port 443 only**, and **every other host the step lists, read-only on 443 only** (#1126). The step's rule cannot be `open`: that refuses the turn (`implementer_config_invalid`, detail starting `subscription_network_open`), free, before the container exists, and the validator refuses it when the lane is saved (`subscription_network_open`); a wildcard entry that covers the API host is refused by the runner (`subscription_network_hosts`), and so is a `*.suffix` entry on a domain whose subdomains anybody can get (`*.github.io`, `*.vercel.app`, `*.co.uk`: `SHARED_SUFFIXES` in `gates.py`, `subscription_network_wildcard`), which the validator also refuses at save and the app's claim refuses with `open` before it mints the git token (`reason=subscription_network_open` / `subscription_network_wildcard`). A step that lists no other host (or is `off`) has the one-host rule of #856. **Read-only** (`NetworkRule.read_only`, a subset of `hosts`, in the door's start document as `readOnly`; never in the contract's rule): the door does not tunnel those names, it ends the TLS connection itself (`netdoor/intercept.py`, the code that guards the package registries, now reached by a rule's read-only hosts too: `registries.interceptor_for`) and forwards only `GET` and `HEAD` to the name it checked, one request for each connection; a `POST`, a `PUT`, a body, a `Host` that is not the name, and port 80 never leave (`method_not_allowed`, `port_not_allowed`). The door's certificate authority is limited by an X.509 name constraint to the registries and these hosts (`intercepted_domains`), and the agent's container trusts it for them (`agent_container.trust_environment`: `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and the other variables; the bundle keeps every other root, so the tunnel to the model's host is not affected). The API host stays a tunnel: Claude Code posts to it, and the door never sees its traffic. **The residual risk, said plainly:** the login is in the container, a `GET` carries a path and a query, so every listed host is a place something could be sent to; read-only removes `POST`, a body and every upload API, not the query string. A host that publishes what it is asked for (a paste or file host, a wildcard over user content) is an exit: the lane's author chooses the hosts, and for the owner's machine that is the owner. The door dials ports 80 and 443 only (`netdoor/proxy.py`), and a listed host has both in every other rule; the entries of a subscription turn have 443 only (`NetworkRule.ports`, in the start document and not in the contract). The door container's own firewall table still lets 80 and 443 out; the proxy is what narrows it, so the narrowing is the proxy's word, not the kernel's. **The model network.** A turn on this harness has no model door, and the model door is what otherwise makes the model network that the network door and the agent's container join; the unit tests had always made the network by hand, so this path never ran against a daemon that did not have it. The network door now makes it when it is missing (`netdoor_launcher._ensure_network`, the same document and labels as the model door's, so the runner's sweep finds a leftover) and removes it with itself only when it made it; beside a model door nothing changes. Proven against the fake daemon (`test_netdoor_launcher.py`) and, on a real one, by the lane test `test_network_door_alone.py` (CI). |
 | Readiness per job | `claude_code/readiness.ready_harness`, `job_run.run_implementer_job` | The manifest said ready at the start; the job looks again (the login file, the layer on the daemon; nothing is built). A device that cannot refuses the job (`implementer_engine_unavailable`, detail starting `harness_not_ready`) and never falls back to OpenCode. |
 | No new privileges | `agent_container.agent_document(no_new_privileges=True)` | The container of the Claude Code agent is made with `no-new-privileges`; the hosted OpenCode agent is root and free and keeps its container as it was. |
 
-**A limit.** A turn on `claude-code` cannot run in an environment with a setup script yet (`subscription_setup_script`): the layer is built on
-the golden image, and the image a script leaves is not that. A runner environment has no script of the app's anyway (`copyEnvironment`
-copies its labels only); the combination can only come from a hand-made job.
+**A setup script (#1126).** A step on `claude-code` may have a setup script, and the runner runs it **before the login is placed anywhere**.
+The setup container is the agent's container (since #1009 the script and the agent share it), made from the layer's image (the
+`claude` program is installed there, the login is not) with `no-new-privileges` (`job_run.harness_setup_seams`), on the setup network
+with the internet open, as for a hosted turn (`docs/implementer.md`, "The environment's setup script"). The login is handed to the
+agent's own `exec` as an environment variable, per message (`claude_code/agent.py`), after the script has ended, the container has left
+the setup network and the agent's container object has taken it over (`place_from` in `job_run.production_setup` gives it the layer's
+seams too, or its seal check refuses a container made with `no-new-privileges` that the agent's seams do not say). So: **no process of the
+setup phase has the token in its environment or in a file of the container, whatever network the setup has.** The ordering is read from
+the calls the real `SetupContainer`, `AgentContainer` and `ClaudeCodeAgent` make to the fake Docker Engine
+(`tests/unit/test_subscription_login_order.py`: script, clean-up, off the setup network, leftovers ended, frozen, door up, thawed, on the model
+network, setup network removed, and only then the first exec that carries the login; no create, exec, environment, mount or label before it
+contains the login, and the test goes red when it is put in the setup container's definition) and, at the job level, by
+`test_a_setup_script_runs_before_the_login_is_placed_and_the_agent_keeps_the_container` (`setup`, `door`, `claude`).
+
+**Leftovers are ended (#1126, review of #1127).** The agent shares the container with whatever the script left running, as root or as its
+own user; such a process reads `/proc/<claude>/environ` the moment the login is handed to an exec, and a dependency's install script gets
+the token that way with no model involved. So for this harness the setup ends **every process that is not the container's own** before
+the freeze (`SetupSeams.kill_leftovers`, set by `job_run.harness_setup_seams`; `setup_leftovers.py`): the init, the image's `agent-init`,
+the inner `dockerd`/`containerd` (the processes that existed before the script was written, told apart by start time, which the script
+cannot move backwards), whatever they started since (`docker-proxy`) and the shims of the inner containers with their trees stay
+(`docker compose up -d` databases are what #1009 is for); everything else is `kill -9`'d, and the sweep looks again until a pass finds
+nothing. The names (process names only, bounded, printable) of what was ended go into the setup's notes (`setup_leftovers: ended processes
+the script left (...)`); a leftover that cannot be ended (five passes), or a container whose processes cannot be read, ends the turn
+**before any login exists**: `environment_setup_failed` with the detail starting `setup_leftovers:`. **For this harness a bare daemon
+(`pg_ctl start &`, `nohup server &`) does not survive the hand-over**; start it with Docker instead. A hosted or OpenCode turn is
+unchanged: its key is the door's, outside the container, so there is nothing to protect there and a Postgres the script started keeps
+serving. This **narrows, it is not a wall**: the script is root and can tamper with the tools the sweep uses, copy a program to a shim's
+name in `/usr/local/bin`, or start an inner container with the host's PID namespace; the exits (above) are what holds. The job carries the
+script and the
+network rule as `implementer.environment` and only to a Worker that names `implementer_subscription_setup` (`WORKER_FEATURES`); another Worker ends the turn
+`implementer_engine_unavailable` (free, reason `subscription_setup`) when it fetches the job, before any token exists, instead of running it
+without the script or with a wider network. A Worker that is older than #1126 would also refuse it itself (`subscription_setup_script`, `subscription_network_hosts`).
+During a rolling deploy an old app instance can still claim a turn whose copy has a script: it ignores it and the Worker runs the agent
+without the script on the pinned rule. That is fail-safe (no token is exposed), only surprising.
+
+#### Rolling #1126 onto the DevBox: the live probe run is the gate
+
+The guarantees above rest on Docker and Sysbox behaviour measured for #1009 **without a token** and not with `no-new-privileges`, the layer
+image and the adoption together. **Before the build with #1126 is rolled onto the DevBox (golden image rebuilt, service restarted) and
+before any release, run one live probe turn of a subscription lane with a setup script** on a KVM or Incus runner, and tick every check:
+
+1. **The setup ran.** The turn's `setup` block is `ok: true` and shows the probe script's output (it prints `id`, `env`, the contents of
+   `/work/repo`, and starts the leftovers below).
+2. **The leftovers were killed.** The probe script starts `nohup sleep 3600 &` and a root daemon that holds a TCP connection to an outside
+   host; the setup notes contain `setup_leftovers: ended processes the script left (sleep, ...)`, and in the agent phase
+   `ps -eo pid,comm` (the agent's own command) shows neither. A second probe whose leftover cannot be killed is not needed (the unit tests
+   cover that), but `docker compose up -d` of a database in the script must **survive** (`docker ps` in the agent phase lists it).
+3. **The login was not visible during setup.** The probe script's `env`, `cat /proc/*/environ | tr '\0' '\n'`, `ls -la /work /run /etc
+   /root` and `docker history` of the layer image contain no `CLAUDE_CODE_OAUTH_TOKEN` and nothing that starts with the token's prefix
+   (grep for the prefix `sk-ant-` on the setup output, which the page shows).
+4. **The listed hosts are GET-only.** In the agent phase, with the listed host `example.org` (and `fonts.googleapis.com`): `curl -sS -o
+   /dev/null -w '%{http_code}'` of `https://<host>/` works; `curl -X POST`, `-T` and a WebSocket upgrade to it are refused
+   (`method_not_allowed`); `curl https://example.com/` (not listed) and UDP/53 to `1.1.1.1` fail; `api.anthropic.com` works (the turn itself
+   ends `ok`). On the split (Incus) placement the model bridge is not internal, so DNS tunnelling around the door is stopped only by the
+   inner wall in A and the unplugged NIC: the UDP/53 probe is part of this check.
+5. **`npm ci` worked.** The probe lane's script is the real one (`npm ci` for the Lateinorum project), exit 0, `node_modules` present in the
+   agent phase.
+6. **The build ran.** The agent runs `npm run lint && npm run build` in the agent phase (fonts fetched through the door), and its commit
+   is pushed.
+
+Write the result (date, build, the six ticks, anything off) in the PR of the roll-out. A failed check stops the roll-out; the build stays
+off the DevBox and the lane keeps running on the old image.
 
 ### What is left of R3 (follow-ups of #856)
 
@@ -1275,7 +1334,7 @@ copies its labels only); the combination can only come from a hand-made job.
 7. **Layer cleanup and a non-blocking build at start** (a start builds a missing layer synchronously; old layers stay on the daemon).
 8. **A port in the network rule** (done in the fourth slice: `NetworkRule.ports`, 443 for the subscription rule; the app's environment rule has no ports). Left: a dedicated error code for
    the refusals above instead of `implementer_config_invalid` with a reason word.
-9. **An environment with a setup script on this harness** (still refused with `subscription_setup_script`; since #1009 the script would run in the harness's own container, which the agent keeps, so there is no longer an image to put a layer on).
+9. **An environment with a setup script on this harness** (done in #1126: the script runs in the harness's own container before the login is placed; see "A setup script (#1126)" above).
 
 ### Cost in the app (#856, third slice)
 
@@ -2180,7 +2239,7 @@ claim ─▶ slot (TAP fctapN) ─▶ job disk ─▶ token ─▶ listen on _51
    stdout and stderr go through a pipe the service reads into `firecracker.log`, **never more than 4 MiB** of it (past that the file is
    cut and its last 16 KiB written again; a VMM that loops on an error or a serial console cannot fill the disk), and the outcome carries
    the last 6,000 bytes, read by seeking to them. VM size: `FACTORY_RUNNER_VM_VCPUS` (2, 4, 6 or 8; 2 GB per vCPU as hosted; the agent's memory is the
-   hosted table's, `agentMemoryMb` of the template).
+   hosted table's, `agentMemoryMb` of the template). **A build needs memory (#1126):** at the default 2 vCPUs the agent's container gets 1,952 MB, which a `next build` can exceed; `FACTORY_RUNNER_VM_VCPUS=4` gives 5,904 MB, 6 gives 9,672 MB and 8 gives 13,441 MB (the Incus backend reads the same variable). The limit is the host's: `parallelRuns` VMs of that size run at the same time, so `parallelRuns × (2 GB × vCPUs)` plus the host's own needs must fit in its memory; set `parallelRuns` down when raising the size.
 5. **Start.** The start document is made and **checked before anything exists** (vm-init's own parser, `parse_start`: the job id and the
    URL against the contract's patterns, no credential in an argument): a job the VM would refuse costs no slot, no disk copy and no VMM.
    The start of `contracts/vm-init.v1.json`: `{appUrl, jobId, credential}`, the token, the image check (`code-reviewer-worker:golden`

@@ -108,6 +108,7 @@ from .reader import work_volume_of
 from .repo_places import SINGLE, RepoPlaces
 from .result_channel import AGENT_RESULT_DIRECTORY
 from .role_labels import role_labels
+from .setup_leftovers import SWEEP_SECONDS, Leftovers, note, sweep, take_marker
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
@@ -257,6 +258,8 @@ SETUP_OVERHEAD_SECONDS: Final = (
     + SCRIPT_WRITE_SECONDS
     + KILL_STEPS_SECONDS
     + HANDOVER_SECONDS * 4
+    # The marker before the script and the sweep before the freeze (`setup_leftovers`).
+    + SWEEP_SECONDS
 )
 # The most of the script's output that is kept: its end.
 OUTPUT_KEEP_BYTES: Final = 64 * 1024
@@ -408,9 +411,14 @@ class SetupSeams:
     # The file the VM's memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
     # The agent's container of a turn on Claude Code is made with `no-new-privileges` (#856); the
-    # setup's is the agent's container, so it takes the same seam (`subscription_setup_script`
-    # refuses that harness with a script today).
+    # setup's is the agent's container, so it takes the same seam (`job_run.harness_setup_seams`,
+    # #1126, which also gives it the layer's image).
     no_new_privileges: bool = False
+    # #1126: the login of the agent is handed to it inside this container, so nothing the script
+    # left running may stay: every process that is not the container's own is ended before the
+    # freeze, and a turn where one cannot be ended stops before any login exists
+    # (`setup_leftovers`). Set for the Claude Code harness only (`job_run.harness_setup_seams`).
+    kill_leftovers: bool = False
     # Which Docker the container is made in (#1017): the VM's, or B's on the Incus backend. There
     # `install_rules` is False: the setup network's walls are the NICs of the instances (the
     # outer wall's proxy for the setup, the inner wall in A), and no host of ours is in B.
@@ -450,6 +458,8 @@ class SetupContainer:
         self._notes: list[str] = []
         # Set when a freeze was asked for: the container may be frozen, and is thawed to be removed.
         self._pause_sent = False
+        # The start time of the container's newest process before the script (`take_marker`).
+        self._marker: str | None = None
 
     # -- the whole run -----------------------------------------------------------------------------
 
@@ -477,6 +487,14 @@ class SetupContainer:
             raise
         started = clock()
         try:
+            if self._seams.kill_leftovers:
+                try:
+                    self._marker = take_marker(self._api, container)
+                except Leftovers as reason:
+                    self._clean()
+                    return self._ended_run(
+                        OUTCOME_UNAVAILABLE, str(reason), tail, begun, begun, begun
+                    )
             outcome, code, why = self._script(container, script, script_seconds, should_stop, tail)
             finished = clock()
             if outcome != OUTCOME_OK:
@@ -831,6 +849,7 @@ class SetupContainer:
         if removed.returncode != 0 or removed.unanswered:
             self._notes.append("the script's file could not be removed from the container")
         api.disconnect_network(SETUP_NETWORK_NAME, container)
+        self._end_leftovers(container)
         # The network stays until the agent's container object has put the container on the model
         # network: the daemon refuses a `connect` of a container whose network mode names a
         # network that is gone ("could not find a network matching network mode", measured on the
@@ -838,6 +857,20 @@ class SetupContainer:
         self._freeze(container)
         if self._guard is not None:
             self._guard.close()
+
+    def _end_leftovers(self, container: str) -> None:
+        """For a turn whose login is handed over inside this container (`kill_leftovers`): end
+        every process the script left that is not the container's own, before the freeze (a frozen
+        process is not ended) and so before any login exists. The names go into the notes. Raises
+        `_Unavailable` (code `setup_leftovers`) when one cannot be ended."""
+        if not self._seams.kill_leftovers or self._marker is None:
+            return
+        try:
+            ended = sweep(self._api, container, self._marker, pause=time.sleep)
+        except Leftovers as reason:
+            raise _Unavailable(str(reason)) from None
+        if ended:
+            self._notes.append(note(ended))
 
     def _freeze(self, container: str) -> None:
         """Freeze the container and see that it is. Any refusal (a status, a conflict), an answer

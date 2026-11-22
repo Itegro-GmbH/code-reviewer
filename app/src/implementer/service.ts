@@ -576,8 +576,7 @@ export function createImplementerService(
                 task.environmentId,
                 model,
               );
-      const { runnerEnvironment } = copiedEnv;
-      requireRunnerForHarness(profile, runnerEnvironment);
+      requireRunnerForHarness(profile, copiedEnv.runnerEnvironment);
       // #1105: the script and the network rule are the step's (ADR 0007, decision 11); the hosted environment keeps its size.
       const environment =
         options.inline === undefined || copiedEnv.environment === null
@@ -586,6 +585,21 @@ export function createImplementerService(
               ...copiedEnv.environment,
               setupScript: options.inline.setupScript ?? "",
               network: options.inline.network ?? NETWORK_OFF,
+            };
+      // #1126: a self-hosted runner takes them too (decision 11 as amended), copied into the turn like the hosted ones.
+      const runnerEnvironment =
+        options.inline === undefined || copiedEnv.runnerEnvironment === null
+          ? copiedEnv.runnerEnvironment
+          : {
+              ...copiedEnv.runnerEnvironment,
+              ...(options.inline.setupScript === undefined ||
+              options.inline.setupScript === ""
+                ? {}
+                : { setupScript: options.inline.setupScript }),
+              ...(options.inline.network === undefined ||
+              options.inline.network.mode === "off"
+                ? {}
+                : { network: options.inline.network }),
             };
 
       if (costLimitCents !== null) {

@@ -316,7 +316,7 @@ class _Handler(socketserver.BaseRequestHandler):
             return
         name = ascii_name(authority.host) or authority.host
         gate = proxy.registry_gate
-        if gate is not None and is_registry_name(name):
+        if gate is not None and proxy.intercepts(name):
             self._registry(client, gate, name, authority, path, decision.addresses, head.rest)
             return
         upstream = self._connect(decision.addresses, authority.port)
@@ -409,12 +409,15 @@ class ProxyServer(socketserver.ThreadingTCPServer):
         connector: Connector = tcp_connector,
         max_connections: int = MAX_CONNECTIONS,
         registry_gate: RegistryGate | None = None,
+        intercepts: Callable[[str], bool] = is_registry_name,
         voice: str = "network door",
     ) -> None:
         # Who speaks in the body of a refusal: the outer wall's proxy (#979) is this class too.
         self.voice = voice
         self.decider = decider
         self.registry_gate = registry_gate
+        # Which names the gate reads: the registries, and a rule's read-only hosts (#1126).
+        self.intercepts = intercepts
         self.log = decider.log
         self.connector = connector
         self.slots = threading.BoundedSemaphore(max_connections)

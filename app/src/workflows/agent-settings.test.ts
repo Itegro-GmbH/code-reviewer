@@ -275,8 +275,8 @@ describe("an agent step with settings of its own (#1105)", () => {
   });
 
   describe("setupScript and network (decision 11)", () => {
-    // #1105-T14
-    it("are refused in an environment that runs on a runner, each at its own place", () => {
+    // #1105-T14, #1126-V03
+    it("are taken in an environment that runs on a runner too (ADR 0007, decision 11 as amended)", () => {
       expect(
         codes(
           lane(
@@ -287,10 +287,7 @@ describe("an agent step with settings of its own (#1105)", () => {
             }),
           ),
         ),
-      ).toEqual([
-        ["/steps/0/network", "hosted_only_setting"],
-        ["/steps/0/setupScript", "hosted_only_setting"],
-      ]);
+      ).toEqual([]);
     });
 
     // #1105-T15
