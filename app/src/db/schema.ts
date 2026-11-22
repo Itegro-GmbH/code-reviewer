@@ -1733,10 +1733,12 @@ export interface JiraConnectionsTable {
   connected_by: string | null;
   /** The generation whose derived secret the connection's webhook address carries (#1131); a rotation counts it up. */
   webhook_generation: ColumnType<number, number | undefined, number>;
-  /** When that address was put in place (what its rotation is measured from); null while no webhook of the connection is registered under it. */
+  /** When that address was put in place, that is when its generation began (what its rotation is measured from); null until a webhook is first registered under it. */
   webhook_address_at: string | null;
   /** When a bearer token that verified was first seen on a delivery of the connection's address (trust on first use); null while none was. */
   webhook_bearer_seen_at: string | null;
+  /** The SHA-256 of the derived secret the address was registered with (never the secret): a change of the app secret shows as another one (#1131). Null until a webhook is registered under the address. */
+  webhook_secret_fingerprint: string | null;
   created_at: string;
   updated_at: string;
 }

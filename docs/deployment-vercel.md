@@ -90,12 +90,13 @@ and uses Postgres only.
 - No work at start: the schema is migrated by a command (`pnpm migrate`), the first-run setup code is made by a
   command (`pnpm setup-code`), and `/api/health` answers `503` with `{"status":"error","code":"SCHEMA_BEHIND"}` while
   the database lacks a migration of this version.
-- Four crons (`app/vercel.json`): `/api/internal/repository-sync` once a day, `/api/internal/dispatch-sweep` **every
+- Five cron entries (`app/vercel.json`): `/api/internal/repository-sync` once a day, `/api/internal/dispatch-sweep` **every
   2 hours**, `/api/internal/tracker-resync` once a night (the full sync of the ticket mirror of every active project,
   #932: it heals what a missed delivery left behind; a deployment without the factory answers `skipped` and asks GitHub
   for nothing) and `/api/internal/jira-webhooks` once a night (#1039: extends the Jira webhooks the factory registered itself,
-  which Atlassian ends after 30 days; `skipped` without the factory or the Atlassian settings, `docs/jira-cloud-setup.md`).
-  All four need `CRON_SECRET`.
+  which Atlassian ends after 30 days; `skipped` without the factory or the Atlassian settings, `docs/jira-cloud-setup.md`), and
+  `/api/internal/jira-webhooks?retry=pending` every 15 minutes (#1131: the same route, walking only the webhooks that wait for a
+  registration after a move of a connection's webhooks). All of them need `CRON_SECRET`.
 
 ## 2. What you need first
 

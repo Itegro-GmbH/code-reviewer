@@ -104,6 +104,8 @@ const GERMAN_STATUSES = [
 ];
 
 async function world(options: { german?: boolean } = {}) {
+  /** The app secret the server runs with; a test changes it to find out what a rotated app secret does to the addresses. */
+  let appSecret = APP_SECRET;
   const h = await createJiraHarness({
     atlassian: {
       sites: [SITE],
@@ -191,8 +193,10 @@ async function world(options: { german?: boolean } = {}) {
     api: createJiraWebhookApi({ tokens }),
     publicUrl: receiver.url,
     addressSecret: (connectionId, generation) =>
-      deriveWebhookSecret(APP_SECRET, connectionId, generation),
+      deriveWebhookSecret(appSecret, connectionId, generation),
     now: h.now,
+    // The pauses between the tries of a move are not waited for.
+    sleep: async () => undefined,
     log: h.logs.push.bind(h.logs),
   });
 
@@ -248,7 +252,7 @@ async function world(options: { german?: boolean } = {}) {
   handler = createJiraWebhookHandler({
     directory,
     addressSecret: (connectionId, generation) =>
-      deriveWebhookSecret(APP_SECRET, connectionId, generation),
+      deriveWebhookSecret(appSecret, connectionId, generation),
     deliveries: createWebhookDeliveriesRepository(h.db),
     clientSecret: () => h.atlassian.clientSecret,
     workspace: () => ({
@@ -335,6 +339,7 @@ async function world(options: { german?: boolean } = {}) {
     receiver,
     directory,
     kicked,
+    changeAppSecret: (next: string) => (appSecret = next),
     createJiraProject,
     createSecondJiraProject,
     moveTo,
@@ -1071,6 +1076,7 @@ describe("the compare-and-set of a registration, against the real table", () => 
         "7001",
         new Date(w.h.clock.time + 30 * DAY).toISOString(),
         "attempt-a",
+        "fingerprint",
       ),
     ).toBe(false);
     expect(
@@ -1079,6 +1085,7 @@ describe("the compare-and-set of a registration, against the real table", () => 
         "7002",
         new Date(w.h.clock.time + 30 * DAY).toISOString(),
         "attempt-b",
+        "fingerprint",
       ),
     ).toBe(true);
     expect(await w.webhooks.getByProject(project.id)).toMatchObject({
@@ -1105,6 +1112,7 @@ describe("the compare-and-set of a registration, against the real table", () => 
         "7003",
         new Date(w.h.clock.time + 30 * DAY).toISOString(),
         "attempt-d",
+        "fingerprint",
       ),
     ).toBe(false);
     // The first token of a connection is noted once.
@@ -1290,6 +1298,268 @@ describe("two projects on one Jira connection (#1131)", () => {
       status: "pending",
       errorCode: "jira_webhook_url_conflict",
     });
+  });
+});
+
+/**
+ * The state live before #1131: the first project registered under its own address (`?w=&s=`, a token of it already seen), the second pending
+ * after Jira's refusal. Nothing but the rows and the one webhook at the fake.
+ */
+async function seedLegacyProjects(w: Awaited<ReturnType<typeof world>>) {
+  w.h.atlassian.setIssues(SITE.id, [
+    ISSUE,
+    { ...ISSUE, id: "10050", key: "NEW-3", summary: "Another project's" },
+  ]);
+  const api = createJiraWebhookApi({
+    tokens: w.h.jira.tokensFor(w.workspace.id),
+  });
+  const activated = async (repositoryId: string, projectKey: string) => {
+    const result = await w.projects.activate(repositoryId, {
+      jira: { connectionId: w.connection.id, projectKey },
+    });
+    if (result.kind !== "activated") throw new Error("seeding failed");
+    return result.project;
+  };
+  const first = await activated(w.repository.id, "PROJ");
+  const second = await activated(w.repository2.id, "NEW");
+  const oldSecret = "old-secret-of-the-first-project";
+  const made = await api.register(w.connection.id, {
+    url: `${w.receiver.url}/api/webhooks/jira?w=old-1&s=${oldSecret}`,
+    jql: "project = PROJ",
+    events: ["jira:issue_created", "jira:issue_updated"],
+  });
+  if (!made.ok) throw new Error("seeding failed");
+  await w.webhooks.create({
+    id: "old-1",
+    projectId: first.id,
+    connectionId: w.connection.id,
+    projectKey: "PROJ",
+    legacySecretHash: hashWebhookSecret(oldSecret),
+  });
+  const bearerSeenAt = new Date(w.h.clock.time - DAY).toISOString();
+  await w.h.db
+    .updateTable("jira_webhooks")
+    .set({
+      status: "active",
+      jira_webhook_id: made.webhookId,
+      expires_at: new Date(w.h.clock.time + 20 * DAY).toISOString(),
+      registered_at: new Date(w.h.clock.time).toISOString(),
+      bearer_seen_at: bearerSeenAt,
+    })
+    .where("id", "=", "old-1")
+    .execute();
+  await w.webhooks.create({
+    id: "old-2",
+    projectId: second.id,
+    connectionId: w.connection.id,
+    projectKey: "NEW",
+    legacySecretHash: hashWebhookSecret("old-secret-of-the-second"),
+  });
+  await w.webhooks.markError("old-2", "jira_webhook_rejected");
+  return { first, second, bearerSeenAt, oldWebhookId: made.webhookId };
+}
+
+/** What a connection's rows and the webhooks at Jira say now: each row's webhook exists, and every webhook at Jira is a row's. */
+async function expectNoOrphans(w: Awaited<ReturnType<typeof world>>) {
+  const atJira = w.h.atlassian.webhooks().map((hook) => String(hook.id));
+  const rows = (await w.webhooks.list()).flatMap((row) =>
+    row.jiraWebhookId === null ? [] : [row.jiraWebhookId],
+  );
+  expect(atJira.sort()).toEqual(rows.sort());
+}
+
+describe("after the review of #1133, against the real table and the fake Jira", () => {
+  // #1131-T12
+  it("carries the first verified token of the old addresses over to the connection, and keeps the fingerprint of the secret it registered with", async () => {
+    const w = await world();
+    const seeded = await seedLegacyProjects(w);
+    expect(await w.registrar.reconcile(seeded.second.id)).toEqual({
+      outcome: "registered",
+    });
+    const endpoint = await w.webhooks.getEndpoint(w.connection.id);
+    // Without it the connection would accept token-less deliveries again until the first verified token.
+    expect(endpoint?.bearerSeenAt).toBe(seeded.bearerSeenAt);
+    expect(endpoint?.secretFingerprint).toBe(
+      hashWebhookSecret(deriveWebhookSecret(APP_SECRET, w.connection.id, 1)),
+    );
+    await expectNoOrphans(w);
+  });
+
+  // #1131-T12
+  it("moves once: a second mover that read the same rows changes nothing of the rows the first one registered", async () => {
+    const w = await world();
+    const seeded = await seedLegacyProjects(w);
+    expect(await w.registrar.reconcile(seeded.second.id)).toEqual({
+      outcome: "registered",
+    });
+    const before = await w.webhooks.list();
+    // The second reconcile read the rows as they were (under their own address); its generation check alone would let it pass.
+    expect(
+      await w.webhooks.moveToSharedAddress(w.connection.id, {
+        rotate: false,
+        expectedGeneration: 1,
+        errorCode: "jira_webhook_move_pending",
+      }),
+    ).toBe(false);
+    expect(await w.webhooks.list()).toEqual(before);
+    for (const row of before) expect(row.status).toBe("active");
+    await expectNoOrphans(w);
+  });
+
+  // #1131-T12
+  it("leaves no webhook at Jira without a row when two reconciles of the connection run at the same moment", async () => {
+    const w = await world();
+    const seeded = await seedLegacyProjects(w);
+    const [a, b] = await Promise.all([
+      w.registrar.reconcile(seeded.first.id),
+      w.registrar.reconcile(seeded.second.id),
+    ]);
+    expect(a.outcome).not.toBe("failed");
+    expect(b.outcome).not.toBe("failed");
+    // Whatever the interleaving: both rows are live under the shared address, and the webhooks at Jira are exactly theirs.
+    for (const id of ["old-1", "old-2"])
+      expect(
+        await w.h.db
+          .selectFrom("jira_webhooks")
+          .selectAll()
+          .where("id", "=", id)
+          .executeTakeFirst(),
+      ).toMatchObject({ status: "active", address: "connection" });
+    expect(w.h.atlassian.webhooks()).toHaveLength(2);
+    await expectNoOrphans(w);
+  });
+
+  // #1131-T13
+  it("rotates although a webhook of a row has expired at Jira, also when Jira answers 400 to a delete that names an id it forgot", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    await w.createSecondJiraProject();
+    const [lost] = w.h.atlassian.webhooks();
+    if (lost === undefined) throw new Error("seeding failed");
+    w.h.atlassian.dropWebhook(lost.id);
+    w.h.atlassian.strictWebhookDelete(true);
+    w.h.clock.time += 26 * DAY;
+    // The first reconcile of the rotation: the delete of both ids is a 400, the one id that exists is deleted, the rotation goes on.
+    expect(await w.registrar.reconcile(project.id)).toEqual({
+      outcome: "registered",
+    });
+    expect(await w.webhooks.getEndpoint(w.connection.id)).toMatchObject({
+      generation: 2,
+    });
+    expect(w.h.atlassian.webhooks()).toHaveLength(2);
+    await expectNoOrphans(w);
+  });
+
+  // #1131-T14
+  it("registers again at once when Jira fails once after the old webhooks are deleted", async () => {
+    const w = await world();
+    const seeded = await seedLegacyProjects(w);
+    w.h.atlassian.failNextWebhookRegistrations(1);
+    expect(await w.registrar.reconcile(seeded.second.id)).toEqual({
+      outcome: "registered",
+    });
+    expect(w.h.atlassian.webhooks()).toHaveLength(2);
+    for (const id of ["old-1", "old-2"])
+      expect(
+        await w.h.db
+          .selectFrom("jira_webhooks")
+          .selectAll()
+          .where("id", "=", id)
+          .executeTakeFirst(),
+      ).toMatchObject({ status: "active", error_code: null });
+    await expectNoOrphans(w);
+  });
+
+  // #1131-T14
+  it("leaves the moved projects pending and visible when Jira keeps failing, and the next run registers them", async () => {
+    const w = await world();
+    const seeded = await seedLegacyProjects(w);
+    // Every try of the first project fails (three); the second one's registration goes through, as it does in the same reconcile.
+    w.h.atlassian.failNextWebhookRegistrations(3);
+    expect(await w.registrar.reconcile(seeded.second.id)).toEqual({
+      outcome: "registered",
+    });
+    expect(await w.webhooks.getByProject(seeded.first.id)).toMatchObject({
+      status: "pending",
+      errorCode: "jira_unavailable",
+    });
+    expect(
+      w.h.logs.some((line) =>
+        line.includes("JIRA_WEBHOOK_MOVE_REGISTER_FAILED"),
+      ),
+    ).toBe(true);
+    // The frequent run of the cron job finds the row that is due, and only that one.
+    const due = await w.directory.listProjects(10, { due: true });
+    expect(due.map((target) => target.projectId)).toEqual([seeded.first.id]);
+    expect(await w.registrar.reconcile(seeded.first.id)).toEqual({
+      outcome: "registered",
+    });
+    expect(w.h.atlassian.webhooks()).toHaveLength(2);
+    await expectNoOrphans(w);
+  });
+
+  // #1131-T16
+  it("notices a changed app secret in the next reconcile: deliveries are refused until then, and accepted again under the new address", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    const hook = await w.hook();
+    expect(
+      (await w.h.atlassian.deliver(hook.id, w.moveTo("Ready for agent")))
+        .status,
+    ).toBe(200);
+
+    w.changeAppSecret("a-rotated-app-secret");
+    // The address Jira holds carries the old secret: refused (the failure the review was about).
+    expect(
+      (
+        await w.h.atlassian.deliver(hook.id, {
+          ...w.moveTo("Ready for agent"),
+          identifier: "after-the-change",
+        })
+      ).status,
+    ).toBe(401);
+
+    expect(await w.registrar.reconcile(project.id)).toEqual({
+      outcome: "registered",
+    });
+    const fresh = await w.hook();
+    expect(fresh.id).not.toBe(hook.id);
+    expect(
+      (
+        await w.h.atlassian.deliver(fresh.id, {
+          ...w.moveTo("Ready for agent"),
+          identifier: "under-the-new-secret",
+        })
+      ).status,
+    ).toBe(200);
+    expect(await w.registrar.reconcile(project.id)).toEqual({
+      outcome: "unchanged",
+    });
+    await expectNoOrphans(w);
+  });
+
+  // #1131-T15
+  it("deletes an orphan webhook that holds the single address, and registers the project", async () => {
+    const w = await world();
+    // A webhook of the same app and user under another address, that no row knows (the unknown outcome of an old registration).
+    await createJiraWebhookApi({
+      tokens: w.h.jira.tokensFor(w.workspace.id),
+    }).register(w.connection.id, {
+      url: `${w.receiver.url}/an-orphan`,
+      jql: "project = OTHER",
+      events: ["jira:issue_updated"],
+    });
+    // Made long ago, as far as the server's clock is concerned (the fake dates it with the wall clock).
+    w.h.clock.time = Date.now() + DAY;
+    const project = await w.createJiraProject();
+    expect(await w.webhooks.getByProject(project.id)).toMatchObject({
+      status: "active",
+      errorCode: null,
+    });
+    expect(w.h.atlassian.webhooks().map((hook) => hook.jql)).toEqual([
+      "project = PROJ",
+    ]);
+    await expectNoOrphans(w);
   });
 });
 

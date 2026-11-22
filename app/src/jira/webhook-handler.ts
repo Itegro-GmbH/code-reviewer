@@ -247,11 +247,21 @@ export function createJiraWebhookHandler(
         deps
           .workspace(endpoint.workspaceId)
           .registrations.markEndpointBearerSeen(endpoint.connectionId);
+      // The secret is derived from the app secret: when that does not resolve, the delivery is refused like any other (not an uncaught 500).
+      let storedSecretHash: string;
+      try {
+        storedSecretHash = hashWebhookSecret(
+          deps.addressSecret(endpoint.connectionId, endpoint.generation),
+        );
+      } catch (error) {
+        logger.warn(
+          `[jira-webhook] refused: ${who} the address secret is not available (${errorCodeOf(error)})`,
+        );
+        return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
+      }
       verdict = verifyJiraDelivery({
         urlSecret: address.searchParams.get("s"),
-        storedSecretHash: hashWebhookSecret(
-          deps.addressSecret(endpoint.connectionId, endpoint.generation),
-        ),
+        storedSecretHash,
         bearerSeen: endpoint.bearerSeenAt !== null,
         authorization: request.headers.get("authorization"),
         clientSecret,

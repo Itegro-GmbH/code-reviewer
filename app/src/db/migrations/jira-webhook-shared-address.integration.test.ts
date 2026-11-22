@@ -64,7 +64,7 @@ describe("the migration for one webhook address per Jira connection", () => {
 
     expect(executed).toContain(THIS);
     const { rows } = await sql<Record<string, unknown>>`
-      select w.id, w.secret_hash, w.address, w.registration_attempt, c.webhook_generation, c.webhook_address_at, c.webhook_bearer_seen_at
+      select w.id, w.secret_hash, w.address, w.registration_attempt, c.webhook_generation, c.webhook_address_at, c.webhook_bearer_seen_at, c.webhook_secret_fingerprint
       from jira_webhooks w join jira_connections c on c.id = w.connection_id`.execute(
       db,
     );
@@ -77,6 +77,7 @@ describe("the migration for one webhook address per Jira connection", () => {
         webhook_generation: 1,
         webhook_address_at: null,
         webhook_bearer_seen_at: null,
+        webhook_secret_fingerprint: null,
       },
     ]);
     await db.destroy();
@@ -144,7 +145,7 @@ describe("the migration for one webhook address per Jira connection", () => {
     const { rows: columns } = await sql<{
       name: string;
     }>`select table_name || '.' || column_name as name from information_schema.columns
-      where table_schema = 'public' and column_name in ('address', 'registration_attempt', 'webhook_generation')`.execute(
+      where table_schema = 'public' and column_name in ('address', 'registration_attempt', 'webhook_generation', 'webhook_secret_fingerprint')`.execute(
       db,
     );
     expect(columns).toEqual([]);

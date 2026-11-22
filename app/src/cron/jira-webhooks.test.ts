@@ -52,6 +52,35 @@ describe("the nightly Jira webhook job", () => {
     }
   });
 
+  // #1131-T14
+  it("walks only the webhooks that wait for a try when it is called with ?retry=pending, and the whole list otherwise", async () => {
+    const asked: { due: boolean }[] = [];
+    const call = (query: string) =>
+      handleJiraWebhooksCron(
+        new Request(
+          `https://factory.example.test/api/internal/jira-webhooks${query}`,
+          { headers: { authorization: `Bearer ${SECRET}` } },
+        ),
+        {
+          env: { CRON_SECRET: SECRET },
+          enabled: () => true,
+          targets: async (_limit, options) => {
+            asked.push(options);
+            return TARGETS.slice(0, 1);
+          },
+          reconcile: async () => ({ outcome: "registered" }),
+          log: () => undefined,
+        },
+      );
+    expect(await (await call("?retry=pending")).json()).toMatchObject({
+      status: "ok",
+      registered: 1,
+    });
+    await call("");
+    await call("?retry=something-else");
+    expect(asked).toEqual([{ due: true }, { due: false }, { due: false }]);
+  });
+
   // #1039
   it("skips where the factory or the Atlassian settings are missing", async () => {
     const { response, seen } = run({}, { enabled: () => false });

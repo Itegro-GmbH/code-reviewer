@@ -7,8 +7,11 @@
 // The address of a connection carries a secret that is derived, not stored (`src/jira/webhook-verify.ts`, `deriveWebhookSecret`): from the app
 // secret, the connection id and a number, `webhook_generation`. A rotation counts it up. The rows keep only what the nightly job needs:
 //   - `jira_connections.webhook_generation`: the generation whose secret the address carries (1 until a rotation);
-//   - `jira_connections.webhook_address_at`: when that address was put in place (what its rotation is measured from); null while no webhook of the
-//     connection is registered under it;
+//   - `jira_connections.webhook_address_at`: when that address was put in place, that is when its generation began (what its rotation is measured
+//     from); null until a webhook is first registered under it;
+//   - `jira_connections.webhook_secret_fingerprint`: the SHA-256 of the derived secret the address was registered with (never the secret itself), so
+//     that a change of the app secret, which changes every derived secret, is noticed and the address registered again; null until a webhook is
+//     registered under it;
 //   - `jira_connections.webhook_bearer_seen_at`: when a bearer token that verified was first seen on a delivery of the connection (trust on
 //     first use, per connection now);
 //   - `jira_webhooks.address`: `project` for a webhook registered under the old per-project address (every row that exists: it keeps working
@@ -39,7 +42,8 @@ export const migration: Migration = {
     await sql`alter table jira_connections
       add column webhook_generation integer not null default 1,
       add column webhook_address_at text,
-      add column webhook_bearer_seen_at text`.execute(db);
+      add column webhook_bearer_seen_at text,
+      add column webhook_secret_fingerprint text`.execute(db);
     await sql`alter table jira_webhooks
       add column address text not null default 'project',
       add column registration_attempt text`.execute(db);
@@ -72,6 +76,7 @@ export const migration: Migration = {
       drop column registration_attempt,
       drop column address`.execute(db);
     await sql`alter table jira_connections
+      drop column webhook_secret_fingerprint,
       drop column webhook_bearer_seen_at,
       drop column webhook_address_at,
       drop column webhook_generation`.execute(db);

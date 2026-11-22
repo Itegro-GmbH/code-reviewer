@@ -108,7 +108,7 @@ projectKey }` looks at the repository first (unknown, unavailable, or a project 
 The factory registers **its own dynamic webhook** per project with a Jira source (`webhook-registrar.ts`; nothing to do in Jira) and Jira calls
 `POST /api/webhooks/jira?c=<connection>&s=<secret>` (#1131): Jira allows one address per app and user, so the webhooks of all projects of a connection share
 it and the project of a delivery is found by the project key of its issue. The secret is derived (`deriveWebhookSecret`: `APP_SECRET`, the connection, its
-`webhook_generation`) and never stored; the nightly job rotates it by deleting and registering again all webhooks of the connection (`settleAddress`), which also
+`webhook_generation`) and never stored; the nightly job rotates it by deleting and registering again all webhooks of the connection (`settleAddress`; a moved row is compare-and-set, so two runs move once; the gap is kept short with immediate retries, the rows wait `pending` with `jira_webhook_move_pending` for the 15-minute `?retry=pending` run; a changed `APP_SECRET` shows as another `webhook_secret_fingerprint` and is rotated like an old address; an orphan that holds the address is deleted on `jira_webhook_url_conflict`), which also
 moves a webhook that still has its own address from before (`?w=<registration>&s=<secret>`, `jira_webhooks.address = 'project'`, accepted until it moves). The route is public
 (the secret is the credential) and a hosted deployment without the factory answers 404 for it. The table is `jira_webhooks`
 (`src/db/migrations/20261114180000_create_jira_webhooks.ts`, `20261122120000_jira_webhook_shared_address.ts`; the generation, the start of the address and the first verified bearer token are

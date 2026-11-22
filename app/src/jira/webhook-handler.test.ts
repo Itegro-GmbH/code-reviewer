@@ -122,6 +122,8 @@ function setup(
     rows?: StoredJiraWebhook[];
     /** The projects by id, for a delivery that reaches several; left out: `PROJECT` (or `options.project`). */
     projects?: Record<string, StoredProject>;
+    /** The app secret does not resolve (so no address secret can be derived). */
+    addressSecretFails?: boolean;
   } = {},
 ) {
   const calls: string[] = [];
@@ -188,8 +190,11 @@ function setup(
             : ENDPOINT
           : undefined,
     },
-    addressSecret: (connectionId, generation) =>
-      deriveWebhookSecret(APP_SECRET, connectionId, generation),
+    addressSecret: (connectionId, generation) => {
+      if (options.addressSecretFails === true)
+        throw new Error("APP_SECRET is not set");
+      return deriveWebhookSecret(APP_SECRET, connectionId, generation);
+    },
     deliveries,
     clientSecret: () =>
       options.configured === false ? undefined : "client-secret",
@@ -622,6 +627,20 @@ describe("the shared address of a connection (#1131)", () => {
     }
     expect(t.calls).toEqual([]);
     expect(t.lines.join("\n")).not.toContain(SHARED_SECRET);
+  });
+
+  // #1131-T03
+  it("refuses with the one 401 when the app secret does not resolve, instead of failing with an uncaught 500", async () => {
+    const t = setup({ rows: [SHARED_ROW], addressSecretFails: true });
+    const response = await t.handler(
+      t.request(payload(), { query: "c=conn-1&s=" + SHARED_SECRET }),
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: "JIRA_WEBHOOK_UNAUTHORIZED",
+    });
+    expect(t.calls).toEqual([]);
+    expect(t.lines.join("\n")).toContain("address secret is not available");
   });
 
   // #1131-T03

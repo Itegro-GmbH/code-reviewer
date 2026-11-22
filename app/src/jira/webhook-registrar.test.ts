@@ -28,6 +28,7 @@ type Endpoint = {
   generation: number;
   addressAt: string | null;
   bearerSeenAt: string | null;
+  secretFingerprint: string | null;
 };
 
 function memoryWebhooks(): JiraWebhooksRepository & {
@@ -36,7 +37,15 @@ function memoryWebhooks(): JiraWebhooksRepository & {
 } {
   const rows = new Map<string, StoredJiraWebhook>();
   const endpoints = new Map<string, Endpoint>([
-    ["c1", { generation: 1, addressAt: null, bearerSeenAt: null }],
+    [
+      "c1",
+      {
+        generation: 1,
+        addressAt: null,
+        bearerSeenAt: null,
+        secretFingerprint: null,
+      },
+    ],
   ]);
   const byId = (id: string) => [...rows.values()].find((row) => row.id === id);
   const put = (
@@ -75,7 +84,7 @@ function memoryWebhooks(): JiraWebhooksRepository & {
       endpoint.bearerSeenAt = clock.now.toISOString();
       return true;
     },
-    // The same effects as the SQL of the real repository.
+    // The same effects and conditions as the SQL of the real repository.
     async moveToSharedAddress(connectionId, options) {
       const endpoint = endpoints.get(connectionId);
       if (
@@ -83,24 +92,40 @@ function memoryWebhooks(): JiraWebhooksRepository & {
         endpoint.generation !== options.expectedGeneration
       )
         return false;
+      const mine = [...rows.values()].filter(
+        (row) => row.connectionId === connectionId,
+      );
+      const toReset = mine.filter(
+        (row) =>
+          row.status !== "removing" &&
+          row.jiraWebhookId !== null &&
+          (options.rotate || row.address === "project"),
+      );
+      const removing = mine.filter((row) => row.status === "removing");
+      if (!options.rotate && toReset.length + removing.length === 0)
+        return false;
       if (options.rotate) endpoint.generation += 1;
       endpoint.addressAt = clock.now.toISOString();
-      for (const row of [...rows.values()]) {
-        if (row.connectionId !== connectionId) continue;
-        if (row.status === "removing") rows.delete(row.projectId);
-        else if (row.jiraWebhookId !== null)
-          rows.set(row.projectId, {
-            ...row,
-            status: "pending",
-            address: "connection",
-            secretHash: null,
-            pendingSecretHash: null,
-            registrationAttempt: null,
-            jiraWebhookId: null,
-            expiresAt: null,
-            registeredAt: null,
-          });
-      }
+      endpoint.secretFingerprint = null;
+      endpoint.bearerSeenAt ??=
+        mine
+          .map((row) => row.bearerSeenAt)
+          .filter((seen): seen is string => seen !== null)
+          .sort()[0] ?? null;
+      for (const row of removing) rows.delete(row.projectId);
+      for (const row of toReset)
+        rows.set(row.projectId, {
+          ...row,
+          status: "pending",
+          address: "connection",
+          secretHash: null,
+          pendingSecretHash: null,
+          registrationAttempt: null,
+          jiraWebhookId: null,
+          expiresAt: null,
+          registeredAt: null,
+          errorCode: options.errorCode,
+        });
       return true;
     },
     async create(input) {
@@ -136,7 +161,13 @@ function memoryWebhooks(): JiraWebhooksRepository & {
         return false;
       return put(row, { registrationAttempt: attempt });
     },
-    async markRegistered(id, jiraWebhookId, expiresAt, attempt) {
+    async markRegistered(
+      id,
+      jiraWebhookId,
+      expiresAt,
+      attempt,
+      secretFingerprint,
+    ) {
       const row = byId(id);
       if (
         row === undefined ||
@@ -144,16 +175,11 @@ function memoryWebhooks(): JiraWebhooksRepository & {
         row.registrationAttempt !== attempt
       )
         return false;
-      const others = [...rows.values()].some(
-        (other) =>
-          other.connectionId === row.connectionId &&
-          other.id !== id &&
-          other.status === "active" &&
-          other.address === "connection",
-      );
       const endpoint = endpoints.get(row.connectionId);
-      if (endpoint !== undefined && !(others && endpoint.addressAt !== null))
-        endpoint.addressAt = clock.now.toISOString();
+      if (endpoint !== undefined) {
+        endpoint.addressAt ??= clock.now.toISOString();
+        endpoint.secretFingerprint = secretFingerprint;
+      }
       return put(row, {
         status: "active",
         address: "connection",
@@ -228,12 +254,22 @@ function setup(project: StoredProject | undefined | "none" = jiraProject()) {
       }
     | undefined;
   let registerFailure: "jira_webhook_limit" | "jira_unavailable" | undefined;
+  /** The next registrations fail with these, one each, before any other answer applies. */
+  const registerFailures: (
+    "jira_unavailable" | "jira_webhook_url_conflict" | "throw"
+  )[] = [];
+  let appSecret = APP_SECRET;
+  let whileRemoving: (call: number) => Promise<void> = async () => undefined;
+  let removeCalls = 0;
   let whileRegistering: (call: number) => Promise<void> = async () => undefined;
   let listed: { id: string; jql: string; expiresAt: string }[] = [];
   const api: JiraWebhookApi = {
     async register(connectionId, webhook) {
       calls.push("register");
       registered.push({ connectionId, ...webhook });
+      const next = registerFailures.shift();
+      if (next === "throw") throw new Error("the function timed out");
+      if (next !== undefined) return { ok: false, error: next };
       if (registerFailure !== undefined)
         return { ok: false, error: registerFailure };
       if (apiFailure !== undefined && apiFailure.error !== "jira_webhook_gone")
@@ -258,6 +294,8 @@ function setup(project: StoredProject | undefined | "none" = jiraProject()) {
     },
     async remove(connectionId, ids) {
       calls.push(`remove:${connectionId}:${ids.join(",")}`);
+      removeCalls += 1;
+      await whileRemoving(removeCalls);
       if (apiFailure !== undefined && apiFailure.error !== "jira_webhook_gone")
         return { ok: false, error: apiFailure.error };
       return { ok: true };
@@ -268,14 +306,18 @@ function setup(project: StoredProject | undefined | "none" = jiraProject()) {
   );
   let n = 0;
   let attempts = 0;
+  const sleeps: number[] = [];
   const registrar = createJiraWebhookRegistrar({
     webhooks,
     projects: { getById: async (id) => projects.get(id) },
     api,
     publicUrl: "https://app.example.test",
     addressSecret: (connectionId, generation) =>
-      deriveWebhookSecret(APP_SECRET, connectionId, generation),
+      deriveWebhookSecret(appSecret, connectionId, generation),
     now: () => clock.now,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
     newId: () => `reg-${String((n += 1))}`,
     newAttempt: () => `attempt-${String((attempts += 1))}`,
     log: () => undefined,
@@ -284,6 +326,7 @@ function setup(project: StoredProject | undefined | "none" = jiraProject()) {
   return {
     webhooks,
     registrar,
+    sleeps,
     calls,
     registered,
     setProject: (next: StoredProject) => projects.set(next.id, next),
@@ -292,6 +335,13 @@ function setup(project: StoredProject | undefined | "none" = jiraProject()) {
     failWith: (error: typeof apiFailure) => (apiFailure = error),
     failRegisterWith: (error: typeof registerFailure) =>
       (registerFailure = error),
+    /** The next registrations fail with these, one each. */
+    failRegisterOnce: (...errors: typeof registerFailures) =>
+      registerFailures.push(...errors),
+    /** Runs when a deletion arrives at Jira (before it answers); `call` counts the deletions. */
+    onRemove: (hook: typeof whileRemoving) => (whileRemoving = hook),
+    /** The app secret changes (every derived secret with it). */
+    changeAppSecret: (next: string) => (appSecret = next),
     /** Runs while a registration is at Jira (after it made the webhook, before it answers); `call` counts the registrations. */
     during: (hook: typeof whileRegistering) => (whileRegistering = hook),
     jiraHas: (webhooks: typeof listed) => (listed = webhooks),
@@ -797,6 +847,7 @@ describe("one address for the projects of a connection", () => {
       generation: 1,
       addressAt: null,
       bearerSeenAt: null,
+      secretFingerprint: null,
     });
     t.addProject(project("p2", "SECOND", "c2"));
     await t.registrar.reconcile("p1");
@@ -969,6 +1020,341 @@ describe("a deletion Jira refuses", () => {
       outcome: "failed",
     });
     expect(t.webhooks.rows.get("p1")?.status).toBe("removing");
+  });
+});
+
+/** A live row as it was before #1131 (own address, own secret hash), or a pending one when `jiraWebhookId` is null. */
+function legacyRowOf(
+  t: ReturnType<typeof setup>,
+  projectId: string,
+  projectKey: string,
+  jiraWebhookId: string | null,
+) {
+  t.webhooks.rows.set(projectId, {
+    id: `old-${projectId}`,
+    workspaceId: "ws",
+    projectId,
+    connectionId: "c1",
+    projectKey,
+    secretHash: "a".repeat(64),
+    pendingSecretHash: null,
+    registrationAttempt: null,
+    address: "project",
+    status: jiraWebhookId === null ? "pending" : "active",
+    jiraWebhookId,
+    expiresAt:
+      jiraWebhookId === null
+        ? null
+        : new Date(NOW.getTime() + 20 * DAY).toISOString(),
+    registeredAt: jiraWebhookId === null ? null : NOW.toISOString(),
+    bearerSeenAt: null,
+    errorCode: null,
+    createdAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+  });
+}
+
+const projectOf = (id: string, projectKey: string) =>
+  jiraProject({
+    id,
+    ticketSource: {
+      provider: "jira",
+      repositoryId: "r1",
+      board: null,
+      connectionId: "c1",
+      projectKey,
+    },
+  });
+
+/** The ids a registrar asked Jira to delete, from the calls the fake API recorded. */
+const removedIds = (calls: readonly string[]) =>
+  calls
+    .filter((call) => call.startsWith("remove:"))
+    .flatMap((call) => call.split(":")[2]?.split(",") ?? [])
+    .filter((id) => id !== "");
+
+describe("two reconciles of one connection at the same time (review of #1133)", () => {
+  // #1131-T12
+  it("moves the webhooks under their own address ONCE: the second mover leaves the rows the first one registered alone", async () => {
+    const t = setup();
+    t.addProject(projectOf("p2", "TBP"));
+    legacyRowOf(t, "p1", "PROJ", "555");
+    legacyRowOf(t, "p2", "TBP", "556");
+
+    // The second reconcile read the rows before the first one moved them, and its deletion reaches Jira only when the first one is done.
+    let firstDone: () => void = () => undefined;
+    const first = new Promise<void>((done) => (firstDone = done));
+    t.onRemove(async (call) => {
+      if (call === 2) await first;
+    });
+    const [a, b] = await Promise.all([
+      t.registrar.reconcile("p1").finally(firstDone),
+      t.registrar.reconcile("p2"),
+    ]);
+    expect(a.outcome).not.toBe("failed");
+    expect(b.outcome).not.toBe("failed");
+
+    const rows = [t.webhooks.rows.get("p1"), t.webhooks.rows.get("p2")];
+    for (const row of rows)
+      expect(row).toMatchObject({
+        status: "active",
+        address: "connection",
+        errorCode: null,
+      });
+    const held = rows.map((row) => row?.jiraWebhookId);
+    expect(held).not.toContain(null);
+    expect(new Set(held).size).toBe(2);
+    // Every webhook that was registered is a row's, or was deleted again by the registration that lost: none is left at Jira without a row.
+    const gone = removedIds(t.calls);
+    for (let id = 1001; id <= 1000 + t.registered.length; id += 1)
+      expect([...held, ...gone]).toContain(String(id));
+    // And a webhook a row holds was never deleted.
+    for (const id of held) expect(gone).not.toContain(id);
+    // One generation: nothing was rotated by the second mover.
+    expect(t.webhooks.endpoints.get("c1")?.generation).toBe(1);
+  });
+});
+
+describe("a webhook Jira no longer knows (review of #1133)", () => {
+  // #1131-T13
+  it("does not stop a rotation: the row whose webhook is gone at Jira is deleted along with the others (Jira ignores the id)", async () => {
+    const t = setup();
+    t.addProject(projectOf("p2", "SECOND"));
+    await t.registrar.reconcile("p1");
+    await t.registrar.reconcile("p2");
+    clock.now = new Date(NOW.getTime() + ROTATE_AFTER_MS + DAY);
+    t.jiraHas([]);
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "registered",
+    });
+    expect(t.webhooks.endpoints.get("c1")?.generation).toBe(2);
+    expect(t.webhooks.rows.get("p2")).toMatchObject({ status: "active" });
+  });
+});
+
+describe("the gap between the deletion and the registration (review of #1133)", () => {
+  // #1131-T14
+  it("tries a registration again at once when Jira is unavailable after the move, and closes the gap", async () => {
+    const t = setup();
+    legacyRowOf(t, "p1", "PROJ", "555");
+    t.failRegisterOnce("jira_unavailable", "jira_unavailable");
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "registered",
+    });
+    expect(t.registered).toHaveLength(3);
+    // A pause before each further try, and nothing a failed try may have made is left behind (the list is looked at).
+    expect(t.sleeps).toEqual([300, 1500]);
+    expect(t.calls.filter((call) => call.startsWith("list:"))).toHaveLength(2);
+    expect(t.webhooks.rows.get("p1")).toMatchObject({
+      status: "active",
+      errorCode: null,
+    });
+  });
+
+  // #1131-T14
+  it("keeps the rows pending with the code of the failure when every try fails, and the next run registers them", async () => {
+    const t = setup();
+    legacyRowOf(t, "p1", "PROJ", "555");
+    t.failRegisterOnce(
+      "jira_unavailable",
+      "jira_unavailable",
+      "jira_unavailable",
+    );
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "failed",
+      error: "jira_unavailable",
+    });
+    expect(t.webhooks.rows.get("p1")).toMatchObject({
+      status: "pending",
+      jiraWebhookId: null,
+      address: "connection",
+      errorCode: "jira_unavailable",
+    });
+    // The retry run of the cron job (or the nightly one).
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "registered",
+    });
+    expect(t.webhooks.rows.get("p1")).toMatchObject({
+      status: "active",
+      errorCode: null,
+    });
+  });
+
+  // #1131-T14
+  it("marks the moved rows as due before Jira is asked, so that a function that dies on the way leaves them visible and retried", async () => {
+    const t = setup();
+    t.addProject(projectOf("p2", "TBP"));
+    legacyRowOf(t, "p1", "PROJ", "555");
+    legacyRowOf(t, "p2", "TBP", "556");
+    t.failRegisterOnce("throw");
+    await expect(t.registrar.reconcile("p1")).rejects.toThrow("timed out");
+    for (const id of ["p1", "p2"])
+      expect(t.webhooks.rows.get(id)).toMatchObject({
+        status: "pending",
+        jiraWebhookId: null,
+        errorCode: "jira_webhook_move_pending",
+      });
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "registered",
+    });
+    expect(await t.registrar.reconcile("p2")).toEqual({
+      outcome: "registered",
+    });
+    expect(t.webhooks.rows.get("p2")).toMatchObject({
+      status: "active",
+      errorCode: null,
+    });
+  });
+
+  // #1131-T14
+  it("registers the other projects of the connection after the first one, not one after the other", async () => {
+    const t = setup();
+    t.addProject(projectOf("p2", "TBP"));
+    t.addProject(projectOf("p3", "THIRD"));
+    legacyRowOf(t, "p1", "PROJ", "555");
+    legacyRowOf(t, "p2", "TBP", "556");
+    legacyRowOf(t, "p3", "THIRD", "557");
+    let inFlight = 0;
+    let most = 0;
+    t.during(async () => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((done) => setTimeout(done, 5));
+      inFlight -= 1;
+    });
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "registered",
+    });
+    expect(t.registered.map((call) => call.jql)[0]).toBe("project = PROJ");
+    expect(most).toBe(2);
+  });
+});
+
+describe("an orphan webhook that holds the address (review of #1133)", () => {
+  const listed = (id: string, daysLeft: number) => ({
+    id,
+    jql: "project = SOMETHING",
+    expiresAt: new Date(NOW.getTime() + daysLeft * DAY).toISOString(),
+  });
+
+  // #1131-T15
+  it("deletes the webhooks no row knows and registers again, but not a row's webhook or one made a moment ago", async () => {
+    const t = setup();
+    t.addProject(projectOf("p2", "SECOND"));
+    await t.registrar.reconcile("p2");
+    t.jiraHas([listed("1001", 29), listed("900", 20), listed("901", 30)]);
+    t.calls.length = 0;
+    t.failRegisterOnce("jira_webhook_url_conflict");
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "registered",
+    });
+    expect(t.calls).toEqual([
+      "register",
+      "list:c1",
+      "remove:c1:900",
+      "register",
+    ]);
+  });
+
+  // #1131-T15
+  it("stays a conflict when there is no webhook to delete, and asks nothing twice", async () => {
+    const t = setup();
+    t.jiraHas([]);
+    t.failRegisterOnce("jira_webhook_url_conflict");
+    t.failRegisterOnce("jira_webhook_url_conflict");
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "failed",
+      error: "jira_webhook_url_conflict",
+    });
+    expect(t.calls).toEqual(["register", "list:c1"]);
+    expect(t.webhooks.rows.get("p1")).toMatchObject({
+      errorCode: "jira_webhook_url_conflict",
+    });
+  });
+});
+
+describe("a changed app secret (review of #1133)", () => {
+  // #1131-T16
+  it("registers the connection's webhooks again under the secret the app secret gives now, once", async () => {
+    const t = setup();
+    t.addProject(projectOf("p2", "SECOND"));
+    await t.registrar.reconcile("p1");
+    await t.registrar.reconcile("p2");
+    t.registered.length = 0;
+    t.calls.length = 0;
+
+    t.changeAppSecret("a-rotated-app-secret");
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "registered",
+    });
+    expect(t.calls).toEqual(["remove:c1:1001,1002", "register", "register"]);
+    for (const call of t.registered)
+      expect(new URL(call.url).searchParams.get("s")).toBe(
+        deriveWebhookSecret("a-rotated-app-secret", "c1", 2),
+      );
+    expect(t.webhooks.rows.get("p2")).toMatchObject({ status: "active" });
+    // Registered under the new secret, it is the fingerprint now: nothing more happens.
+    t.calls.length = 0;
+    expect(await t.registrar.reconcile("p1")).toEqual({ outcome: "unchanged" });
+    expect(await t.registrar.reconcile("p2")).toEqual({ outcome: "unchanged" });
+    expect(t.calls).toEqual([]);
+  });
+
+  // #1131-T16
+  it("leaves an address alone whose fingerprint is not known (registered before it was kept)", async () => {
+    const t = setup();
+    await t.registrar.reconcile("p1");
+    const endpoint = t.webhooks.endpoints.get("c1");
+    if (endpoint !== undefined) endpoint.secretFingerprint = null;
+    t.changeAppSecret("a-rotated-app-secret");
+    t.calls.length = 0;
+    expect(await t.registrar.reconcile("p1")).toEqual({ outcome: "unchanged" });
+    expect(t.calls).toEqual([]);
+  });
+});
+
+describe("the age of the address (review of #1133)", () => {
+  // #1131-T17
+  it("does not start over when the last webhook of a connection goes and a new one comes within the rotation age", async () => {
+    const t = setup();
+    await t.registrar.reconcile("p1");
+    t.setProject(jiraProject({ active: false }));
+    clock.now = new Date(NOW.getTime() + 10 * DAY);
+    await t.registrar.reconcile("p1");
+    t.setProject(jiraProject());
+    clock.now = new Date(NOW.getTime() + 11 * DAY);
+    await t.registrar.reconcile("p1");
+    expect(t.webhooks.endpoints.get("c1")).toMatchObject({
+      generation: 1,
+      addressAt: NOW.toISOString(),
+    });
+    // The secret is as old as it is: after 25 days of it (not of the last registration) it is replaced.
+    clock.now = new Date(NOW.getTime() + ROTATE_AFTER_MS + DAY);
+    await t.registrar.reconcile("p1");
+    expect(t.webhooks.endpoints.get("c1")?.generation).toBe(2);
+  });
+
+  // #1131-T17
+  it("gives a connection that has no webhook the next generation when its address is old, instead of registering under the old secret", async () => {
+    const t = setup();
+    await t.registrar.reconcile("p1");
+    t.setProject(jiraProject({ active: false }));
+    await t.registrar.reconcile("p1");
+    expect(t.webhooks.rows.size).toBe(0);
+    clock.now = new Date(NOW.getTime() + ROTATE_AFTER_MS + DAY);
+    t.setProject(jiraProject());
+    t.registered.length = 0;
+    expect(await t.registrar.reconcile("p1")).toEqual({
+      outcome: "registered",
+    });
+    expect(t.registered).toHaveLength(1);
+    expect(new URL(t.registered[0]?.url ?? "").searchParams.get("s")).toBe(
+      deriveWebhookSecret(APP_SECRET, "c1", 2),
+    );
+    expect(t.webhooks.endpoints.get("c1")).toMatchObject({
+      generation: 2,
+      addressAt: clock.now.toISOString(),
+    });
   });
 });
 

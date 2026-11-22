@@ -26,8 +26,10 @@ export type JiraWebhookEndpoint = {
   connectionId: string;
   /** The generation whose derived secret the address carries (1 until a rotation). */
   generation: number;
-  /** When the address was put in place; null while no webhook of the connection is registered under it. */
+  /** When the address was put in place, that is when its generation began; null until a webhook is first registered under it. */
   addressAt: string | null;
+  /** The SHA-256 of the derived secret the address was registered with; null until a webhook is registered under it (or it is unknown). */
+  secretFingerprint: string | null;
   /** When a bearer token that verified was first seen on a delivery of the address; null while none was. */
   bearerSeenAt: string | null;
 };
@@ -88,13 +90,20 @@ export type JiraWebhooksRepository = {
   markEndpointBearerSeen(connectionId: string): Promise<boolean>;
   /**
    * Moves every webhook of the connection to the shared address after the caller deleted them at Jira (Jira allows one address per user, so
-   * they cannot be registered next to each other): the rows that were registered become `pending` again, those that were being removed go,
-   * the address starts now, and with `rotate` the generation counts up (a new secret). Only while the connection still has the generation the
-   * caller read; answers whether it moved.
+   * they cannot be registered next to each other): the rows that were registered become `pending` again, marked with `errorCode` until they
+   * are registered (a failure on the way leaves them visible and due), those that were being removed go, the address starts now, and with
+   * `rotate` the generation counts up (a new secret). What the first bearer token of a per-project address proved is carried over to the
+   * connection. Compare-and-set, so two callers that read the same rows move them ONCE: with `rotate` only while the connection still has the
+   * generation the caller read, without it only while a row is still under its per-project address. Answers whether it moved (the other
+   * caller's move stands otherwise, and nothing is written).
    */
   moveToSharedAddress(
     connectionId: string,
-    options: { rotate: boolean; expectedGeneration: number },
+    options: {
+      rotate: boolean;
+      expectedGeneration: number;
+      errorCode: string;
+    },
   ): Promise<boolean>;
   /**
    * Adds the row, `pending`, under the shared address of the connection. Undefined when the project has a row already, or the connection is none of this workspace's: the foreign key
@@ -114,7 +123,8 @@ export type JiraWebhooksRepository = {
   ): Promise<boolean>;
   /**
    * The webhook is registered at Jira under the shared address: `active`, with Jira's id and the end of its life; the per-project secrets of an
-   * old row are dropped, the error is cleared, and the connection's address starts now unless other webhooks of it are registered already.
+   * old row are dropped, the error is cleared, `secretFingerprint` (the SHA-256 of the secret the address carries) is kept on the connection,
+   * and the start of the address is set if it has none yet (it begins with a generation, see `moveToSharedAddress`).
    * Only while `attempt` is still the one this registration began with and the row is not being removed: if another registration began
    * meanwhile, or the row is being removed, nothing is written and the answer is false (the caller deletes the webhook it made).
    */
@@ -123,6 +133,7 @@ export type JiraWebhooksRepository = {
     jiraWebhookId: string,
     expiresAt: string,
     attempt: string,
+    secretFingerprint: string,
   ): Promise<boolean>;
   /** A delivery of the per-project address of the registration carried a bearer token that verified: noted once (the first time stays). */
   markBearerSeen(id: string): Promise<boolean>;
@@ -161,6 +172,9 @@ export function toStoredJiraWebhook(
     updatedAt: row.updated_at,
   };
 }
+
+/** Thrown inside the transaction of `moveToSharedAddress` to undo it when another caller moved the rows first. */
+class NotMoved extends Error {}
 
 export function createJiraWebhooksRepository(
   db: Kysely<Database>,
@@ -238,6 +252,7 @@ export function createJiraWebhooksRepository(
           "webhook_generation",
           "webhook_address_at",
           "webhook_bearer_seen_at",
+          "webhook_secret_fingerprint",
         ])
         .where("workspace_id", "=", workspaceId)
         .where("id", "=", connectionId)
@@ -249,6 +264,7 @@ export function createJiraWebhooksRepository(
             generation: row.webhook_generation,
             addressAt: row.webhook_address_at,
             bearerSeenAt: row.webhook_bearer_seen_at,
+            secretFingerprint: row.webhook_secret_fingerprint,
           };
     },
 
@@ -266,45 +282,63 @@ export function createJiraWebhooksRepository(
 
     async moveToSharedAddress(connectionId, options) {
       const at = stamp();
-      return db.transaction().execute(async (trx) => {
-        const moved = await trx
-          .updateTable("jira_connections")
-          .set({
-            webhook_generation: options.rotate
-              ? options.expectedGeneration + 1
-              : options.expectedGeneration,
-            webhook_address_at: at,
-          })
-          .where("workspace_id", "=", workspaceId)
-          .where("id", "=", connectionId)
-          .where("webhook_generation", "=", options.expectedGeneration)
-          .executeTakeFirst();
-        if (!changed(moved)) return false;
-        await trx
-          .deleteFrom("jira_webhooks")
-          .where("workspace_id", "=", workspaceId)
-          .where("connection_id", "=", connectionId)
-          .where("status", "=", "removing")
-          .execute();
-        await trx
-          .updateTable("jira_webhooks")
-          .set({
-            status: "pending",
-            address: "connection",
-            secret_hash: null,
-            pending_secret_hash: null,
-            registration_attempt: null,
-            jira_webhook_id: null,
-            expires_at: null,
-            registered_at: null,
-            updated_at: at,
-          })
-          .where("workspace_id", "=", workspaceId)
-          .where("connection_id", "=", connectionId)
-          .where("jira_webhook_id", "is not", null)
-          .execute();
+      try {
+        await db.transaction().execute(async (trx) => {
+          // The first token of a per-project address proves what Atlassian sends for this app: kept for the connection (before the rows change).
+          const moved = await sql`update jira_connections
+            set webhook_generation = ${options.rotate ? options.expectedGeneration + 1 : options.expectedGeneration},
+              webhook_address_at = ${at},
+              webhook_secret_fingerprint = null,
+              webhook_bearer_seen_at = coalesce(webhook_bearer_seen_at, (
+                select min(w.bearer_seen_at) from jira_webhooks w
+                where w.connection_id = ${connectionId} and w.workspace_id = ${workspaceId} and w.bearer_seen_at is not null))
+            where workspace_id = ${workspaceId} and id = ${connectionId} and webhook_generation = ${options.expectedGeneration}`.execute(
+            trx,
+          );
+          if (Number(moved.numAffectedRows ?? 0) === 0) throw new NotMoved();
+          let reset = trx
+            .updateTable("jira_webhooks")
+            .set({
+              status: "pending",
+              address: "connection",
+              secret_hash: null,
+              pending_secret_hash: null,
+              registration_attempt: null,
+              jira_webhook_id: null,
+              expires_at: null,
+              registered_at: null,
+              error_code: options.errorCode,
+              updated_at: at,
+            })
+            .where("workspace_id", "=", workspaceId)
+            .where("connection_id", "=", connectionId)
+            .where("status", "<>", "removing")
+            .where("jira_webhook_id", "is not", null);
+          // A move that is not a rotation is for the rows still under their own address: a row another mover already moved (and registered
+          // again) is left alone, or its fresh webhook would be orphaned at Jira.
+          if (!options.rotate) reset = reset.where("address", "=", "project");
+          const resetRows = Number(
+            (await reset.executeTakeFirst()).numUpdatedRows,
+          );
+          const goneRows = Number(
+            (
+              await trx
+                .deleteFrom("jira_webhooks")
+                .where("workspace_id", "=", workspaceId)
+                .where("connection_id", "=", connectionId)
+                .where("status", "=", "removing")
+                .executeTakeFirst()
+            ).numDeletedRows,
+          );
+          // Nothing left to move: another mover was first. Undo the connection's update too.
+          if (!options.rotate && resetRows + goneRows === 0)
+            throw new NotMoved();
+        });
         return true;
-      });
+      } catch (error) {
+        if (error instanceof NotMoved) return false;
+        throw error;
+      }
     },
 
     async beginRegistration(id, attempt, expectedJiraWebhookId) {
@@ -318,7 +352,13 @@ export function createJiraWebhooksRepository(
       return changed(await update.executeTakeFirst());
     },
 
-    async markRegistered(id, jiraWebhookId, expiresAt, attempt) {
+    async markRegistered(
+      id,
+      jiraWebhookId,
+      expiresAt,
+      attempt,
+      secretFingerprint,
+    ) {
       const at = stamp();
       const row = await own(id)
         .set({
@@ -338,12 +378,9 @@ export function createJiraWebhooksRepository(
         .returning("connection_id")
         .executeTakeFirst();
       if (row === undefined) return false;
-      // The address is as old as the first webhook registered under it: later ones of the connection leave its start alone.
+      // The address is as old as its generation: set by the move that began it, or here for the first webhook ever registered under it.
       await sql`update jira_connections
-        set webhook_address_at = case
-          when exists (select 1 from jira_webhooks w where w.connection_id = ${row.connection_id} and w.id <> ${id} and w.status = 'active'
-            and w.address = 'connection') then coalesce(webhook_address_at, ${at})
-          else ${at} end
+        set webhook_address_at = coalesce(webhook_address_at, ${at}), webhook_secret_fingerprint = ${secretFingerprint}
         where id = ${row.connection_id} and workspace_id = ${workspaceId}`.execute(
         db,
       );

@@ -103,17 +103,43 @@ _admin_ webhook (Atlassian does not list the webhooks of an OAuth 2.0 app on tha
   connection's `webhook_generation`, keyed by a key of `APP_SECRET`), never stored, so every project of the connection can register under
   the same address. The nightly job **rotates** the address of a connection once it is more than **25 days** old (`webhook_address_at`):
   Jira refuses a second address while one exists, so it **deletes all webhooks of the connection at Jira and registers them all again**
-  under the next generation, in the same run. That is a gap of seconds without deliveries, once per 25 days, at night; an event in it is
-  lost (the next change of the same issue, and the full read, bring the mirror right). A rotation whose deletion fails leaves the webhooks
-  as they were and extends one that ends soon; it is tried again the next night. A secret that leaked into a log is therefore valid for 25
-  days at most, not for as long as the webhook is extended. There is no way to rotate sooner than by setting `webhook_address_at` of the
-  connection back in the database and calling the job.
+  under the next generation, in the same run. A rotation whose deletion fails leaves the webhooks as they were and extends one that ends
+  soon; it is tried again the next night. A secret that leaked into a log is therefore valid for 25 days at most, not for as long as the
+  webhook is extended. `webhook_address_at` is the start of the **generation** (it does not start over when the last webhook of a
+  connection goes and a new one comes); a connection with no webhook registered whose address is older than 25 days gets the next
+  generation without any deletion. There is no way to rotate sooner than by setting `webhook_address_at` of the connection back in the
+  database and calling the job.
+- **The gap, and what is lost in it.** Jira refuses a second address while one exists, so a move or a rotation deletes first and registers
+  after; an event in between is sent to no address (nothing is registered), a delivery already on its way to the old address is refused with `401` (final at Jira), and **a lost event is lost**:
+  the mirror is brought right by the next change of the same issue and the nightly resync, but **a `-> status` trigger only fires from a
+  delivery, so a status change in the gap does not start its lane** (move the issue again). The gap is kept as short as it can be: the first
+  webhook is registered at once, the others at the same time, and a registration that fails because Jira is unavailable is tried again twice
+  (after 0.3 s and 1.5 s). If it cannot be closed, the rows stay `pending` with `error_code` `jira_webhook_move_pending` (or the code of the
+  failure, for example `jira_unavailable`), the log says `JIRA_WEBHOOK_MOVE_REGISTER_FAILED`, and **the second cron entry**
+  (`GET /api/internal/jira-webhooks?retry=pending`, every 15 minutes) registers those rows again; a project is not dark until the next
+  night. A function that dies in the middle of a move leaves the rows with `jira_webhook_move_pending`, which the same entry finds.
+  Atlassian documents no way to change the address of a webhook, to have two addresses, or to verify a delivery without it (the bearer
+  token of an OAuth 2.0 webhook is documented without its claims, and community reports say it is not always there), so the secret stays
+  in the address and the gap stays: a stable address with the secret taken out of it, checked by the token alone, would remove the gap but
+  rest everything on a token whose content nobody has verified live. If the open question about the token (below) turns out well, that is
+  the way to look at next. The 25-day rotation is kept because it is the only thing that limits a secret that leaked into a log.
+- **A changed `APP_SECRET`.** The secret of an address is derived from it, so a new `APP_SECRET` changes every secret: Jira still calls the
+  old address and every delivery is refused (`secret_mismatch` in the log). The connection keeps the SHA-256 of the secret its address was
+  registered with (`webhook_secret_fingerprint`, never the secret); at the next reconcile of any of its projects (a switch, or the next
+  night; call `GET /api/internal/jira-webhooks` to do it at once) another fingerprint is treated like an old address: all webhooks are deleted
+  and registered again under the next generation (`JIRA_WEBHOOK_SECRET_CHANGED` in the log). A connection whose fingerprint is empty
+  (registered before it was kept) is left alone until its next rotation. When you rotate `APP_SECRET`, call the job once right after the
+  deploy; the stored Jira tokens are encrypted with a key of the same secret (`keys.ts`), so a deployment with another `APP_SECRET` than the
+  one that wrote them cannot reach Jira at all and changes nothing.
 - **Webhooks from before #1131** (one address per project, `jira_webhooks.address = 'project'`) keep working after the deploy: their old
   address is accepted until the **next reconcile of any project of their connection** (the nightly job, or switching a project on or off)
   moves the connection: all its webhooks are deleted at Jira and registered again under the shared address, and a project that was
   `pending` (for example with `jira_webhook_rejected`) registers in the same run. Nothing has to be written in the database. To do it
   right after the deploy call `GET /api/internal/jira-webhooks` with the cron secret once; deliveries are lost for the seconds the move takes.
-  From then on the old address of a moved webhook is refused (`401`).
+  From then on the old address of a moved webhook is refused (`401`). Two runs at the same moment (that call and the nightly job, or a
+  project switch) move the rows **once**: the row update checks that a row is still under its own address, so the second run leaves the rows
+  the first one registered alone. What the first bearer token of an old address proved is carried over to the connection, so token-less
+  deliveries stay refused.
 - **They are deleted** when the project is switched off, when its ticket source changes, and when the project is switched to GitHub
   issues. A deletion that fails is repeated by the nightly job. A deletion Jira **refuses** (401 or 403, a connection that is broken or
   gone) is not repeated: the row goes anyway, so the new source can register, and Jira ends the webhook within 30 days (its deliveries
@@ -123,6 +149,15 @@ _admin_ webhook (Atlassian does not list the webhooks of an OAuth 2.0 app on tha
   registration of the workspace knows and that end about 30 days after the failed attempt, and deletes them, so they do not eat the
   five. Two registrations of one project at the same moment leave the row with the Jira id of one of them; the other
   deletes its webhook.
+- **A webhook that no row knows and that holds the address** (the unknown outcome of an old registration under another address) makes
+  every registration fail with `jira_webhook_url_conflict`. The factory lists the webhooks of the app once, deletes those that no row of
+  the workspace knows (except those made in the last ten minutes: they may be another reconcile's registration) and registers again
+  (`JIRA_WEBHOOK_ORPHANS_REMOVED` in the log). Jira does not tell the user of a webhook apart per workspace: the webhooks of the same Jira
+  user in **another workspace** are deleted too and register themselves again at their next extension; one Jira user should not be
+  connected in two workspaces.
+- **A webhook Jira no longer knows.** Atlassian's guide says "IDs corresponding to non-existent webhooks are ignored" and its reference
+  documents a 400 only for a missing list of ids. Should Jira answer 400 to a delete that names an id it forgot all the same, the factory
+  lists the webhooks of the app and deletes only the ids that exist, so such a row never blocks a move or a rotation.
 - **A changed source clears the mirror's rows of the old one.** Switching a project to another Jira project (or connection) deletes the
   cached Jira issues of the old one (`OLD-7` and `NEW-7` cannot share a number in the mirror); the cache of the new one fills from deliveries.
 - **Limit: five webhooks per connection.** Atlassian allows 5 webhooks per OAuth 2.0 app and user on a site (the registration of a
@@ -254,6 +289,15 @@ connection of a site must keep working through all of it:
 - [ ] **Two projects on one connection (#1131).** Set up a second project of the same site on the same connection: its row becomes
       `active` (no `jira_webhook_rejected`, no `jira_webhook_url_conflict`), `GET /rest/api/3/webhook` lists two webhooks with the same
       address, and a status change in each project reaches its own project.
+- [ ] **Delete an id Jira does not know.** Expire or delete one webhook of a connection with two projects in Jira's API, then rotate (set
+      `webhook_address_at` 26 days back and call the job): what does `DELETE /rest/api/3/webhook` answer for the forgotten id, `202`
+      (the guide) or `400`? Either way the rotation succeeds and the other webhooks come back under the new address; note the answer.
+- [ ] **A changed `APP_SECRET`.** On a throwaway deployment change `APP_SECRET`, check that a status change is refused (`secret_mismatch`),
+      call `GET /api/internal/jira-webhooks`: the webhooks are registered again (`webhook_generation` one higher, a new
+      `webhook_secret_fingerprint`) and the next change is accepted.
+- [ ] **The gap.** With a move or a rotation under way (Jira's API answering 503 for the registration, for example with the app's
+      network blocked at Atlassian's side), the rows are `pending` with `error_code` set, and within 15 minutes of the API working again the
+      `?retry=pending` run registers them.
 - [ ] **A webhook from before #1131.** After the deploy a project registered the old way still receives deliveries (its old address is
       accepted). Call `GET /api/internal/jira-webhooks` once: its row says `address = 'connection'`, its webhook is registered again under
       the shared address, and a project that was `pending` with `jira_webhook_rejected` is `active` in the same run.

@@ -3357,6 +3357,7 @@ const CASES: Case[] = [
         "1000",
         "2026-12-14T00:00:00.000Z",
         "other",
+        "fingerprint",
       ),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
@@ -3405,6 +3406,7 @@ const CASES: Case[] = [
       a.jiraWebhooks.moveToSharedAddress(b.jiraConnectionId, {
         rotate: true,
         expectedGeneration: 1,
+        errorCode: "jira_webhook_move_pending",
       }),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },

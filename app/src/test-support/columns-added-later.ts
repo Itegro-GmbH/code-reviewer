@@ -97,6 +97,7 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "webhook_generation",
     "webhook_address_at",
     "webhook_bearer_seen_at",
+    "webhook_secret_fingerprint",
   ],
   // #1131: the address a webhook is registered under (`project` for every row that exists) and the marker of a registration under way.
   jira_webhooks: ["address", "registration_attempt"],

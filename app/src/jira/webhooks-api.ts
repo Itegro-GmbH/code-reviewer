@@ -32,7 +32,11 @@ export type JiraWebhookApi = {
       }
     | JiraWebhookFailure
   >;
-  /** Deletes the webhooks; an id Jira does not know counts as deleted. */
+  /**
+   * Deletes the webhooks; an id Jira does not know counts as deleted. Atlassian's reference: 202, and "400 Returned if the list of webhook IDs
+   * is missing"; its guide: "IDs corresponding to non-existent webhooks are ignored". Should Jira answer a 400 for the ids all the same (an id
+   * that ended long ago), the webhooks of the app are listed and only the ids that exist are deleted, so an id Jira forgot never blocks a call.
+   */
   remove(
     connectionId: string,
     webhookIds: readonly string[],
@@ -96,7 +100,33 @@ export function createJiraWebhookApi({
       body: JSON.stringify(body),
     });
 
-  return {
+  /** One DELETE; `refused` is the 400 that may mean an id Jira does not know. */
+  async function deleteIds(
+    connectionId: string,
+    ids: readonly number[],
+  ): Promise<
+    | { kind: "done"; result: { ok: true } | JiraWebhookFailure }
+    | { kind: "refused" }
+  > {
+    const result = await send(connectionId, "DELETE", "/rest/api/3/webhook", {
+      webhookIds: ids,
+    });
+    if (!result.ok)
+      return { kind: "done", result: { ok: false, error: result.error } };
+    const { response } = result;
+    // Jira ignores ids it does not know (and a site that is gone has nothing left to delete).
+    if (response.ok || response.status === 404) {
+      await response.body?.cancel().catch(() => undefined);
+      return { kind: "done", result: { ok: true } };
+    }
+    if (response.status === 400) {
+      await response.body?.cancel().catch(() => undefined);
+      return { kind: "refused" };
+    }
+    return { kind: "done", result: failureOf(response.status) };
+  }
+
+  const api: JiraWebhookApi = {
     async register(connectionId, webhook) {
       const result = await send(connectionId, "POST", "/rest/api/3/webhook", {
         url: webhook.url,
@@ -197,17 +227,20 @@ export function createJiraWebhookApi({
     },
 
     async remove(connectionId, webhookIds) {
-      const result = await send(connectionId, "DELETE", "/rest/api/3/webhook", {
-        webhookIds: numbersOf(webhookIds),
-      });
-      if (!result.ok) return { ok: false, error: result.error };
-      const { response } = result;
-      // Jira ignores ids it does not know (and a site that is gone has nothing left to delete).
-      if (response.ok || response.status === 404) {
-        await response.body?.cancel().catch(() => undefined);
-        return { ok: true };
-      }
-      return failureOf(response.status);
+      const ids = numbersOf(webhookIds);
+      // Nothing to delete (Jira answers 400 for an empty list).
+      if (ids.length === 0) return { ok: true };
+      const deleted = await deleteIds(connectionId, ids);
+      if (deleted.kind !== "refused") return deleted.result;
+      // A 400 for ids: Jira may not know some of them. Delete what exists, and nothing else.
+      const listed = await api.list(connectionId);
+      if (!listed.ok) return failureOf(400);
+      const existing = new Set(listed.webhooks.map((hook) => Number(hook.id)));
+      const present = ids.filter((id) => existing.has(id));
+      if (present.length === 0) return { ok: true };
+      const retried = await deleteIds(connectionId, present);
+      return retried.kind === "refused" ? failureOf(400) : retried.result;
     },
   };
+  return api;
 }

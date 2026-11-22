@@ -41,9 +41,12 @@ export type JiraWebhookDirectory = {
    * The projects the nightly job walks, of every workspace: those that have a webhook row, and the active projects whose ticket source is a
    * Jira project and that have none (a registration that never got as far as its row). At most `limit`: those with a row first, and of
    * those the ones that are not registered yet, then the ones that end first, so a run that is cut short leaves the ones with most time left.
+   * With `due` only the rows that wait for a try that is due soon (the frequent run of the cron job, #1131): `pending` after a move of the
+   * connection's webhooks or after Jira was unavailable, the oldest first. Rows that failed for another reason wait for the nightly run.
    */
   listProjects(
     limit: number,
+    options?: { due?: boolean },
   ): Promise<{ workspaceId: string; projectId: string }[]>;
 };
 
@@ -97,7 +100,21 @@ export function createJiraWebhookDirectory(
           };
     },
 
-    async listProjects(limit) {
+    async listProjects(limit, options) {
+      if (options?.due === true) {
+        const { rows } = await sql<{
+          workspace_id: string;
+          project_id: string;
+        }>`select workspace_id, project_id from jira_webhooks
+          where status = 'pending' and jira_webhook_id is null
+            and error_code in ('jira_webhook_move_pending', 'jira_unavailable')
+          order by updated_at, id
+          limit ${limit}`.execute(db);
+        return rows.map((row) => ({
+          workspaceId: row.workspace_id,
+          projectId: row.project_id,
+        }));
+      }
       const { rows } = await sql<{ workspace_id: string; project_id: string }>`
         select workspace_id, project_id from (
           select workspace_id, project_id, 0 as rank, coalesce(expires_at, '') as at, id as tie from jira_webhooks
