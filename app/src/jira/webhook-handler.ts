@@ -6,9 +6,11 @@
 // side effect except noting, once per registration, that a bearer token verified (step 2):
 //
 //   1. config    the Atlassian app is configured at all (the client secret verifies the bearer token)                          404
-//   2. verify    the registration the address names (`w`) exists and is not being removed, the secret in the address (`s`) is its
-//                secret (or its pending one), and a bearer token verifies (`webhook-verify.ts`): one that does not is refused, a
-//                missing one is refused once a token was seen for the registration (trust on first use)                         401
+//   2. verify    the address names a connection (`c`, the address the webhooks of a connection share since #1131) or, from before, a
+//                registration (`w`, which must still be under its per-project address and is not being removed); the secret in the
+//                address (`s`) is the connection's derived one for its generation (or the registration's stored one), and a bearer
+//                token verifies (`webhook-verify.ts`): one that does not is refused, a missing one is refused once a token was seen
+//                for the connection or registration (trust on first use)                                                        401
 //                This comes before the body is read: an unauthenticated request costs a lookup, not a megabyte.
 //   3. size      the body is read with a 1 MB limit                                                                              413
 //   4. shape     the body is JSON                                                                                                400
@@ -17,6 +19,9 @@
 //                a delivery without a usable `X-Atlassian-Webhook-Identifier` is claimed under a hash of its body instead, as
 //                the same retry has the same body); a succeeded delivery is a duplicate (200), one another request handles right
 //                now is 409 (Jira retries it)
+//   6a. route    on the shared address the project is found from the delivery: the registrations of the connection for the Jira project of
+//                the issue (none: ignored, 200). A Jira project that two projects name has two registrations: each is handled in turn,
+//                as a request of its own (`handle`'s `only`), with its own claim.
 //   7. attribute the registration names the project; it must still be an active one whose ticket source is exactly the Jira project the
 //                webhook watches, and the issue must be of that Jira project (everything after this runs in the project's workspace)
 //   8. mirror    the issue is written into the ticket mirror (`mirror.ts`); a failure is logged and never stops the trigger
@@ -32,6 +37,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import type { JiraWebhookDirectory } from "../db/repositories/jira-webhook-directory-repository.ts";
+import type { StoredJiraWebhook } from "../db/repositories/jira-webhooks-repository.ts";
 import type { StoredProject } from "../db/repositories/projects-repository.ts";
 import { jiraSourceOf } from "../db/repositories/projects-repository.ts";
 import type {
@@ -51,7 +57,7 @@ import {
   type JiraChange,
   type JiraComment,
 } from "./webhook-events.ts";
-import { verifyJiraDelivery } from "./webhook-verify.ts";
+import { hashWebhookSecret, verifyJiraDelivery } from "./webhook-verify.ts";
 
 /** 1 MiB: a Jira payload is a few kilobytes (the issue without `expand`, a changelog). */
 export const JIRA_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
@@ -61,7 +67,7 @@ export const JIRA_WEBHOOK_ERROR_CODES = [
   "JIRA_WEBHOOK_NOT_CONFIGURED",
   /** The body is larger than the limit. 413. */
   "JIRA_WEBHOOK_BODY_TOO_LARGE",
-  /** The registration is unknown or being removed, the secret in the address is missing or wrong, or the bearer token does not verify or is missing after one was seen. 401. */
+  /** The connection or registration is unknown (or the registration is being removed or no longer under that address), the secret in the address is missing or wrong, or the bearer token does not verify or is missing after one was seen. 401. */
   "JIRA_WEBHOOK_UNAUTHORIZED",
   /** The body is not valid JSON. 400. */
   "JIRA_WEBHOOK_BODY_NOT_JSON",
@@ -83,6 +89,7 @@ export type JiraWebhookOutcome =
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const REGISTRATION_ID = /^[A-Za-z0-9-]{1,64}$/;
+const CONNECTION_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
  * What starts the lanes a change of status in Jira starts: `JiraStatusTrigger` of `src/workflow-runs/`, which this module does not import
@@ -156,8 +163,17 @@ export type JiraAnswerTaker = {
 
 /** What acts inside the workspace of the registration. */
 export type JiraWorkspaceCollaborators = {
-  /** Notes that a bearer token that verified came with a delivery of the registration (the first time stays). */
-  registrations: { markBearerSeen(registrationId: string): Promise<boolean> };
+  registrations: {
+    /** Notes that a bearer token that verified came with a delivery of a registration's per-project address (the first time stays). */
+    markBearerSeen(registrationId: string): Promise<boolean>;
+    /** Notes that a bearer token that verified came with a delivery of the connection's shared address (the first time stays). */
+    markEndpointBearerSeen(connectionId: string): Promise<boolean>;
+    /** The registrations of the connection for a Jira project (not those being removed), oldest first. */
+    listByProjectKey(
+      connectionId: string,
+      projectKey: string,
+    ): Promise<StoredJiraWebhook[]>;
+  };
   projects: { getById(projectId: string): Promise<StoredProject | undefined> };
   /** The full name of the repository the code lives in (where the mirror's rows sit); undefined for none. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
@@ -179,7 +195,9 @@ export type JiraWorkspaceCollaborators = {
 };
 
 export type JiraWebhookDeps = {
-  directory: Pick<JiraWebhookDirectory, "findById">;
+  directory: Pick<JiraWebhookDirectory, "findById" | "findConnection">;
+  /** The secret in the shared address of a connection for a generation (`deriveWebhookSecret` with the app secret); read on every request. */
+  addressSecret(connectionId: string, generation: number): string;
   deliveries: WebhookDeliveriesRepository;
   /** The client secret of the Atlassian app; undefined when the feature is off. Read on every request. */
   clientSecret(): string | undefined;
@@ -211,45 +229,113 @@ export function createJiraWebhookHandler(
   const maxBodyBytes = deps.maxBodyBytes ?? JIRA_WEBHOOK_MAX_BODY_BYTES;
   const now = deps.now ?? (() => new Date());
 
-  return async (request) => {
+  /**
+   * One request. `only`: the registration to handle (the delivery again, for a second project that names the same Jira project, see
+   * `fanOut`); `fanOut`: where the body that was read and the ids of the other registrations of the same Jira project are put, for the caller
+   * to handle after (the body is read once: a cloned request would keep the second stream open when the first is cancelled at the limit).
+   */
+  async function handle(
+    request: Request,
+    only?: string,
+    fanOut?: { body: string; siblings: string[] },
+  ): Promise<Response> {
     const clientSecret = deps.clientSecret();
     if (clientSecret === undefined)
       return fail(404, "JIRA_WEBHOOK_NOT_CONFIGURED");
 
-    // The address names the registration; whether it exists, and a wrong secret, look the same from outside.
+    // The address names the connection (or, from before #1131, the registration); whether it exists, and a wrong secret, look the same from outside.
     const address = new URL(request.url);
+    const connectionId = address.searchParams.get("c");
     const registrationId = address.searchParams.get("w") ?? "";
-    const registration = REGISTRATION_ID.test(registrationId)
-      ? await deps.directory.findById(registrationId)
-      : undefined;
-    if (registration === undefined || registration.status === "removing") {
-      logger.warn("[jira-webhook] refused: unknown or removed registration");
-      return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
-    }
-    const verdict = verifyJiraDelivery({
-      urlSecret: address.searchParams.get("s"),
-      storedSecretHash: registration.secretHash,
-      pendingSecretHash: registration.pendingSecretHash,
-      bearerSeen: registration.bearerSeenAt !== null,
-      authorization: request.headers.get("authorization"),
-      clientSecret,
-      now: now(),
-    });
-    if (!verdict.ok) {
-      logger.warn(
-        `[jira-webhook] refused: registration=${registration.id} reason=${verdict.reason}`,
-      );
-      return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
-    }
-    if (verdict.bearer === "verified" && registration.bearerSeenAt === null) {
-      // From now on a delivery of this registration without a token is refused. A failure to note it only delays that.
+    let site: string;
+    let workspaceId: string;
+    let registration: StoredJiraWebhook | undefined;
+    let endpointId: string | undefined;
+    let noteBearer: () => Promise<boolean>;
+    let bearerSeenBefore: boolean;
+    let who: string;
+    let verdict: ReturnType<typeof verifyJiraDelivery>;
+    if (connectionId !== null) {
+      const endpoint = CONNECTION_ID.test(connectionId)
+        ? await deps.directory.findConnection(connectionId)
+        : undefined;
+      if (endpoint === undefined) {
+        logger.warn("[jira-webhook] refused: unknown connection");
+        return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
+      }
+      endpointId = endpoint.connectionId;
+      site = endpoint.siteUrl;
+      workspaceId = endpoint.workspaceId;
+      who = `connection=${endpoint.connectionId}`;
+      bearerSeenBefore = endpoint.bearerSeenAt !== null;
+      noteBearer = () =>
+        deps
+          .workspace(endpoint.workspaceId)
+          .registrations.markEndpointBearerSeen(endpoint.connectionId);
+      // The secret is derived from the app secret: when that does not resolve, the delivery is refused like any other (not an uncaught 500).
+      let storedSecretHash: string;
       try {
-        await deps
-          .workspace(registration.workspaceId)
-          .registrations.markBearerSeen(registration.id);
+        storedSecretHash = hashWebhookSecret(
+          deps.addressSecret(endpoint.connectionId, endpoint.generation),
+        );
       } catch (error) {
         logger.warn(
-          `[jira-webhook] registration=${registration.id} the bearer token could not be noted (${errorCodeOf(error)})`,
+          `[jira-webhook] refused: ${who} the address secret is not available (${errorCodeOf(error)})`,
+        );
+        return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
+      }
+      verdict = verifyJiraDelivery({
+        urlSecret: address.searchParams.get("s"),
+        storedSecretHash,
+        bearerSeen: endpoint.bearerSeenAt !== null,
+        authorization: request.headers.get("authorization"),
+        clientSecret,
+        now: now(),
+      });
+    } else {
+      const found = REGISTRATION_ID.test(registrationId)
+        ? await deps.directory.findById(registrationId)
+        : undefined;
+      // A registration that moved to the shared address has no secret of its own: its old address is refused.
+      if (
+        found === undefined ||
+        found.status === "removing" ||
+        found.address !== "project" ||
+        found.secretHash === null
+      ) {
+        logger.warn("[jira-webhook] refused: unknown or removed registration");
+        return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
+      }
+      registration = found;
+      site = found.siteUrl;
+      workspaceId = found.workspaceId;
+      who = `registration=${found.id}`;
+      bearerSeenBefore = found.bearerSeenAt !== null;
+      noteBearer = () =>
+        deps
+          .workspace(found.workspaceId)
+          .registrations.markBearerSeen(found.id);
+      verdict = verifyJiraDelivery({
+        urlSecret: address.searchParams.get("s"),
+        storedSecretHash: found.secretHash,
+        pendingSecretHash: found.pendingSecretHash,
+        bearerSeen: found.bearerSeenAt !== null,
+        authorization: request.headers.get("authorization"),
+        clientSecret,
+        now: now(),
+      });
+    }
+    if (!verdict.ok) {
+      logger.warn(`[jira-webhook] refused: ${who} reason=${verdict.reason}`);
+      return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
+    }
+    if (verdict.bearer === "verified" && !bearerSeenBefore) {
+      // From now on a delivery of this address without a token is refused. A failure to note it only delays that.
+      try {
+        await noteBearer();
+      } catch (error) {
+        logger.warn(
+          `[jira-webhook] ${who} the bearer token could not be noted (${errorCodeOf(error)})`,
         );
       }
     }
@@ -263,13 +349,38 @@ export function createJiraWebhookHandler(
       return fail(400, "JIRA_WEBHOOK_BODY_NOT_JSON");
     }
 
-    const change = parseJiraDelivery(payload, registration.siteUrl);
+    const change = parseJiraDelivery(payload, site);
     if (change.kind === "ignored") {
-      logger.info(
-        `[jira-webhook] registration=${registration.id} ignored: ${change.reason}`,
-      );
+      logger.info(`[jira-webhook] ${who} ignored: ${change.reason}`);
       return accepted("ignored");
     }
+    if (registration === undefined && endpointId !== undefined) {
+      // The shared address: the project of the delivery is the one the issue belongs to. Every project of the connection that names that Jira
+      // project has its own registration; each is handled, one request each.
+      const issueKey =
+        change.kind === "issue_deleted" ? change.key : change.issue.key;
+      const candidates = (
+        await deps
+          .workspace(workspaceId)
+          .registrations.listByProjectKey(
+            endpointId,
+            issueKey.slice(0, issueKey.lastIndexOf("-")),
+          )
+      ).filter((row) => only === undefined || row.id === only);
+      registration = candidates[0];
+      if (registration === undefined) {
+        logger.info(
+          `[jira-webhook] ${who} ignored: no project of the connection has a webhook for the Jira project of the issue`,
+        );
+        return accepted("ignored");
+      }
+      if (only === undefined && fanOut !== undefined) {
+        fanOut.body = body.text;
+        fanOut.siblings.push(...candidates.slice(1).map((row) => row.id));
+      }
+    }
+    if (registration === undefined)
+      return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
     // Jira names the registrations a delivery matched; one that is not this one is not for this address.
     if (
       registration.jiraWebhookId !== null &&
@@ -481,5 +592,24 @@ export function createJiraWebhookHandler(
       await deps.deliveries.release(`jira-${deliveryId}`, claim.token);
       return fail(503, "JIRA_WEBHOOK_PROCESSING_FAILED");
     }
+  }
+
+  return async (request) => {
+    const fanOut = { body: "", siblings: [] as string[] };
+    let answer = await handle(request, undefined, fanOut);
+    // The other projects that name the same Jira project: the same delivery again, each with a claim and a result of its own; the first
+    // failure is what Jira sees.
+    for (const id of fanOut.siblings) {
+      const next = await handle(
+        new Request(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body: fanOut.body,
+        }),
+        id,
+      );
+      if (answer.status < 400 && next.status >= 400) answer = next;
+    }
+    return answer;
   };
 }

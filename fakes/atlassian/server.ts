@@ -22,9 +22,12 @@
 //   POST /ex/jira/<cloudId>/rest/api/3/issue/<key>/transitions performs one by id (204); 400 when it needs fields (`requiresFields`) or is not offered
 //   GET|POST /ex/jira/<cloudId>/rest/api/3/search/jql         JQL search, `project = KEY` only, paged by `nextPageToken` (`searchPageSize`), the issues in key order (#1040)
 //   POST /ex/jira/<cloudId>/rest/api/3/webhook                registers dynamic webhooks (`url`, `webhooks[].jqlFilter`, `events`): a grant with
-//                                                             `manage:jira-webhook` only, the clauses Jira supports, at most 5 per grant, 30 days of life
+//                                                             `manage:jira-webhook` only, the clauses Jira supports, at most 5 per grant, ONE address per grant
+//                                                             (a second one is a 400 "Only a single URL per user is allowed ...", #1131), 30 days of life
 //   PUT  /ex/jira/<cloudId>/rest/api/3/webhook/refresh        extends the life of known webhooks by 30 days (`{ expirationDate }`); 404 when none is known
-//   DELETE /ex/jira/<cloudId>/rest/api/3/webhook              deletes webhooks by `webhookIds` (unknown ids are ignored)
+//   DELETE /ex/jira/<cloudId>/rest/api/3/webhook              deletes webhooks by `webhookIds`: 202; unknown ids are ignored (the guide's "IDs corresponding to
+//                                                             non-existent webhooks are ignored"), a missing or empty list is a 400 (the reference); a test can make the
+//                                                             fake strict (`strictWebhookDelete`), which answers 400 when ANY id is unknown, as a stricter Jira might
 //   GET  /ex/jira/<cloudId>/rest/api/3/webhook                the webhooks of the app, paged (`values`, `isLast`)
 // A test can also make the fake CALL a registered webhook (`deliver`): it posts the payload of an issue event to the registered address with the
 // `X-Atlassian-Webhook-Identifier` header and, as Atlassian documents for OAuth 2.0 apps, a bearer token signed with the client secret.
@@ -251,6 +254,13 @@ export type AtlassianFake = {
   setWebhookExpiry(id: number, expiresAt: string): void;
   /** Forgets a webhook, as when Jira lost it after three months without an extension. */
   dropWebhook(id: number): void;
+  /** The next `count` registrations of a webhook (POST) answer `status` (default 503) and make nothing; deletions and the rest are not touched. */
+  failNextWebhookRegistrations(count: number, status?: number): void;
+  /**
+   * From now on a DELETE that names an id the app does not have answers 400 and deletes nothing (Atlassian's guide says such ids are ignored,
+   * which is the default; this is the stricter answer a test can ask for to prove nothing depends on the guide being right).
+   */
+  strictWebhookDelete(on: boolean): void;
   /**
    * Calls the registered webhook as Jira does (`POST`, JSON, the identifier header, the bearer token); answers what the receiver answered.
    * The body of the answer is read as JSON when it is.
@@ -355,6 +365,8 @@ export async function startAtlassianFake(
     FakeRegisteredWebhook & { grantId: string }
   >();
   let nextWebhookId = 1000;
+  let strictWebhookDelete = false;
+  let failingRegistrations = { count: 0, status: 503 };
   let nextIdentifier = 1;
   const WEBHOOK_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
   const WEBHOOKS_PER_GRANT = 5;
@@ -953,12 +965,34 @@ export async function startAtlassianFake(
       hook.expiresAt.replace(/Z$/, "+0000");
 
     if (method === "POST" && path === "/webhook") {
+      if (failingRegistrations.count > 0) {
+        failingRegistrations.count -= 1;
+        return json(
+          response,
+          failingRegistrations.status,
+          { errorMessages: ["Service unavailable"], errors: {} },
+          entry,
+        );
+      }
       const address = typeof input.url === "string" ? input.url : "";
       if (!/^https?:\/\//.test(address))
         return json(
           response,
           400,
           { errorMessages: ["The url must be https"], errors: {} },
+          entry,
+        );
+      // Jira allows ONE address per app and user (found live, #1131): the webhooks of a grant share it.
+      if (mine().some((hook) => hook.url !== address))
+        return json(
+          response,
+          400,
+          {
+            errorMessages: [
+              "Only a single URL per user is allowed to be registered via REST API.",
+            ],
+            errors: {},
+          },
           entry,
         );
       const results: Record<string, unknown>[] = [];
@@ -1023,6 +1057,24 @@ export async function startAtlassianFake(
       return json(response, 200, { expirationDate }, entry);
     }
     if (method === "DELETE" && path === "/webhook") {
+      // The reference: "400 Returned if the list of webhook IDs is missing".
+      if (ids.length === 0)
+        return json(
+          response,
+          400,
+          { errorMessages: ["webhookIds is required"], errors: {} },
+          entry,
+        );
+      if (
+        strictWebhookDelete &&
+        ids.some((id) => registeredWebhooks.get(id)?.grantId !== grant.id)
+      )
+        return json(
+          response,
+          400,
+          { errorMessages: ["Unknown webhook id"], errors: {} },
+          entry,
+        );
       for (const id of ids)
         if (registeredWebhooks.get(id)?.grantId === grant.id)
           registeredWebhooks.delete(id);
@@ -1451,6 +1503,12 @@ export async function startAtlassianFake(
     },
     dropWebhook(id) {
       registeredWebhooks.delete(id);
+    },
+    strictWebhookDelete(on) {
+      strictWebhookDelete = on;
+    },
+    failNextWebhookRegistrations(count, status = 503) {
+      failingRegistrations = { count, status };
     },
     async deliver(webhookId, delivery) {
       const hook = registeredWebhooks.get(webhookId);

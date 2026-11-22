@@ -12,6 +12,9 @@
 //    ordered by what is most urgent: the ones that are not registered yet, then the ones that end first. A webhook that was deferred is
 //    still not extended the next night, so it is then ahead of the ones that were. (A site with so many projects that the budget
 //    is not enough would need more than one run a night; five webhooks per connection make that remote.)
+//  - The same route is called every 15 minutes with `?retry=pending` (`vercel.json`; #1131): it walks only the webhooks that wait for a try that
+//    is due soon, the ones left `pending` by a move of a connection's webhooks (they were deleted at Jira, and until they are registered again
+//    that project gets no deliveries) or by a Jira that was unavailable. So a failed move is mended within minutes, not the next night.
 //  - Overlapping runs are safe: a webhook that was extended is not extended again, and two registrations of one project leave the row at
 //    the last one.
 // The answer carries counts only.
@@ -43,7 +46,10 @@ export type JiraWebhooksCronDependencies = {
   env: Readonly<Record<string, string | undefined>>;
   enabled(): boolean;
   /** The projects that have a webhook row, of every workspace, oldest first. */
-  targets(limit: number): Promise<{ workspaceId: string; projectId: string }[]>;
+  targets(
+    limit: number,
+    options: { due: boolean },
+  ): Promise<{ workspaceId: string; projectId: string }[]>;
   reconcile(workspaceId: string, projectId: string): Promise<ReconcileResult>;
   now?: () => number;
   budgetMs?: number;
@@ -67,7 +73,8 @@ export async function handleJiraWebhooksCron(
       { headers },
     );
   try {
-    const targets = await deps.targets(JIRA_WEBHOOKS_MAX_PER_RUN);
+    const due = new URL(request.url).searchParams.get("retry") === "pending";
+    const targets = await deps.targets(JIRA_WEBHOOKS_MAX_PER_RUN, { due });
     const counts: JiraWebhooksCounts = {
       webhooks: targets.length,
       registered: 0,
@@ -99,7 +106,7 @@ export async function handleJiraWebhooksCron(
       }
     }
     log(
-      `[jira] nightly webhooks done: ${String(counts.webhooks)} webhooks, ${String(counts.registered)} registered, ${String(counts.extended)} extended, ${String(counts.removed)} removed, ${String(counts.failed)} failed, ${String(counts.deferred)} deferred`,
+      `[jira] ${due ? "retry" : "nightly"} webhooks done: ${String(counts.webhooks)} webhooks, ${String(counts.registered)} registered, ${String(counts.extended)} extended, ${String(counts.removed)} removed, ${String(counts.failed)} failed, ${String(counts.deferred)} deferred`,
     );
     return Response.json({ status: "ok", ...counts }, { headers });
   } catch {

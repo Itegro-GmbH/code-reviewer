@@ -35,8 +35,10 @@ import { createJiraTicketProvider } from "./ticket-provider.ts";
 import { createJiraTicketWriter } from "./ticket-writer.ts";
 import { createJiraWebhookHandler } from "./webhook-handler.ts";
 import { createJiraWebhookRegistrar } from "./webhook-registrar.ts";
+import { deriveWebhookSecret } from "./webhook-verify.ts";
 import { createJiraWebhookApi } from "./webhooks-api.ts";
 
+const APP_SECRET = "an-app-secret-for-tests";
 const SITE = {
   id: "aaaaaaaa-0000-0000-0000-000000000001",
   url: "https://acme.atlassian.net",
@@ -628,11 +630,15 @@ describe("an answer in a Jira comment", () => {
       projects: w.projects,
       api: createJiraWebhookApi({ tokens: w.tokens }),
       publicUrl: receiver.url,
+      addressSecret: (connectionId, generation) =>
+        deriveWebhookSecret(APP_SECRET, connectionId, generation),
       now: w.h.now,
       log: w.h.logs.push.bind(w.h.logs),
     });
     handler = createJiraWebhookHandler({
       directory: createJiraWebhookDirectory(w.h.db),
+      addressSecret: (connectionId, generation) =>
+        deriveWebhookSecret(APP_SECRET, connectionId, generation),
       deliveries: createWebhookDeliveriesRepository(w.h.db),
       clientSecret: () => w.h.atlassian.clientSecret,
       workspace: () => ({
