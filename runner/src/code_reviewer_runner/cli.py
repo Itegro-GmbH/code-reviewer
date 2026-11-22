@@ -33,8 +33,8 @@ MODES = (MODE_WORKER_ONCE, MODE_PROBE)
 
 class _PrintWorkerFeatures(argparse.Action):
     """`--worker-features`: print what this image's Worker reads of a job (`WORKER_FEATURES`, and
-    `IMAGE_FEATURES`, which only the golden image reports), comma separated, and exit. The golden image build (`docker/incus/build-golden.sh`, #1093) asks
-    the Worker image this and records the answer in the image, so that a runner announces a claim
+    `IMAGE_FEATURES`, which only the golden image reports), comma separated, and exit. The golden image build (`docker/incus/build-golden.sh`, #1093)
+    asks the Worker image this and records the answer in the image, so that a runner announces a claim
     feature only when the image it starts really has it. No startup, no network, no secret."""
 
     def __init__(self, option_strings: Sequence[str], dest: str, **_: object) -> None:
