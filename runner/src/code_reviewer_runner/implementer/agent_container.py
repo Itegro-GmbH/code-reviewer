@@ -48,6 +48,7 @@ crash) is seen by `wait` and named (`AgentEnd`).
 
 import contextlib
 import logging
+import re
 import shlex
 import socket
 import threading
@@ -98,6 +99,8 @@ AGENT_TMP: Final = "/tmp"
 # OpenCode's port, on the container's loopback.
 ENGINE_PORT: Final = 4096
 AGENT_PIDS_LIMIT: Final = 16384
+# The data root of the container's own Docker (#1136).
+INNER_DOCKER_DIRECTORY: Final = "/var/lib/docker"
 # The most the kernel's OOM killer can be told to prefer (-1000..1000). Some memory the kernel
 # spends on a process is not charged to its memory cgroup (about 260 bytes of the 720 of a timer
 # or epoll object, measured on the VM's kernel 6.18), so a flood of them can take the whole VM's
@@ -245,6 +248,68 @@ def proxy_environment(
     }
 
 
+def inner_docker_mount() -> dict[str, Any]:
+    """The data root of the container's own Docker on a volume of its own (#1136, Incus only).
+
+    Under Sysbox the runtime backs `/var/lib/docker` with a file system of the host, so the inner
+    containerd can mount overlayfs on it. Instance B has no Sysbox: left in the container's
+    writable layer, the data root is an overlay on B's overlay, which the kernel refuses to use as
+    the upper layer of another (`failed to mount ... overlay ... err: invalid argument`, at the
+    second layer of any image). An anonymous volume of B's Docker is a directory of B's own file
+    system: no host path, no bind, and it goes with B."""
+    return {
+        "Type": "volume",
+        "Target": INNER_DOCKER_DIRECTORY,
+        "ReadOnly": False,
+        "VolumeOptions": {"NoCopy": True},
+    }
+
+
+_VOLUME_NAME = re.compile(r"[0-9a-f]{64}")
+# The data root of B's own Docker (the default; nothing configures another), where a local volume's
+# directory is.
+_VOLUMES_DIRECTORY = "/var/lib/docker/volumes"
+
+
+def _anonymous_local_volume(mount: dict[str, Any]) -> bool:
+    """What the daemon reports of an anonymous volume of the local driver: a 64 hex name and its
+    own directory under the daemon's volumes. A named volume, another driver, or a local volume
+    with `o=bind` options (whose `Source` is a path of the host) is none of them."""
+    name = mount.get("Name")
+    return (
+        mount.get("Type") == "volume"
+        and isinstance(name, str)
+        and _VOLUME_NAME.fullmatch(name) is not None
+        and mount.get("Driver") == "local"
+        and mount.get("Source") == f"{_VOLUMES_DIRECTORY}/{name}/_data"
+    )
+
+
+def mount_problems(mounts: object, allowed: set[str], *, split: bool) -> list[str]:
+    """What is wrong with the container's mounts as the daemon reports them: a destination that was
+    not asked for, or (split) the inner Docker's data root as anything but exactly one anonymous
+    volume of the local driver, or missing."""
+    destinations: set[object] = set()
+    problems: list[str] = []
+    data_roots: list[dict[str, Any]] = []
+    for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
+        given = as_object(mount)
+        destination = None if given is None else given.get("Destination")
+        destinations.add(destination)
+        if given is not None and destination == INNER_DOCKER_DIRECTORY:
+            data_roots.append(given)
+    # Expected on the split placement: a container without it has an inner Docker that fails at the
+    # second layer of an image (#1136).
+    if split and (len(data_roots) != 1 or not _anonymous_local_volume(data_roots[0])):
+        problems.append("mounts")
+    wanted: set[object] = set(allowed)
+    if split:
+        wanted.add(INNER_DOCKER_DIRECTORY)
+    if destinations - wanted:
+        problems.append("mounts")
+    return problems
+
+
 def agent_document(
     image: str,
     work_volume: str,
@@ -278,6 +343,8 @@ def agent_document(
     ]
     if result:
         mounts.append(result_mount(work_volume, AGENT_RESULT_DIRECTORY, read_only=False))
+    if placement.split:
+        mounts.append(inner_docker_mount())
     limits: dict[str, Any] = {"NanoCpus": nano_cpus} if nano_cpus > 0 else {}
     # #856: the Claude Code agent runs as an unprivileged user with the device's login in its
     # environment; nothing it runs may gain privileges (a setuid program, a file capability). The
@@ -733,15 +800,10 @@ class AgentContainer:
             self._seams.no_new_privileges
         ):
             problems.append("no-new-privileges")
-        destinations: set[object] = set()
-        for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
-            given = as_object(mount)
-            destinations.add(None if given is None else given.get("Destination"))
         allowed = set(self._seams.places.agent_paths)
         if self._result:
             allowed.add(AGENT_RESULT_DIRECTORY)
-        if destinations - allowed:
-            problems.append("mounts")
+        problems.extend(mount_problems(mounts, allowed, split=self._seams.placement.split))
         if problems:
             self._kill()
             raise unavailable(

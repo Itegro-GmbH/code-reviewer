@@ -78,8 +78,9 @@ from code_reviewer_runner.implementer.placement import B_DOCKER_SOCKET
 from .client import ExecProcess, ExecResult, IncusClient, IncusError, InstanceSpec, run_exec
 from .control_run import ControlLaunch, build_control
 from .endpoint import ControlListener
+from .instances import instance_spec
 from .provision import misconfigured_objects, missing_objects
-from .reaper import MARK, OWNER_MARK, ROLE_MARK, SLOT_MARK, Reaped, reap_leftovers
+from .reaper import Reaped, reap_leftovers
 from .settings import IncusSettings
 from .slots import INNER_A_ADDRESS, INNER_B_ADDRESS, IncusSlot, SlotPool
 from .walls import (
@@ -369,31 +370,13 @@ class IncusSandbox:
     # -- the two instances ---
 
     def _spec(self, job: _Job, *, role: str) -> InstanceSpec:
-        settings = self.settings
         a = role == "a"
-        config = {
-            "security.privileged": "false",
-            "security.nesting": "true",
-            "security.idmap.isolated": "true",
-            "limits.cpu": str(settings.a_cpus if a else settings.vcpus),
-            "limits.memory": f"{settings.a_memory_mib if a else settings.memory_mib}MiB",
-            "limits.memory.swap": "false",
-            "limits.processes": str(settings.processes),
-            "boot.autostart": "false",
-            # The guest API (`/dev/incus`, formerly devlxd: the host's API for an instance) is
-            # nothing the launcher or the jobs use: not offered to the setup or the agent.
-            "security.guestapi": "false",
-            MARK: job.start.job_id,
-            SLOT_MARK: str(job.slot.index),
-            ROLE_MARK: role,
-            OWNER_MARK: self.settings.owner,
-        }
-        return InstanceSpec(
+        return instance_spec(
+            self.settings,
             name=job.instance_a if a else job.instance_b,
-            image=settings.image,
-            pool=settings.pool,
-            config=config,
-            disk_gib=settings.a_disk_gib if a else settings.disk_gib,
+            role=role,
+            job=job.start.job_id,
+            slot=job.slot.index,
         )
 
     async def _create(self, job: _Job) -> None:

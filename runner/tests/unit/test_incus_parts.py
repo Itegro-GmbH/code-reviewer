@@ -600,12 +600,21 @@ def runner_config(parallel: int = 1) -> RunnerConfig:
 def test_a_machine_that_has_everything_is_ready() -> None:
     with short_directory() as root:
         incus = FakeIncus(pool="crpool")
+        incus.image_properties_of["code-reviewer-golden"] = {
+            "code-reviewer.worker-features": "inner_docker_volume"
+        }
         env = environment(FACTORY_RUNNER_VM_STATE_DIR=str(root))
 
-        prepared = prepare_incus(runner_config(), env, client=incus.provision)
+        prepared = prepare_incus(
+            runner_config(),
+            env,
+            client=incus.provision,
+            agent_docker=lambda settings, client: Check("agent-docker", True),
+        )
 
         names = {check.name: check.ok for check in prepared.selftest.checks}
         assert names["incus"] and names["incus-objects"] and names["state-dir"]
+        assert names["agent-docker"]
 
 
 def test_a_machine_that_lacks_something_says_what() -> None:

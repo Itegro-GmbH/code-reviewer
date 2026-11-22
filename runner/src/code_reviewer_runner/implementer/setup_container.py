@@ -90,6 +90,7 @@ from .agent_container import (
     WRITE_FILE_SCRIPT,
     Adopted,
     agent_document,
+    mount_problems,
 )
 from .docker_api import DockerApi, DockerError
 from .door_launcher import PRIVATE_RANGES
@@ -693,15 +694,10 @@ class SetupContainer:
             self._seams.no_new_privileges
         ):
             problems.append("no-new-privileges")
-        destinations: set[object] = set()
-        for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
-            given = as_object(mount)
-            destinations.add(None if given is None else given.get("Destination"))
         allowed = set(self._seams.places.agent_paths)
         if self._seams.result:
             allowed.add(AGENT_RESULT_DIRECTORY)
-        if destinations - allowed:
-            problems.append("mounts")
+        problems.extend(mount_problems(mounts, allowed, split=self._seams.placement.split))
         # Not one variable besides the image's own (and the host's proxy on a customer's machine).
         image_config = as_object(self._api.inspect_image(image).get("Config")) or {}
         proxy = self._seams.outer_proxy

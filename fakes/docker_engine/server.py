@@ -22,6 +22,7 @@ talks to a real daemon, a real network or a real model.
 """
 
 import contextlib
+import hashlib
 import json
 import os
 import select
@@ -380,10 +381,7 @@ class FakeDockerEngine:
         networks: dict[str, dict[str, Any]] = {name: {} for name in container.networks}
         if not networks and not container.detached:
             networks = {host_mode: {}}
-        mounts = [
-            {"Type": m.get("Type"), "Destination": m.get("Target"), "Name": m.get("Source")}
-            for m in host.get("Mounts", [])
-        ]
+        mounts = [self._reported_mount(container, m) for m in host.get("Mounts", [])]
         answer: dict[str, Any] = {
             "Id": container.identifier,
             "State": state,
@@ -394,6 +392,24 @@ class FakeDockerEngine:
         }
         override = self.inspect_override.get(container.name)
         self._reply(connection, 200, override(answer) if override else answer)
+
+    @staticmethod
+    def _reported_mount(container: FakeContainer, mount: dict[str, Any]) -> dict[str, Any]:
+        """A mount as `docker inspect` reports it. A volume without a `Source` is anonymous: the
+        daemon names it with 64 hex characters, of the `local` driver, in its own directory."""
+        reported: dict[str, Any] = {
+            "Type": mount.get("Type"),
+            "Destination": mount.get("Target"),
+            "Name": mount.get("Source"),
+        }
+        if mount.get("Type") == "volume":
+            reported["Driver"] = "local"
+            if not mount.get("Source"):
+                seed = f"{container.identifier}{mount.get('Target')}"
+                name = hashlib.sha256(seed.encode()).hexdigest()
+                reported["Name"] = name
+                reported["Source"] = f"/var/lib/docker/volumes/{name}/_data"
+        return reported
 
     def _create_network(self, connection: socket.socket, body: Any) -> None:
         name = body["Name"]
