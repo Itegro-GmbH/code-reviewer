@@ -22,7 +22,8 @@
 //   POST /ex/jira/<cloudId>/rest/api/3/issue/<key>/transitions performs one by id (204); 400 when it needs fields (`requiresFields`) or is not offered
 //   GET|POST /ex/jira/<cloudId>/rest/api/3/search/jql         JQL search, `project = KEY` only, paged by `nextPageToken` (`searchPageSize`), the issues in key order (#1040)
 //   POST /ex/jira/<cloudId>/rest/api/3/webhook                registers dynamic webhooks (`url`, `webhooks[].jqlFilter`, `events`): a grant with
-//                                                             `manage:jira-webhook` only, the clauses Jira supports, at most 5 per grant, 30 days of life
+//                                                             `manage:jira-webhook` only, the clauses Jira supports, at most 5 per grant, ONE address per grant
+//                                                             (a second one is a 400 "Only a single URL per user is allowed ...", #1131), 30 days of life
 //   PUT  /ex/jira/<cloudId>/rest/api/3/webhook/refresh        extends the life of known webhooks by 30 days (`{ expirationDate }`); 404 when none is known
 //   DELETE /ex/jira/<cloudId>/rest/api/3/webhook              deletes webhooks by `webhookIds` (unknown ids are ignored)
 //   GET  /ex/jira/<cloudId>/rest/api/3/webhook                the webhooks of the app, paged (`values`, `isLast`)
@@ -959,6 +960,19 @@ export async function startAtlassianFake(
           response,
           400,
           { errorMessages: ["The url must be https"], errors: {} },
+          entry,
+        );
+      // Jira allows ONE address per app and user (found live, #1131): the webhooks of a grant share it.
+      if (mine().some((hook) => hook.url !== address))
+        return json(
+          response,
+          400,
+          {
+            errorMessages: [
+              "Only a single URL per user is allowed to be registered via REST API.",
+            ],
+            errors: {},
+          },
           entry,
         );
       const results: Record<string, unknown>[] = [];

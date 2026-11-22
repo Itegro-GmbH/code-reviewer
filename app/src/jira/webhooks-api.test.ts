@@ -91,6 +91,29 @@ describe("registering a webhook", () => {
     ).toEqual({ ok: false, error: "jira_webhook_rejected" });
   });
 
+  // #1131-T08
+  it("tells Jira's refusal of a second address from every other rejection, in a 400 and in the results", async () => {
+    const text =
+      "Only a single URL per user is allowed to be registered via REST API.";
+    for (const answer of [
+      () => reply(400, { errorMessages: [text], errors: {} }),
+      () => reply(200, { webhookRegistrationResult: [{ errors: [text] }] }),
+      () => reply(400, { message: text.replace("user", "app") }),
+    ]) {
+      const { api } = apiAnswering(answer);
+      expect(
+        await api.register("c", { url: "u", jql: "x", events: [] }),
+      ).toEqual({ ok: false, error: "jira_webhook_url_conflict" });
+    }
+    // The text is Jira's: nothing of it is passed on.
+    const { api } = apiAnswering(() => reply(400, { errorMessages: [text] }));
+    expect(
+      JSON.stringify(
+        await api.register("c", { url: "u", jql: "x", events: [] }),
+      ),
+    ).not.toContain("single");
+  });
+
   // #1039
   it("maps an answer that is no success to a code and holds nothing of the body", async () => {
     for (const [status, error] of [

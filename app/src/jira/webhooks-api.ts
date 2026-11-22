@@ -58,6 +58,15 @@ const numbersOf = (ids: readonly string[]): number[] =>
 const LIST_PAGE_SIZE = 100;
 const LIST_MAX_PAGES = 5;
 
+/**
+ * Jira's refusal of a second address: "Only a single URL per user (older: per app) is allowed to be registered via REST API." Its text is
+ * Jira's, so it is looked at and never passed on; wherever it sits in the answer (the status line of a 400, an entry of the results) it is
+ * the one refusal with a code of its own (#1131).
+ */
+const SINGLE_URL = /\bonly a single url\b/i;
+const mentionsSingleUrl = (body: unknown): boolean =>
+  body !== undefined && SINGLE_URL.test(JSON.stringify(body));
+
 /** The failure an answer that is no success stands for. */
 function failureOf(status: number): JiraWebhookFailure {
   if (status === 401 || status === 403)
@@ -95,7 +104,12 @@ export function createJiraWebhookApi({
       });
       if (!result.ok) return { ok: false, error: result.error };
       const { response } = result;
-      if (!response.ok) return failureOf(response.status);
+      if (!response.ok) {
+        const refusal = await jsonOf(response);
+        return mentionsSingleUrl(refusal)
+          ? { ok: false, error: "jira_webhook_url_conflict" }
+          : failureOf(response.status);
+      }
       const body = await jsonOf(response);
       // Jira's reference wraps the results, its guide shows the bare array: both are read.
       const results = Array.isArray(body)
@@ -111,6 +125,8 @@ export function createJiraWebhookApi({
       }
       const errors =
         isRecord(first) && Array.isArray(first.errors) ? first.errors : [];
+      if (mentionsSingleUrl(first))
+        return { ok: false, error: "jira_webhook_url_conflict" };
       // The limit is the one refusal the caller can name; its text is Jira's, so it is looked at and never passed on.
       const limit = errors.some(
         (error) =>

@@ -84,6 +84,8 @@ export const JIRA_WEBHOOK_ERROR_CODES = [
   "jira_forbidden",
   /** Jira allows 5 webhooks per OAuth app and user on a site; this connection has them all. */
   "jira_webhook_limit",
+  /** Jira allows ONE address per app and user and the person of this connection already has webhooks under another one (another connection or workspace of the same Jira account, or a webhook that is not the factory's). */
+  "jira_webhook_url_conflict",
   /** Jira refused the registration for another reason (a rejected address or filter, an answer that holds no webhook id). */
   "jira_webhook_rejected",
 ] as const;

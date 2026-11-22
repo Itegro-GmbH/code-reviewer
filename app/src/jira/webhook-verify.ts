@@ -6,8 +6,12 @@
 // signature (`X-Hub-Signature`) for these webhooks (the `secret` field belongs to admin webhooks). Atlassian's developer community reports
 // that OAuth-registered webhooks carry neither. So the factory does not rest on that token alone:
 //
-//  1. The registered address carries an unguessable secret of its own, one per registration (`newWebhookSecret`, 256 bits; only its SHA-256
-//     is stored, `hashWebhookSecret`). A delivery without it, or with another one, is refused. This is the check that always applies.
+//  1. The registered address carries an unguessable secret. Since #1131 Jira allows one address per app and user, so the webhooks of the
+//     projects of one connection share it, and the secret is one per connection and generation, DERIVED (`deriveWebhookSecret`: HMAC over the
+//     connection id and the generation with a key of the app secret) so that a second project can register under the same address although
+//     nothing but the generation is stored. An address from before (`?w=<registration>&s=<secret>`) carries a random secret of its own
+//     (`newWebhookSecret`, 256 bits) of which only the SHA-256 is stored (`hashWebhookSecret`); it is accepted until its row moves. A delivery
+//     without the secret, or with another one, is refused. This is the check that always applies.
 //  2. When the delivery carries a bearer token, it must be a JWT (HS256, HS384 or HS512, never `none` or an asymmetric algorithm) signed with
 //     the app's client secret, not expired when it has an `exp`, and not issued (`iat`) or valid (`nbf`) in the future beyond a small clock
 //     skew. A token that does not verify refuses the delivery, as Atlassian's documentation asks ("Remember to verify the token"). A token
@@ -24,10 +28,25 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
+import { deriveKey } from "../crypto/keys.ts";
 
 /** A new secret for the address of a registration: 32 random bytes, base64url (43 characters). */
 export const newWebhookSecret = (): string =>
   randomBytes(32).toString("base64url");
+
+/**
+ * The secret in the shared address of a connection: HMAC-SHA256 of the connection id and the generation, keyed by a key derived from the app
+ * secret for this purpose (256 bits, base64url). Deterministic, so it can be put into the address again for the next project of the connection
+ * without being stored; a rotation counts the generation up and gives a new secret. Never logged.
+ */
+export const deriveWebhookSecret = (
+  appSecret: string,
+  connectionId: string,
+  generation: number,
+): string =>
+  createHmac("sha256", deriveKey(appSecret, "jira-webhook-address"))
+    .update(JSON.stringify([connectionId, generation]))
+    .digest("base64url");
 
 /** What is stored of a secret. A secret is random and long, so a plain SHA-256 is enough (nothing to brute-force). */
 export const hashWebhookSecret = (secret: string): string =>
@@ -48,7 +67,7 @@ export type JiraDeliveryVerdict =
 export type VerifyDeliveryInput = {
   /** The secret the request's address carried, null for none. */
   urlSecret: string | null;
-  /** The hash stored for the registration the address names. */
+  /** The hash of the secret the address must carry: stored for a per-project address, the hash of the derived secret for a connection's. */
   storedSecretHash: string;
   /** The hash of the secret of a registration under way: accepted next to the stored one (null or left out for none). */
   pendingSecretHash?: string | null;

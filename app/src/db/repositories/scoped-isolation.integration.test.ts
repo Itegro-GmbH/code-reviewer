@@ -677,7 +677,6 @@ async function seed(
     projectId: `jira-project-${tag}`,
     connectionId: `jira-${tag}`,
     projectKey: "PROJ",
-    secretHash: `hash-${tag}`,
   });
   // An MCP server (#1050) in every workspace, with sealed headers: the other workspace's is there to be read, changed, tested and removed.
   await repos.mcp.create(
@@ -3347,7 +3346,6 @@ const CASES: Case[] = [
         projectId: "jira-project-a-second",
         connectionId: b.jiraConnectionId,
         projectKey: "PROJ",
-        secretHash: "x",
       }),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
@@ -3383,6 +3381,31 @@ const CASES: Case[] = [
   {
     name: "jiraWebhooks.markBearerSeen",
     run: (a, b) => a.jiraWebhooks.markBearerSeen(b.jiraWebhookId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  // The shared address of a connection (#1131): B's generation, address and token are not A's to read or change.
+  {
+    name: "jiraWebhooks.listByProjectKey",
+    run: (a, b) => a.jiraWebhooks.listByProjectKey(b.jiraConnectionId, "PROJ"),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "jiraWebhooks.getEndpoint",
+    run: (a, b) => a.jiraWebhooks.getEndpoint(b.jiraConnectionId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jiraWebhooks.markEndpointBearerSeen",
+    run: (a, b) => a.jiraWebhooks.markEndpointBearerSeen(b.jiraConnectionId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.moveToSharedAddress",
+    run: (a, b) =>
+      a.jiraWebhooks.moveToSharedAddress(b.jiraConnectionId, {
+        rotate: true,
+        expectedGeneration: 1,
+      }),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {

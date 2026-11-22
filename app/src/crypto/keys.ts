@@ -13,12 +13,14 @@ import { hkdfSync } from "node:crypto";
  * - `state-signing`: signed state values of round trips (for example to GitHub and back).
  * - `setup-code`: the keyed hash of the first-run setup code kept in the database of a serverless deployment.
  * - `secret-encryption`: AES-256-GCM of the credentials stored in the database.
+ * - `jira-webhook-address`: the secret in the address of the Jira webhooks of a connection, derived per connection and generation (#1131).
  */
 export const KEY_PURPOSES = [
   "setup-session",
   "state-signing",
   "secret-encryption",
   "setup-code",
+  "jira-webhook-address",
 ] as const;
 export type KeyPurpose = (typeof KEY_PURPOSES)[number];
 

@@ -91,6 +91,15 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   profile_versions: ["environment_id"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.
   usage_records: ["cost_basis"],
+  // #1131: the generation and the start of the shared webhook address of a connection and when a token of it first verified; the generation is
+  // 1 for every connection that exists (`DEFAULTS_OF_COLUMNS`), the others are null.
+  jira_connections: [
+    "webhook_generation",
+    "webhook_address_at",
+    "webhook_bearer_seen_at",
+  ],
+  // #1131: the address a webhook is registered under (`project` for every row that exists) and the marker of a registration under way.
+  jira_webhooks: ["address", "registration_attempt"],
   // #972: how a runner learns of a job; every runner that exists polls (`DEFAULTS_OF_COLUMNS`) and holds no address, key or secret.
   runners: [
     "delivery_mode",
@@ -123,6 +132,8 @@ const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
   workflow_runs: { trigger_kind: "manual" },
   runners: { delivery_mode: "poll" },
   jobs: { mcp_calls: 0 },
+  jira_connections: { webhook_generation: 1 },
+  jira_webhooks: { address: "project" },
 };
 
 /** The names of the columns of `table` that a migration after the one under test added (a test of the columns of every old table leaves them out). */

@@ -12,6 +12,7 @@ import { createWebhookDeliveriesRepository } from "../db/repositories/webhook-de
 import { getDatabase } from "../db/startup.ts";
 import { createJiraMirror } from "./mirror.ts";
 import { getAtlassianConfig, jiraStatusesFor } from "./shared.ts";
+import { webhookAddressSecret } from "./webhook-registrar-shared.ts";
 import {
   createJiraWebhookHandler,
   type JiraAnswerTaker,
@@ -31,6 +32,7 @@ export function getJiraWebhookHandler(
   return createJiraWebhookHandler({
     directory: createJiraWebhookDirectory(db),
     deliveries: createWebhookDeliveriesRepository(db),
+    addressSecret: webhookAddressSecret,
     clientSecret: () => {
       const config = getAtlassianConfig();
       return config.configured ? config.clientSecret : undefined;

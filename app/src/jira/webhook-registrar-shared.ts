@@ -4,6 +4,7 @@
 // the public address of the app. Used by the hooks of a project (`project-hooks.ts`) and the nightly job.
 import "server-only";
 import { loadAuthConfig } from "../auth/config.ts";
+import { resolveAppSecret } from "../crypto/app-secret.ts";
 import { createJiraWebhooksRepository } from "../db/repositories/jira-webhooks-repository.ts";
 import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
@@ -18,7 +19,18 @@ import {
   createJiraWebhookRegistrar,
   type JiraWebhookRegistrar,
 } from "./webhook-registrar.ts";
+import { deriveWebhookSecret } from "./webhook-verify.ts";
 import { createJiraWebhookApi } from "./webhooks-api.ts";
+
+/** The secret in the shared address of a connection (the app secret is checked at startup, `src/auth/startup.ts`; this is the second line). */
+export function webhookAddressSecret(
+  connectionId: string,
+  generation: number,
+): string {
+  const resolved = resolveAppSecret(process.env);
+  if (!resolved.ok) throw new Error(resolved.problem);
+  return deriveWebhookSecret(resolved.secret, connectionId, generation);
+}
 
 /** The registrar of one workspace; `reconcile` answers `jira_unavailable` where the Atlassian settings are not set (nothing can be asked of Jira). */
 export function jiraWebhookRegistrarFor(
@@ -34,6 +46,7 @@ export function jiraWebhookRegistrarFor(
     projects: createProjectsRepository(db, workspaceId),
     api: createJiraWebhookApi({ tokens: getJira().tokensFor(workspaceId) }),
     publicUrl: loadAuthConfig(process.env).baseUrl,
+    addressSecret: webhookAddressSecret,
   });
 }
 
