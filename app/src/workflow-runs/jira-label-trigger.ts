@@ -19,11 +19,17 @@
 //  - The stale guard: Jira is asked for the issue once a lane matched, and it must STILL have the label (as the status front checks the status):
 //    a late or repeated delivery for a label that was taken off since starts nothing. Jira that cannot be asked fails the delivery (it is
 //    tried again: Jira retries 5xx; a run that exists is not written twice).
-//  - A delivery starts each lane at most once (`jira-label-<registration>-<identifier>-<workflow>`), and a lane has at most one running run per
-//    ticket (`<repository id>#<KEY-7>`, the key of the other fronts), which also holds back a run a pre-step's own label would start. The run's
-//    input is `{ ticket }` (the ticket with Jira's own status name; `key` is `PROJ-12`, `number` is 0).
+//  - A delivery starts each lane at most once (`jira-label-<registration>-<identifier>-<workflow>`), and a lane has at most one active
+//    (`running` or `waiting`) run per ticket, whatever started it. The runs of the label and status fronts hold the ticket's key
+//    (`<repository id>#<KEY-7>`, the key of the other fronts); a run started by hand or through the API holds none, so a lane that already has
+//    a run with the ticket's `ticket_ref` starts no second one (`findActiveForTicket`): this is what holds back the delivery caused by the
+//    label that run's own pre-step wrote. The run a delivery wrote itself is told apart by its request id (a retry finds it).
+//  - Several `ticket.labeled` triggers of one lane: Jira can put two labels on in one edit; the lane starts one run, through the first
+//    matching trigger in document order. A clone, a move or an issue created with the label (by the factory too) counts as created with it.
+//    The run's input is `{ ticket }` (the ticket with Jira's own status name; `key` is `PROJ-12`, `number` is 0).
 import { laneLabelIsAmong } from "../workflows/label-match.ts";
 import type { StoredProject } from "../db/repositories/projects-repository.ts";
+import type { WorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { BUDGET_OPERATOR_MAX_USD } from "../workflows/limits.ts";
 import { formatTicketRef } from "../workflows/ticket-ref.ts";
@@ -71,8 +77,10 @@ export type JiraLabelTrigger = {
 
 export type JiraLabelTriggerDependencies = Pick<
   StatusTriggerDependencies,
-  "runs" | "kick" | "maxBudgetUsd" | "log" | "repositoryOf"
+  "kick" | "maxBudgetUsd" | "log" | "repositoryOf"
 > & {
+  /** `findActiveForTicket`: a run of the lane for the ticket that goes on, whatever started it (a run by hand holds no trigger key). */
+  runs: Pick<WorkflowRunsRepository, "createRun" | "findActiveForTicket">;
   workflows: Pick<WorkflowsRepository, "listProjectWithIssueTrigger">;
   /** The project with its Jira source (null for another source); undefined for none. */
   projectOf(projectId: string): Promise<
@@ -201,17 +209,42 @@ export function createJiraLabelTrigger(
       }
       if (standing.length === 0) return result;
 
+      const ticketRef = formatTicketRef({
+        provider: "jira",
+        repo: repository.fullName,
+        key: added.issueKey,
+      });
+      // A run by hand or through the API for this ticket holds no trigger key, yet its pre-step may put this very label on the ticket, and
+      // on Jira that write reaches this webhook as a person's. A lane that already has a run for the ticket starts no second one, whatever
+      // started the first. The run this delivery wrote itself (the delivery comes again) is no such run: it is found by its request id.
+      const free: MatchedStatusLane[] = [];
+      for (const lane of standing) {
+        const running = await deps.runs.findActiveForTicket(
+          lane.workflowId,
+          ticketRef,
+        );
+        if (
+          running === undefined ||
+          running.clientRequestId ===
+            jiraLabelRequestId(deliveryId, lane.workflowId)
+        ) {
+          free.push(lane);
+          continue;
+        }
+        result.busy += 1;
+        log(
+          `[label-trigger] workflow=${lane.workflowId} starts no run: run=${running.id} is still running for ticket ${added.issueKey.slice(0, 40)}`,
+        );
+      }
+      if (free.length === 0) return result;
+
       await writeStatusRuns(deps, {
-        matching: standing,
+        matching: free,
         result,
         repository,
         triggerInput: JSON.stringify(jiraLabelTriggerInput(ticket, repository)),
         triggerKey: `${repository.id}#${added.issueKey}`,
-        ticketRef: formatTicketRef({
-          provider: "jira",
-          repo: repository.fullName,
-          key: added.issueKey,
-        }),
+        ticketRef,
         actorLogin: bounded(
           added.actor?.name || added.actor?.accountId || "unknown",
           ACTOR_LOGIN_MAX_CHARS,

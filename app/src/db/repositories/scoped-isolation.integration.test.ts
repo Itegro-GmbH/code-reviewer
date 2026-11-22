@@ -2691,6 +2691,16 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
+    // #1129: B's ticket holds no run of A that is active for the workflow.
+    name: "workflowRuns.findActiveForTicket",
+    run: (a, b) =>
+      a.workflowRuns.findActiveForTicket(
+        b.workflowRun.workflowId,
+        b.workflowRun.ticketRef ?? "none",
+      ),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
     // #924: the seeded workspaces have no run that waits, no answered question and no pull request a lane opened; what the three read
     // for the ToDos stays inside the workspace (`todos/service.integration.test.ts` proves it with rows in both).
     name: "workflowRuns.listWaiting",

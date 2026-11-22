@@ -324,6 +324,59 @@ describe("triggers with pre-steps", () => {
     ).toEqual([["/steps/0/add/0", "label_retriggers_workflow"]]);
   });
 
+  // #1129-T22 (review of #1130, finding 2): Jira writes "ready for agent" as "ready-for-agent", so a step that adds one spelling puts the
+  // label of the trigger with the other on the issue. The validator cannot tell the provider: the same label only on Jira is a warning.
+  it("warns for a label that is the trigger's label once Jira's hyphen rule is applied, in both directions, and refuses the identical one", () => {
+    const warned = (document: Json) =>
+      (check(document).warnings ?? []).map((w) => [w.path, w.code]);
+    const spaced = { ...LABELED, label: "ready for agent" };
+    const hyphen = { ...LABELED, label: "ready-for-agent" };
+    const hyphenated = workflow(
+      [spaced, MANUAL],
+      [labels("again", ["Ready-For-Agent"])],
+    );
+    expect(check(hyphenated).errors).toEqual([]);
+    expect(warned(hyphenated)).toEqual([
+      ["/steps/0/add/0", "label_retriggers_workflow"],
+    ]);
+    const spelled = workflow(
+      [hyphen, MANUAL],
+      [labels("again", ["ready for  agent"])],
+    );
+    expect(check(spelled).errors).toEqual([]);
+    expect(warned(spelled)).toEqual([
+      ["/steps/0/add/0", "label_retriggers_workflow"],
+    ]);
+    // The pre-step of the label trigger itself is checked the same way.
+    expect(
+      warned(
+        workflow([
+          { ...spaced, steps: [labels("again", ["ready-for-agent"])] },
+          MANUAL,
+        ]),
+      ),
+    ).toEqual([["/triggers/0/steps/0/add/0", "label_retriggers_workflow"]]);
+    // The pre-step of another trigger is left alone (the manual trigger of the demo lane adds the label on purpose, #1129-T21), and so is
+    // another label.
+    expect(
+      warned(
+        workflow([
+          spaced,
+          { ...MANUAL, steps: [labels("again", ["ready-for-agent"])] },
+        ]),
+      ),
+    ).toEqual([]);
+    expect(
+      warned(
+        workflow([spaced, MANUAL], [labels("again", ["ready-for-review"])]),
+      ),
+    ).toEqual([]);
+    // The identical text stays an error.
+    expect(
+      codes(workflow([spaced, MANUAL], [labels("again", ["Ready For Agent"])])),
+    ).toEqual([["/steps/0/add/0", "label_retriggers_workflow"]]);
+  });
+
   // #916-T28
   it("lets onFailure read what every trigger yields, like the shared steps", () => {
     const document = {

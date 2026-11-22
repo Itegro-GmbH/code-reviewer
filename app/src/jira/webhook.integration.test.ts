@@ -318,6 +318,7 @@ async function world(options: { german?: boolean } = {}) {
       100,
     );
     if (!lane.ok) throw new Error("seeding failed");
+    return lane;
   }
   const labelsChanged = (from: string | null, to: string) => ({
     webhookEvent: "jira:issue_updated" as const,
@@ -352,6 +353,7 @@ async function world(options: { german?: boolean } = {}) {
     kicked,
     createJiraProject,
     addLabelLane,
+    runs,
     labelsChanged,
     moveTo,
     runsOf,
@@ -872,6 +874,53 @@ describe("a delivery of Jira", () => {
         w.labelsChanged("backend", "backend ready-for-agent"),
       );
     expect(await w.runsOf()).toHaveLength(1);
+  });
+
+  // #1129-T21 (review of #1130, finding 1): a start by hand names the ticket and holds no trigger key; its pre-step puts the lane's own label on
+  // the ticket, and on Jira that write reaches the webhook as a person's label. The run by hand is the one run: the delivery starts no second.
+  it("starts no second run for the label a run started by hand put on the ticket itself, and starts one when that run is over", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    const lane = await w.addLabelLane(project.id, "ready for agent");
+    const hook = await w.hook();
+    w.h.atlassian.setIssues(SITE.id, [
+      { ...ISSUE, labels: ["backend", "ready-for-agent"] },
+    ]);
+    const byHand = await w.runs.createRun({
+      workflowId: lane.workflow.id,
+      workflowVersion: lane.saved.version,
+      repositoryId: w.repository.id,
+      baseBranch: "main",
+      triggerInput: "{}",
+      budgetMicroUsd: 1_000_000,
+      clientRequestId: "by-hand-1",
+      triggerKind: "manual",
+      createdBy: w.owner.id,
+      actorLogin: "owner",
+      ticketRef: "jira:acme/shop#PROJ-7",
+    });
+    expect(byHand.status).toBe("created");
+
+    const answer = await w.h.atlassian.deliver(
+      hook.id,
+      w.labelsChanged("backend", "backend ready-for-agent"),
+    );
+
+    expect(answer.status).toBe(200);
+    expect(await w.runsOf()).toHaveLength(1);
+    expect(w.h.logs.join("\n")).toContain("is still running for ticket");
+
+    // Once that run is over, the same label starts the lane again (another delivery).
+    await w.h.db
+      .updateTable("workflow_runs")
+      .set({ status: "succeeded", finished_at: "2026-11-14T10:00:00.000Z" })
+      .where("id", "=", byHand.run.id)
+      .execute();
+    await w.h.atlassian.deliver(
+      hook.id,
+      w.labelsChanged("backend", "backend ready-for-agent"),
+    );
+    expect(await w.runsOf()).toHaveLength(2);
   });
 
   // #1129-T03

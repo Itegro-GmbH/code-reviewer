@@ -68,6 +68,11 @@ function harness(
     repository?: "none";
     /** The ids of the lanes that already have a running run for the ticket. */
     running?: string[];
+    /**
+     * Runs of a lane for the ticket that hold no trigger key: a run started by hand or through the API (`ticketRef` set, `triggerKey`
+     * not). `clientRequestId` is the request that started it.
+     */
+    byHand?: { workflowId: string; clientRequestId: string }[];
   } = {},
 ) {
   const created: NewWorkflowRun[] = [];
@@ -77,6 +82,18 @@ function harness(
   const written = new Map<string, StoredWorkflowRun>();
   const trigger = createJiraLabelTrigger({
     runs: {
+      async findActiveForTicket(workflowId, ticketRef) {
+        const found = options.byHand?.find(
+          (run) => run.workflowId === workflowId,
+        );
+        if (found === undefined || ticketRef !== "jira:acme/widgets#PROJ-7")
+          return undefined;
+        return {
+          id: "run-by-hand",
+          status: "running",
+          clientRequestId: found.clientRequestId,
+        } as StoredWorkflowRun;
+      },
       async createRun(input) {
         const earlier = written.get(input.clientRequestId);
         if (earlier !== undefined) return { status: "existing", run: earlier };
@@ -244,6 +261,50 @@ describe("which lanes of a Jira project a label put on an issue starts", () => {
     });
     expect(held.kicked).toEqual([]);
     expect(held.lines.join("\n")).toContain("[label-trigger]");
+  });
+
+  // #1129-T21 (review of #1130, finding 1): a run started by hand or through the API holds no trigger key, and its pre-step puts the lane's own
+  // label on the ticket; on Jira that write is a person's, so the delivery it causes must not start a second run of the lane.
+  it("starts nothing for the label a run started by hand wrote itself, and still starts the lanes that have no run", async () => {
+    const { trigger, created, kicked, lines } = harness(
+      [
+        { id: "wf-1", document: doc(LABELED) },
+        { id: "wf-2", document: doc(LABELED) },
+      ],
+      {
+        byHand: [{ workflowId: "wf-1", clientRequestId: "request-by-hand" }],
+      },
+    );
+    expect(await trigger.start("d1", ADDED)).toEqual({
+      matched: 2,
+      started: 1,
+      existing: 0,
+      skipped: 0,
+      busy: 1,
+    });
+    expect(created.map((run) => run.workflowId)).toEqual(["wf-2"]);
+    expect(kicked).toEqual(["run-1"]);
+    expect(lines.join("\n")).toContain("run-by-hand");
+  });
+
+  // #1129-T21
+  it("does not hold back the run its own delivery wrote when the delivery is tried again", async () => {
+    const { trigger, created } = harness(
+      [{ id: "wf-1", document: doc(LABELED) }],
+      {
+        byHand: [
+          {
+            workflowId: "wf-1",
+            clientRequestId: "jira-label-d1-wf-1",
+          },
+        ],
+      },
+    );
+    expect(await trigger.start("d1", ADDED)).toMatchObject({
+      busy: 0,
+      started: 1,
+    });
+    expect(created).toHaveLength(1);
   });
 
   // #1129

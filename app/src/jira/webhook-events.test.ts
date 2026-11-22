@@ -277,7 +277,7 @@ describe("parseJiraDelivery", () => {
   });
 
   // #1129-T02
-  it("reads space-separated lists, several label items and a payload without a changelog", () => {
+  it("reads space-separated lists and several label items, ignores an item of another field, and reads a payload without a changelog", () => {
     const change = parseJiraDelivery(
       {
         timestamp: 1,
@@ -292,7 +292,7 @@ describe("parseJiraDelivery", () => {
               toString: "a b ready-for-agent  needs-review",
             },
             { field: "labels", fromString: null, toString: "ready-for-agent" },
-            // The label that was added and taken off again in one delivery is in the last list only: its item adds it once.
+            // An item of another field is no label item, even when its text looks like a list: `y` is added by none of the `labels` items.
             { field: "Labels", fromString: "x", toString: "x y" },
           ],
         },
@@ -309,6 +309,27 @@ describe("parseJiraDelivery", () => {
       SITE,
     );
     expect(bare).toMatchObject({ labelsAdded: [] });
+  });
+
+  // #1129-T02
+  it("reports a label that one item put on and a later item of the same delivery took off again: the stale guard of the trigger drops it", () => {
+    const change = parseJiraDelivery(
+      {
+        timestamp: 1,
+        webhookEvent: "jira:issue_updated",
+        issue: issue(),
+        changelog: {
+          items: [
+            { field: "labels", fromString: "x", toString: "x y" },
+            { field: "labels", fromString: "x y", toString: "x" },
+          ],
+        },
+      },
+      SITE,
+    );
+    // The parser reads the items and nothing else: it does not know the issue now. Jira is asked for it before a lane starts
+    // (`jira-label-trigger.ts`, "the issue must still have the label").
+    expect(change).toMatchObject({ labelsAdded: ["y"] });
   });
 
   // #1129-T03

@@ -148,7 +148,7 @@ The label an `ticket.labeled` trigger waits for is not added again by the bot's 
 pre-step of `manual`, which is right).
 
 Why a pre-step may add the label of **another** trigger and a shared step may not add any trigger's label: the webhook ignores the App's own
-writes, so a label a step adds never fires a trigger by itself. That makes it safe for the pre-step of `manual` to put the label of `labeled` on
+writes, so a label a step adds never fires a trigger by itself (on GitHub; on Jira the write looks like a person's and the run that is already going on for the ticket holds it back, [A label in a Jira project](#a-label-in-a-jira-project)). That makes it safe for the pre-step of `manual` to put the label of `labeled` on
 the ticket: that pre-step runs for `manual` only, never for the trigger whose label it adds, and it is how one context is made like the other.
 A shared step has no such place: it runs for **every** trigger, so the label it adds is always the label of a trigger it also runs for. The
 document would then state, in its own steps, that a run puts back the label that started it, and only the webhook's exemption would keep that
@@ -1426,11 +1426,17 @@ webhook the factory registers already delivers `jira:issue_updated` and `jira:is
 - **Only an addition starts a run.** The `labels` item of the changelog is compared with the old list: taking a label off, or changing another label while this one stays, starts nothing. An issue that is **created with** the label starts the lane as well
   (as on GitHub, where an issue template's label is a label put on; keep the trigger label out of Jira automations and templates unless that is meant).
 - **Scope and guards.** Only the lanes of the project whose ticket source is that Jira project (and that is switched on) are looked at. Jira is asked for the issue once a lane matched, and it must still have the label (a late or repeated delivery for a label that was taken off starts nothing).
-  A delivery starts a lane once, and a lane has one running run per ticket (a label put on again while the run goes on starts none).
+  A delivery starts a lane once, and a lane has one active (running or waiting) run per ticket, **whatever started it**: a label put on again while the run goes on starts none, and neither does the label that the pre-step of a run started by hand or through the API
+  puts on the ticket itself (such a run holds no trigger key, so the trigger looks for a run of the lane with the same `ticket_ref` before it starts one, and the log says `is still running for ticket`). When that run has ended, the next label starts the lane again.
+- **Several label triggers in one lane.** Jira can put two labels on in one edit. A lane with two `ticket.labeled` triggers (say "ready for agent" and "needs review", with different pre-steps) still starts **one** run, through the **first** matching trigger in document order; the pre-steps of the other
+  trigger do not run. On GitHub one event carries one label, so this only happens on Jira.
+- **A clone, a move or a factory-made issue starts the lane too.** Every label of an issue that is *created* counts as put on, so a **clone** of an issue that carries the label, an issue **moved** into the project with it, an issue created from a template, and an issue the factory or another automation creates with the label all start the lane, once each.
+  Keep the trigger label out of clone and move automations and out of templates unless that is meant.
 - **The run.** `trigger.ticket` is the Jira ticket as for the status trigger: `key` (`PROJ-12`), `number` (`0`), `title`, `body`, `url`, `status`, `labels`, `type`, `assignees`, `repo` (the repository the code lives in). There is no `trigger.issue`, `trigger.repo` or `trigger.status`. `ticket_ref` is
   `jira:<owner>/<repo>#PROJ-12`, `actorLogin` the name of the person.
 - **Nobody is asked, and the factory's own labels are not told apart.** Jira decides who may label. The factory writes to Jira as the person who connected it, so a label a step writes looks like a person's (GitHub ignores the App's own): the validator's `label_retriggers_workflow` keeps a shared step from adding the lane's
-  own label, and a pre-step of another trigger that does is held back by the one running run per ticket. Use no label the factory itself writes (`agent working`, `agent waiting`) as a trigger label.
+  own label (the same label by Jira's hyphen rule is a **warning**: `ready for agent` and `ready-for-agent` are two labels on GitHub), and a pre-step of another trigger that does (the manual trigger of the demo lane adds "ready for agent" first) starts no second run: the run by hand is the lane's active run for the ticket and holds the label back.
+  Use no label the factory itself writes (`agent working`, `agent waiting`) as a trigger label.
 
 ### The status trigger
 
