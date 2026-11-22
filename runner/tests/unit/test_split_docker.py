@@ -29,11 +29,14 @@ from code_reviewer_runner.dynamic_review.model_door_route import MODEL_NETWORK_N
 from code_reviewer_runner.implementer import exec_pipe
 from code_reviewer_runner.implementer.agent_container import (
     AGENT_RUNTIME,
+    INNER_DOCKER_DIRECTORY,
     READY_FILE,
     Adopted,
     AgentContainer,
     AgentSeams,
     agent_document,
+    inner_docker_mount,
+    mount_problems,
     proxy_environment,
 )
 from code_reviewer_runner.implementer.docker_api import DockerApi
@@ -273,12 +276,66 @@ def test_the_agent_in_b_reaches_the_doors_in_a_and_has_nothing_of_a() -> None:
     assert DOOR_ADDRESS in environment["NO_PROXY"].split(",")
     host = document["HostConfig"]
     assert host["Runtime"] == "runc" and host["Privileged"] is True
-    # Nothing of A: only the repository (and the result directory) of B's volume; no bind, no
-    # socket, no device, no Docker API address.
-    assert {mount["Target"] for mount in host["Mounts"]} == {"/work/repo"}
+    # Nothing of A: only the repository (and the result directory) of B's volume and the data root
+    # of the container's own Docker (a volume of B's, #1136); no bind, no socket, no device, no
+    # Docker API address.
+    assert {mount["Target"] for mount in host["Mounts"]} == {"/work/repo", INNER_DOCKER_DIRECTORY}
     assert not host.get("Binds") and not host.get("Devices")
     assert "docker.sock" not in json.dumps(document) and B_DOCKER_SOCKET not in json.dumps(document)
     assert proxy_environment(RULE) != proxy_environment(RULE, SPLIT)
+
+
+# #1136-T01
+def test_the_inner_docker_of_a_container_in_b_has_its_data_root_on_a_volume_not_in_the_layer() -> (
+    None
+):
+    """Instance B has no Sysbox: a data root in the container's layer is an overlay on B's overlay,
+    and the inner containerd cannot mount a second layer on it (`failed to mount ... overlay ...
+    err: invalid argument`, found live on the DevBox)."""
+    for make in (agent_document, setup_document):
+        document = make("sha256:agent", B_WORK_VOLUME, 1 << 30, runtime="runc", placement=SPLIT)
+        data_roots = [
+            m for m in document["HostConfig"]["Mounts"] if m["Target"] == INNER_DOCKER_DIRECTORY
+        ]
+        assert data_roots == [inner_docker_mount()]
+        (mount,) = data_roots
+        # An anonymous volume of B's own Docker: no host path (no `Source`, no bind).
+        assert mount["Type"] == "volume" and "Source" not in mount
+        assert not document["HostConfig"].get("Binds")
+
+
+# #1136-T02
+def test_the_hosted_containers_have_no_extra_mount_and_sysbox_keeps_backing_the_data_root() -> None:
+    for make in (agent_document, setup_document):
+        document = make("sha256:agent", "volume", 1 << 30)
+        assert {m["Target"] for m in document["HostConfig"]["Mounts"]} == {"/work/repo"}
+
+
+# #1136-T03
+@pytest.mark.parametrize(
+    ("mounts", "split", "expected"),
+    [
+        ([{"Destination": "/work/repo", "Type": "volume"}], True, []),
+        (
+            [
+                {"Destination": "/work/repo", "Type": "volume"},
+                {"Destination": INNER_DOCKER_DIRECTORY, "Type": "volume"},
+            ],
+            True,
+            [],
+        ),
+        # A bind at the data root is host access, however it got there.
+        ([{"Destination": INNER_DOCKER_DIRECTORY, "Type": "bind"}], True, ["mounts"]),
+        # Hosted never asks for it: Sysbox's own mount is not one of the container's `Mounts`.
+        ([{"Destination": INNER_DOCKER_DIRECTORY, "Type": "volume"}], False, ["mounts"]),
+        ([{"Destination": "/etc", "Type": "volume"}], True, ["mounts"]),
+    ],
+)
+def test_the_seal_accepts_the_data_root_only_as_a_volume_and_only_in_b(
+    mounts: list[dict[str, str]], split: bool, expected: list[str]
+) -> None:
+    got = mount_problems(mounts, {"/work/repo"}, split=split)
+    assert sorted(set(got)) == expected
 
 
 # #1017-T01
@@ -311,7 +368,7 @@ def test_the_setup_container_is_made_in_b_on_the_wide_network_with_the_proxy_and
     host = container.document["HostConfig"]
     assert host["Runtime"] == "runc" and host["Privileged"] is True
     assert host["NetworkMode"] == SETUP_NETWORK_NAME
-    assert {m["Source"] for m in host["Mounts"]} == {B_WORK_VOLUME}
+    assert {m.get("Source") for m in host["Mounts"]} == {B_WORK_VOLUME, None}
     environment = dict(entry.split("=", 1) for entry in container.document["Env"])
     assert environment["HTTP_PROXY"] == "http://10.99.0.1:3128"
     assert run.outcome == OUTCOME_OK, run.detail
