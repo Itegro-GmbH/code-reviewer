@@ -48,6 +48,7 @@ crash) is seen by `wait` and named (`AgentEnd`).
 
 import contextlib
 import logging
+import re
 import shlex
 import socket
 import threading
@@ -264,17 +265,43 @@ def inner_docker_mount() -> dict[str, Any]:
     }
 
 
+_VOLUME_NAME = re.compile(r"[0-9a-f]{64}")
+# The data root of B's own Docker (the default; nothing configures another), where a local volume's
+# directory is.
+_VOLUMES_DIRECTORY = "/var/lib/docker/volumes"
+
+
+def _anonymous_local_volume(mount: dict[str, Any]) -> bool:
+    """What the daemon reports of an anonymous volume of the local driver: a 64 hex name and its
+    own directory under the daemon's volumes. A named volume, another driver, or a local volume
+    with `o=bind` options (whose `Source` is a path of the host) is none of them."""
+    name = mount.get("Name")
+    return (
+        mount.get("Type") == "volume"
+        and isinstance(name, str)
+        and _VOLUME_NAME.fullmatch(name) is not None
+        and mount.get("Driver") == "local"
+        and mount.get("Source") == f"{_VOLUMES_DIRECTORY}/{name}/_data"
+    )
+
+
 def mount_problems(mounts: object, allowed: set[str], *, split: bool) -> list[str]:
     """What is wrong with the container's mounts as the daemon reports them: a destination that was
-    not asked for, or (split) the inner Docker's data root as anything but a volume."""
+    not asked for, or (split) the inner Docker's data root as anything but exactly one anonymous
+    volume of the local driver, or missing."""
     destinations: set[object] = set()
     problems: list[str] = []
+    data_roots: list[dict[str, Any]] = []
     for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
         given = as_object(mount)
         destination = None if given is None else given.get("Destination")
         destinations.add(destination)
-        if destination == INNER_DOCKER_DIRECTORY and (given or {}).get("Type") != "volume":
-            problems.append("mounts")
+        if given is not None and destination == INNER_DOCKER_DIRECTORY:
+            data_roots.append(given)
+    # Expected on the split placement: a container without it has an inner Docker that fails at the
+    # second layer of an image (#1136).
+    if split and (len(data_roots) != 1 or not _anonymous_local_volume(data_roots[0])):
+        problems.append("mounts")
     wanted: set[object] = set(allowed)
     if split:
         wanted.add(INNER_DOCKER_DIRECTORY)

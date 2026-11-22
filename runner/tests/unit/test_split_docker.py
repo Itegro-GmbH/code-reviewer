@@ -92,6 +92,16 @@ ENVIRONMENT = {
     DOOR_ADDRESS_VARIABLE: DOOR_ADDRESS,
 }
 RULE = NetworkRule(MODE_LIST, ("registry.npmjs.org",))
+VOLUME_NAME = "a" * 64
+WORK_REPO = {"Destination": "/work/repo", "Type": "volume", "Name": B_WORK_VOLUME}
+# What B's daemon reports of an anonymous volume of the local driver.
+DATA_ROOT = {
+    "Destination": INNER_DOCKER_DIRECTORY,
+    "Type": "volume",
+    "Name": VOLUME_NAME,
+    "Driver": "local",
+    "Source": f"/var/lib/docker/volumes/{VOLUME_NAME}/_data",
+}
 
 
 class TwoDaemons:
@@ -304,38 +314,121 @@ def test_the_inner_docker_of_a_container_in_b_has_its_data_root_on_a_volume_not_
         assert not document["HostConfig"].get("Binds")
 
 
+def hosted_document(role_network: str, address: str, *, dns: bool) -> dict[str, Any]:
+    """The hosted container's document as `development` made it before #1136, written out."""
+    host: dict[str, Any] = {
+        "Memory": 1 << 30,
+        "MemorySwap": 1 << 30,
+        "Mounts": [
+            {
+                "ReadOnly": False,
+                "Source": "volume",
+                "Target": "/work/repo",
+                "Type": "volume",
+                "VolumeOptions": {"NoCopy": True, "Subpath": "repo"},
+            }
+        ],
+        "NetworkMode": role_network,
+        "OomScoreAdj": 1000,
+        "PidsLimit": 16384,
+        "Privileged": False,
+        "PublishAllPorts": False,
+        "RestartPolicy": {"Name": "no"},
+        "Runtime": "sysbox-runc",
+    }
+    if dns:
+        host["Dns"] = ["1.1.1.1", "8.8.8.8"]
+    return {
+        "Cmd": [],
+        "Entrypoint": ["/usr/bin/tini", "--", "/usr/local/bin/agent-init"],
+        "Env": [],
+        "HostConfig": host,
+        "Hostname": "agent",
+        "Image": "sha256:agent",
+        "Labels": {"code-reviewer.role": "agent"},
+        "NetworkingConfig": {
+            "EndpointsConfig": {role_network: {"IPAMConfig": {"IPv4Address": address}}}
+        },
+        "User": "0:0",
+        "WorkingDir": "/work/repo",
+    }
+
+
 # #1136-T02
-def test_the_hosted_containers_have_no_extra_mount_and_sysbox_keeps_backing_the_data_root() -> None:
-    for make in (agent_document, setup_document):
-        document = make("sha256:agent", "volume", 1 << 30)
-        assert {m["Target"] for m in document["HostConfig"]["Mounts"]} == {"/work/repo"}
+def test_the_hosted_containers_are_unchanged_byte_for_byte() -> None:
+    agent = agent_document("sha256:agent", "volume", 1 << 30)
+    setup = setup_document("sha256:agent", "volume", 1 << 30)
+
+    # The whole document, not only the mount targets: nothing of the split placement leaks in, and
+    # Sysbox keeps backing the data root of the container's Docker.
+    assert agent == hosted_document(MODEL_NETWORK_NAME, "10.213.77.4", dns=False)
+    assert setup == hosted_document(SETUP_NETWORK_NAME, "10.213.78.2", dns=True)
 
 
 # #1136-T03
 @pytest.mark.parametrize(
     ("mounts", "split", "expected"),
     [
-        ([{"Destination": "/work/repo", "Type": "volume"}], True, []),
-        (
-            [
-                {"Destination": "/work/repo", "Type": "volume"},
-                {"Destination": INNER_DOCKER_DIRECTORY, "Type": "volume"},
-            ],
-            True,
-            [],
-        ),
+        ([WORK_REPO, DATA_ROOT], True, []),
+        # Nothing at the data root on the split placement: the container's Docker would fail at the
+        # second layer again.
+        ([WORK_REPO], True, ["mounts"]),
+        ([], True, ["mounts"]),
         # A bind at the data root is host access, however it got there.
         ([{"Destination": INNER_DOCKER_DIRECTORY, "Type": "bind"}], True, ["mounts"]),
+        # A named volume (shared across containers, kept after the container) is not the anonymous
+        # one the Worker asks for.
+        ([WORK_REPO, {**DATA_ROOT, "Name": "data-root"}], True, ["mounts"]),
+        ([WORK_REPO, {**DATA_ROOT, "Name": "A" * 64}], True, ["mounts"]),
+        # Another driver, or a source that is not the volume's own directory (a local volume made
+        # with `o=bind` reports `Type: volume` and a path of the host).
+        ([WORK_REPO, {**DATA_ROOT, "Driver": "nfs"}], True, ["mounts"]),
+        ([WORK_REPO, {**DATA_ROOT, "Source": "/srv/other"}], True, ["mounts"]),
+        (
+            [WORK_REPO, {**DATA_ROOT, "Source": f"/var/lib/docker/volumes/{'b' * 64}/_data"}],
+            True,
+            ["mounts"],
+        ),
+        ([WORK_REPO, DATA_ROOT, DATA_ROOT], True, ["mounts"]),
         # Hosted never asks for it: Sysbox's own mount is not one of the container's `Mounts`.
-        ([{"Destination": INNER_DOCKER_DIRECTORY, "Type": "volume"}], False, ["mounts"]),
-        ([{"Destination": "/etc", "Type": "volume"}], True, ["mounts"]),
+        ([DATA_ROOT], False, ["mounts"]),
+        ([WORK_REPO], False, []),
+        ([{"Destination": "/etc", "Type": "volume"}, DATA_ROOT], True, ["mounts"]),
     ],
 )
-def test_the_seal_accepts_the_data_root_only_as_a_volume_and_only_in_b(
+def test_the_seal_requires_the_data_root_as_one_anonymous_local_volume_and_only_in_b(
     mounts: list[dict[str, str]], split: bool, expected: list[str]
 ) -> None:
     got = mount_problems(mounts, {"/work/repo"}, split=split)
     assert sorted(set(got)) == expected
+
+
+# #1136-T17
+def test_removing_the_container_removes_its_anonymous_volume_with_it(daemons: TwoDaemons) -> None:
+    """`v=1`: the daemon deletes the anonymous volumes of the container it removes, so the data root
+    never outlives the job's container (the instance goes with the rest in the end)."""
+    api = daemons.api_b()
+    created = api.create_container(
+        agent_document("sha256:agent", B_WORK_VOLUME, 1 << 30, runtime="runc", placement=SPLIT),
+        "code-reviewer-agent",
+    )
+    api.start_container(created)
+    seams = AgentSeams(
+        api=daemons.api_b,
+        hostname=lambda: "x",
+        ready_seconds=5.0,
+        runtime="runc",
+        placement=daemons.placement,
+    )
+    container = AgentContainer(2048, seams, RULE, adopted=Adopted(created, paused=False))
+    container.create()
+    container.stop()
+
+    container.remove()
+
+    deletes = [target for method, target, _ in daemons.b.calls if method == "DELETE"]
+    assert deletes == [f"/containers/{created}?force=1&v=1"]
+    assert daemons.b.containers[created].removed
 
 
 # #1017-T01

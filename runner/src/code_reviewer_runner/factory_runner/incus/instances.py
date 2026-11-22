@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
 """What an instance of the Incus backend is made as (#1007), in one place so that the launcher's two
-instances and the self-test's probe instance (`probe.py`, #1136) are the same machine: a probe
-that was made with another configuration would prove nothing about a job."""
+instances and the self-test's probe instance (`probe.py`, #1136) share one configuration (the same
+image, limits and user namespace; the probe's instance has no NICs and no slot bridges, it needs no
+network): a probe that was made with another configuration would prove nothing about a job."""
 
 from .client import InstanceSpec
 from .reaper import MARK, OWNER_MARK, ROLE_MARK, SLOT_MARK

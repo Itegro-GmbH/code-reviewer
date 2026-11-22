@@ -8,6 +8,7 @@ made by the real `AgentContainer` against a fake Docker Engine that stands for B
 import asyncio
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -216,6 +217,86 @@ def test_incus_that_refuses_a_step_is_a_failed_check_never_an_exception(
 
     assert not check.ok and "storage pool is full" in check.detail
     assert instances_left(rig) == []
+
+
+# #1136-T18
+def test_a_crash_in_the_code_the_probe_drives_is_a_failed_check_naming_the_step(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Not a `JobError`, not an `IncusError`: a bug in `AgentContainer.create` must not end the
+    service that starts with this probe."""
+
+    def broken(path: str) -> DockerApi:
+        raise RuntimeError("unexpected shape of an answer")
+
+    rig.seams = probe.ProbeSeams(api=broken)
+
+    with caplog.at_level("WARNING"):
+        check = rig.run()
+
+    assert check.name == CHECK_AGENT_DOCKER and not check.ok
+    assert "making the agent's container" in check.detail
+    assert "RuntimeError" in check.detail and "unexpected shape" in check.detail
+    assert "RuntimeError" in caplog.text
+    assert instances_left(rig) == [], "the probe's instance is deleted after a crash"
+    assert not list(rig.settings.jobs_dir.glob("job-*"))
+
+
+# #1136-T19
+def test_a_probe_that_hangs_is_stopped_after_its_deadline_and_its_instance_is_deleted(
+    rig: Rig,
+) -> None:
+    async def hang(name: str) -> None:
+        await asyncio.sleep(3600)
+
+    rig.incus.start = hang  # type: ignore[method-assign]
+
+    async def run() -> Check:
+        return await probe.probe_agent_docker(rig.settings, rig.incus, rig.seams, seconds=0.2)
+
+    started = time.monotonic()
+    check = asyncio.run(run())
+
+    assert time.monotonic() - started < 5
+    assert not check.ok and "did not finish within" in check.detail
+    assert "starting the probe instance" in check.detail
+    assert instances_left(rig) == [], "the instance is deleted on a timeout too"
+    assert not list(rig.settings.jobs_dir.glob("job-*"))
+
+
+# #1136-T20
+def test_a_failed_delete_of_the_probe_instance_is_logged_with_its_name_not_swallowed(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig.incus.fail["delete"] = IncusError("delete", "storage volume is busy")
+
+    with caplog.at_level("WARNING"):
+        check = rig.run()
+
+    # The probe's own verdict is not changed by the clean-up, but the leftover is in the log.
+    assert check == Check(CHECK_AGENT_DOCKER, True, "")
+    (name,) = instances_left(rig)
+    assert name in caplog.text and "storage volume is busy" in caplog.text
+    assert not list(rig.settings.jobs_dir.glob("job-*")), "the directory goes either way"
+
+
+# #1136-T21
+def test_a_delete_that_hangs_does_not_hold_the_service_beyond_its_own_deadline(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(probe, "DELETE_SECONDS", 0.2)
+
+    async def hang(name: str) -> None:
+        await asyncio.sleep(3600)
+
+    rig.incus.delete = hang  # type: ignore[method-assign]
+
+    started = time.monotonic()
+    with caplog.at_level("WARNING"):
+        check = rig.run()
+
+    assert time.monotonic() - started < 10 and check.ok
+    assert "could not be deleted" in caplog.text
 
 
 # -- prepare_incus ---

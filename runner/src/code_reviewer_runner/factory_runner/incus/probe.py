@@ -19,7 +19,6 @@ Only when the program prints its version is `agent-docker` true. Whatever happen
 its directory are deleted. The probe never raises: a failure is a check that says which step."""
 
 import asyncio
-import contextlib
 import logging
 import os
 import secrets
@@ -61,6 +60,11 @@ SOCKET_FILE: Final = "bdocker.sock"
 BUILD_SECONDS: Final = 180.0
 LOAD_SECONDS: Final = 300.0
 CALL_SECONDS: Final = 30.0
+# The whole probe, the clean-up of its instance excluded: the probe is in the start path of the
+# service, so a hang must cost the capability, not minutes of registration.
+PROBE_SECONDS: Final = 180.0
+# The delete of the probe's instance after a timeout or a crash gets its own short deadline.
+DELETE_SECONDS: Final = 60.0
 # Three layers of a few bytes and one static program: the least that makes the container's Docker
 # mount an overlay for the second and the third.
 BUILD_SCRIPT: Final = f"""set -eu
@@ -97,6 +101,12 @@ class ProbeSeams:
     half-close (`DockerApi.half_close`)."""
 
     api: Callable[[str], DockerApi] = lambda path: DockerApi(path, half_close=False)
+
+
+class _Progress:
+    """The step the probe is at, so that a timeout or a crash can say where it happened."""
+
+    step: str = "making the probe instance"
 
 
 class _Failed(Exception):
@@ -151,7 +161,24 @@ def _agent_container(
     )
 
 
-async def _run(settings: IncusSettings, client: IncusClient, seams: ProbeSeams, name: str) -> None:
+async def _delete(client: IncusClient, name: str) -> None:
+    """Delete the probe's instance. A failure is logged with the name (a running B keeps memory and
+    disk until the reaper of the next launcher start, `PROBE_MARK`), never raised."""
+    try:
+        async with asyncio.timeout(DELETE_SECONDS):
+            await client.delete(name)
+    except Exception as error:
+        detail = error.detail if isinstance(error, IncusError) else type(error).__name__
+        _log.warning("the probe's instance %s could not be deleted (%s)", name, detail)
+
+
+async def _run(
+    settings: IncusSettings,
+    client: IncusClient,
+    seams: ProbeSeams,
+    name: str,
+    progress: _Progress,
+) -> None:
     directory = settings.jobs_dir / f"job-{name.rsplit('-', 1)[-1]}"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     socket = directory / SOCKET_FILE
@@ -173,11 +200,15 @@ async def _run(settings: IncusSettings, client: IncusClient, seams: ProbeSeams, 
                 "mode": "0600",
             },
         )
+        progress.step = "starting the probe instance"
         await client.start(name)
+        progress.step = "waiting for Docker in the probe instance"
         await _wait_for_docker(client, name, settings.ready_seconds)
+        progress.step = "building the three-layer image"
         await _step(
             client, name, ("sh", "-c", BUILD_SCRIPT), seconds=BUILD_SECONDS, what="the build"
         )
+        progress.step = "making the agent's container"
         container = _agent_container(settings, str(socket), seams, settings.memory_mib)
         try:
             await asyncio.to_thread(container.create)
@@ -185,6 +216,7 @@ async def _run(settings: IncusSettings, client: IncusClient, seams: ProbeSeams, 
             raise _Failed(
                 f"the agent's container could not be made: {_tail(error.detail)}"
             ) from None
+        progress.step = "loading and running the image in the container's Docker"
         printed = await _step(
             client,
             name,
@@ -195,23 +227,56 @@ async def _run(settings: IncusSettings, client: IncusClient, seams: ProbeSeams, 
         if PROBE_OUTPUT not in printed:
             raise _Failed("the three-layer image ran but printed nothing it should have")
     finally:
-        with contextlib.suppress(Exception):
-            await client.delete(name)
+        await _delete(client, name)
         shutil.rmtree(directory, ignore_errors=True)
 
 
 async def probe_agent_docker(
-    settings: IncusSettings, client: IncusClient, seams: ProbeSeams | None = None
+    settings: IncusSettings,
+    client: IncusClient,
+    seams: ProbeSeams | None = None,
+    *,
+    seconds: float = PROBE_SECONDS,
 ) -> Check:
     """Run the probe; the check `agent-docker`, true only when a three-layer image was unpacked and
-    run in the container's own Docker."""
+    run in the container's own Docker. Never raises (the service starts with it) and never takes
+    longer than `seconds` plus the delete of the instance: whatever ends the probe, the instance
+    and its directory go."""
     name = settings.instance_b(f"{PROBE_MARK}-{secrets.token_hex(3)}")
+    progress = _Progress()
     try:
-        await _run(settings, client, seams or ProbeSeams(), name)
+        async with asyncio.timeout(seconds):
+            await _run(settings, client, seams or ProbeSeams(), name, progress)
     except _Failed as failed:
         return Check(CHECK_AGENT_DOCKER, False, str(failed))
+    except TimeoutError:
+        _log.warning(
+            "the agent-docker probe took longer than %.0f s and was stopped (%s)",
+            seconds,
+            progress.step,
+        )
+        return Check(
+            CHECK_AGENT_DOCKER,
+            False,
+            f"the probe did not finish within {seconds:.0f} s (stopped while {progress.step})",
+        )
     except (IncusError, OSError) as error:
         detail = error.detail if isinstance(error, IncusError) else type(error).__name__
         _log.warning("the agent-docker probe could not run (%s)", detail)
         return Check(CHECK_AGENT_DOCKER, False, f"the probe instance could not be used ({detail})")
+    except Exception as error:
+        # A bug in the code the probe drives (`AgentContainer.create` runs in a thread) costs
+        # `agent-docker`, not the service: `prepare_incus` promises never to raise.
+        message = _tail(str(error), 200)
+        _log.warning(
+            "the agent-docker probe crashed while %s (%s: %s)",
+            progress.step,
+            type(error).__name__,
+            message,
+        )
+        return Check(
+            CHECK_AGENT_DOCKER,
+            False,
+            f"the probe crashed while {progress.step} ({type(error).__name__}: {message})",
+        )
     return Check(CHECK_AGENT_DOCKER, True, "")
