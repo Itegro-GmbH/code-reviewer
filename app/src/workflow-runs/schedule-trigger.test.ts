@@ -90,6 +90,16 @@ describe("dueOccurrence", () => {
   });
 
   // #1140-T02
+  it("does not fire an occurrence before its minute: 05:59:59.999 is not 06:00", () => {
+    expect(
+      dueOccurrence("0 6 * * 0", at("2026-11-29T05:59:59.999Z"), saved),
+    ).toBeUndefined();
+    expect(
+      dueOccurrence("0 6 * * 0", at("2026-11-29T06:00:00.000Z"), saved),
+    ).toEqual(SUNDAY_0600);
+  });
+
+  // #1140-T02
   it("does not fire an occurrence from before the version was saved", () => {
     // A lane saved on Sunday 09:00 does not start the 06:00 run of that morning.
     expect(
@@ -439,6 +449,7 @@ describe("the schedule runner", () => {
   // #1140-T03
   it("skips a lane that has no project, with a code", async () => {
     const { runner, created, lines } = setup({
+      now: at("2026-11-29T06:00:00Z"),
       lanes: { "ws-1": [{ ...SUNDAY_LANE, projectId: null }] },
     });
 
@@ -455,6 +466,7 @@ describe("the schedule runner", () => {
       undefined,
     ]) {
       const { runner, created, lines } = setup({
+        now: at("2026-11-29T06:00:00Z"),
         projects: { "project-1": project },
       });
 
@@ -466,7 +478,10 @@ describe("the schedule runner", () => {
 
   // #1140-T03
   it("skips a lane whose repository is not available", async () => {
-    const { runner, created, lines } = setup({ repository: "none" });
+    const { runner, created, lines } = setup({
+      now: at("2026-11-29T06:00:00Z"),
+      repository: "none",
+    });
 
     expect(await runner.run()).toMatchObject({ skipped: 1, started: 0 });
     expect(created).toEqual([]);
@@ -479,7 +494,10 @@ describe("the schedule runner", () => {
       id: "wf-1",
       document: documentWith([WEEKLY], [{ id: "x", kind: "teleport" }]),
     };
-    const { runner, created, lines } = setup({ lanes: { "ws-1": [lane] } });
+    const { runner, created, lines } = setup({
+      now: at("2026-11-29T06:00:00Z"),
+      lanes: { "ws-1": [lane] },
+    });
 
     expect(await runner.run()).toMatchObject({ skipped: 1, started: 0 });
     expect(created).toEqual([]);
@@ -538,6 +556,82 @@ describe("the schedule runner", () => {
     const log = lines.join("\n");
     expect(log).toContain("SCHEDULE_WORKSPACE_FAILED");
     expect(log).not.toContain("postgres://");
+  });
+
+  // #1140-T07
+  it("says so, every tick, when the stored cron does not parse, and counts the lane as skipped, never as not due", async () => {
+    for (const cron of ["0 6 * * MON", "*/x * * * *", "61 6 * * *"]) {
+      const lane: LaneSeed = {
+        id: "wf-1",
+        document: documentWith([
+          { id: "weekly", kind: "schedule", cron, steps: [] },
+        ]),
+      };
+      const { runner, created, lines, clock } = setup({
+        lanes: { "ws-1": [lane] },
+      });
+
+      const first = await runner.run();
+      clock.now = at("2026-11-29T08:00:00Z");
+      const second = await runner.run();
+
+      expect(first).toMatchObject({
+        lanes: 1,
+        skipped: 1,
+        notDue: 0,
+        started: 0,
+      });
+      expect(second).toMatchObject({ skipped: 1, notDue: 0, started: 0 });
+      expect(created).toEqual([]);
+      const logged = lines.filter((line) =>
+        line.includes("SCHEDULE_CRON_INVALID"),
+      );
+      expect(logged).toHaveLength(2);
+      expect(logged[0]).toContain("workflow=wf-1");
+      // The cron text is the lane's data: not repeated in the log.
+      expect(lines.join("\n")).not.toContain(cron);
+    }
+  });
+
+  // #1140-T07
+  it("still starts the valid schedule of a lane whose other schedule does not parse", async () => {
+    const lane: LaneSeed = {
+      id: "wf-1",
+      document: documentWith([
+        WEEKLY,
+        { id: "broken", kind: "schedule", cron: "0 6 * * MON", steps: [] },
+      ]),
+    };
+    const { runner, created, lines } = setup({ lanes: { "ws-1": [lane] } });
+
+    const result = await runner.run();
+
+    expect(result).toMatchObject({ started: 1, skipped: 1 });
+    expect(created.map((run) => run.triggerId)).toEqual(["weekly"]);
+    expect(lines.join("\n")).toContain("SCHEDULE_CRON_INVALID");
+  });
+
+  // #1140-T08
+  it("logs a permanent skip once per occurrence, not on every tick of its 24 hours, and still counts it", async () => {
+    const { runner, lines, clock } = setup({
+      now: at("2026-11-29T06:00:03Z"),
+      repository: "none",
+    });
+
+    const first = await runner.run();
+    const afterFirst = lines.filter((line) =>
+      line.includes("SCHEDULE_REPOSITORY_UNAVAILABLE"),
+    );
+    for (const hour of ["07", "08", "09", "20"]) {
+      clock.now = at(`2026-11-29T${hour}:00:03Z`);
+      expect(await runner.run()).toMatchObject({ skipped: 1 });
+    }
+
+    expect(first.skipped).toBe(1);
+    expect(afterFirst).toHaveLength(1);
+    expect(
+      lines.filter((line) => line.includes("SCHEDULE_REPOSITORY_UNAVAILABLE")),
+    ).toHaveLength(1);
   });
 
   // #1140-T03

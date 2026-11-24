@@ -57,6 +57,10 @@ describe("app/vercel.json", () => {
       "/api/internal/schedule-runs",
       "/api/internal/tracker-resync",
     ]);
+    // #1140: the route runs under the 300 seconds the glob of the internal routes gives every cron (no route sets its own `maxDuration`).
+    expect(config.functions?.["src/app/api/internal/**/route.ts"]).toEqual({
+      maxDuration: 300,
+    });
     // #1140: once an hour, so a schedule starts at the first tick at or after its time (minute precision is not given).
     expect(
       (config.crons ?? []).find(({ path }) => path.endsWith("schedule-runs"))

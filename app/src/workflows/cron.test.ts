@@ -156,6 +156,21 @@ describe("cronMatches", () => {
   });
 
   // #1140-T01
+  it("never matches day 31 in a month that has 30 days or fewer, and does in one that has 31", () => {
+    const monthEnd = parsed("0 0 31 * *");
+    expect(cronMatches(monthEnd, at("2026-04-30T00:00:00Z"))).toBe(false);
+    expect(cronMatches(monthEnd, at("2026-05-01T00:00:00Z"))).toBe(false);
+    expect(cronMatches(monthEnd, at("2026-05-31T00:00:00Z"))).toBe(true);
+    // From the 30th of April a search back finds the 31st of March, not a day that does not exist.
+    expect(
+      latestOccurrence(monthEnd, {
+        atOrBefore: at("2026-05-30T00:00:00Z"),
+        notBefore: at("2026-03-01T00:00:00Z"),
+      }),
+    ).toEqual(at("2026-03-31T00:00:00Z"));
+  });
+
+  // #1140-T01
   it("ignores the seconds of the date", () => {
     expect(
       cronMatches(parsed("0 6 * * *"), at("2026-11-29T06:00:42.500Z")),

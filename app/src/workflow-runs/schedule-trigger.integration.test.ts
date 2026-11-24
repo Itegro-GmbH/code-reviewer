@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { USER } from "../test-support/implementer-harness.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createScheduleDirectory } from "../db/repositories/schedule-directory-repository.ts";
+import { createWorkspaceEntitlementsRepository } from "../db/repositories/workspace-entitlements-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import {
@@ -262,5 +263,151 @@ describe("a lane with a schedule trigger starts a run at its cron time", () => {
 
     await saveOld(scheduledLane());
     expect(await directory.listWorkspaces()).toEqual([workspaceId]);
+  });
+});
+
+describe("a scheduled run is held to the limits of a run by hand", () => {
+  /** A lane with both a by-hand and a schedule trigger, so the same lane can be started either way. */
+  const bothWays = (budgetUsd: number, name: string) => ({
+    ...scheduledLane("0 6 * * 0", name),
+    budgetUsd,
+    triggers: [
+      { id: "by-hand", kind: "manual", steps: [] },
+      { id: "weekly", kind: "schedule", cron: "0 6 * * 0", steps: [] },
+    ],
+  });
+
+  // #1140-T09
+  it("gets the budget of the lane per run, clamped to the operator maximum, exactly as a run by hand does", async () => {
+    const { app, runner, saveOld } = await startHarness();
+    for (const budgetUsd of [5, 1000]) {
+      const lane = await saveOld(
+        bothWays(budgetUsd, `Budget ${String(budgetUsd)}`),
+      );
+      const byHand = await app.start(lane.id, {
+        trigger: "by-hand",
+        input: {},
+        clientRequestId: `by-hand-${String(budgetUsd)}`,
+      });
+      await runner.run();
+      const [scheduled] = (await runsOf(app, lane.id)).filter(
+        (run) => run.triggerKind === "schedule",
+      );
+
+      const manualRun = await app.runs.getRun(byHand.run.id);
+      expect(scheduled?.budgetMicroUsd).toBeGreaterThan(0);
+      expect(scheduled?.budgetMicroUsd).toBe(manualRun?.budgetMicroUsd);
+      expect(scheduled?.spentMicroUsd).toBe(0);
+    }
+    // The lane that asks for 1 000 dollars is cut to the maximum, not run with a larger one.
+    const big = (
+      await runsOf(
+        app,
+        (await app.workflows.list()).find((w) => w.name === "Budget 1000")
+          ?.id ?? "",
+      )
+    ).map((run) => run.budgetMicroUsd);
+    expect(big).toHaveLength(2);
+    expect(big[0]).toBe(big[1]);
+    expect(big[0]).toBeLessThan(1000 * 1_000_000);
+  });
+
+  // #1140-T09
+  it("starts its first agent turn under the same cap as a run by hand, through the same engine", async () => {
+    const { app, runner, saveOld } = await startHarness();
+    const lane = await saveOld(bothWays(5, "Cap"));
+    const byHand = await app.start(lane.id, {
+      trigger: "by-hand",
+      input: {},
+      clientRequestId: "by-hand-1",
+    });
+    await runner.run();
+    const scheduled = (await runsOf(app, lane.id)).find(
+      (run) => run.triggerKind === "schedule",
+    );
+
+    await app.engine.advance(byHand.run.id);
+    await app.engine.advance(scheduled?.id ?? "");
+
+    const manualSteps = (await app.stateOf(byHand.run.id)).steps;
+    const scheduledSteps = (await app.stateOf(scheduled?.id ?? "")).steps;
+    expect(scheduledSteps).toHaveLength(1);
+    expect(scheduledSteps[0]).toMatchObject({
+      status: "running",
+      capMicroUsd: manualSteps[0]?.capMicroUsd,
+    });
+    expect(scheduledSteps[0]?.capMicroUsd).toBeGreaterThan(0);
+    expect(scheduledSteps[0]?.capMicroUsd).toBeLessThanOrEqual(
+      scheduled?.budgetMicroUsd ?? 0,
+    );
+    // Both turns are ordinary jobs of the workspace, waiting in the one queue that every limit is checked at.
+    expect((await app.waitingJobs()).length).toBe(2);
+  });
+
+  // #1140-T09
+  it("is refused at the claim for a suspended workspace exactly as a run by hand is (the plan, suspension and balance checks are the queue's)", async () => {
+    const { app, runner, saveOld, db, workspaceId } = await startHarness();
+    const lane = await saveOld(bothWays(5, "Gate"));
+    const byHand = await app.start(lane.id, {
+      trigger: "by-hand",
+      input: {},
+      clientRequestId: "by-hand-1",
+    });
+    await runner.run();
+    const scheduled = (await runsOf(app, lane.id)).find(
+      (run) => run.triggerKind === "schedule",
+    );
+    await app.engine.advance(byHand.run.id);
+    await app.engine.advance(scheduled?.id ?? "");
+    await createWorkspaceEntitlementsRepository(db, workspaceId).put(
+      {
+        planLabel: "team",
+        keyMode: "managed",
+        limits: {
+          diffRunsPerPeriod: null,
+          dynamicRunsPerPeriod: null,
+          managedCostLimitMicroUsd: null,
+          ownKeyCostLimitMicroUsd: null,
+        },
+        periodStart: "2026-11-01T00:00:00.000Z",
+        suspended: true,
+        suspensionCode: "test",
+      },
+      null,
+    );
+
+    // Nothing is handed to a runner for either run.
+    expect(await app.queue.claimNext("runner-a", ["implementer"])).toBeNull();
+    expect(await app.queue.claimNext("runner-a", ["implementer"])).toBeNull();
+
+    const jobs = await db
+      .selectFrom("jobs")
+      .select(["id", "status", "error_code"])
+      .where("workspace_id", "=", workspaceId)
+      .execute();
+    expect(jobs).toHaveLength(2);
+    expect(new Set(jobs.map((job) => job.status))).toEqual(new Set(["failed"]));
+    expect(new Set(jobs.map((job) => job.error_code)).size).toBe(1);
+    expect(jobs[0]?.error_code).toBe("workspace_suspended");
+  });
+
+  // #1140-T10
+  it("ends a scheduled run with workflow_owner_gone, before its first step, when the author of the lane left the workspace", async () => {
+    const { app, runner, saveOld, kicked } = await startHarness();
+    const lane = await saveOld(scheduledLane());
+    expect(await app.members.remove(USER.id)).toBe(true);
+
+    await runner.run();
+    const [run] = await runsOf(app, lane.id);
+    await app.engine.advance(kicked[0] ?? "");
+
+    const state = await app.stateOf(run?.id ?? "");
+    expect(state.run).toMatchObject({
+      status: "failed",
+      errorCode: "workflow_owner_gone",
+      triggerKind: "schedule",
+    });
+    expect(state.steps).toEqual([]);
+    expect(await app.waitingJobs()).toEqual([]);
   });
 });

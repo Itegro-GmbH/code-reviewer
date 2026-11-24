@@ -59,6 +59,7 @@ export const SCHEDULE_CATCH_UP_MS = 24 * 60 * 60 * 1000;
 
 export const SCHEDULE_ERROR_CODES = [
   "SCHEDULE_DOCUMENT_UNUSABLE",
+  "SCHEDULE_CRON_INVALID",
   "SCHEDULE_STEP_NOT_SUPPORTED",
   "SCHEDULE_PROJECT_UNAVAILABLE",
   "SCHEDULE_REPOSITORY_UNAVAILABLE",
@@ -68,6 +69,9 @@ export const SCHEDULE_ERROR_CODES = [
 export type ScheduleErrorCode = (typeof SCHEDULE_ERROR_CODES)[number];
 
 const MINUTE_MS = 60_000;
+
+/** The distance between two ticks of the platform's cron (`0 * * * *`). */
+export const SCHEDULE_TICK_MS = 60 * MINUTE_MS;
 
 /**
  * The occurrence of `cron` a tick at `now` starts, or undefined: the latest minute the expression names that lies in the window
@@ -180,8 +184,22 @@ export function createScheduleRunner(
     for (const { workflow, current } of lanes) {
       result.lanes += 1;
       const where = `workspace=${workspaceId} workflow=${workflow.id}`;
-      const skip = (code: ScheduleErrorCode, count: number): void => {
+      // Every skip is counted. A skip of a due occurrence is logged only by the tick that first sees it (the occurrence is less than a tick
+      // old): the same permanent skip would otherwise repeat on all 24 ticks of the window. (No state is kept between ticks, a lost first
+      // tick means no line, the count in the summary is still there.) A skip with no occurrence (`occurrence` left out) is logged every tick.
+      const skip = (
+        code: ScheduleErrorCode,
+        count: number,
+        occurrences?: readonly Date[],
+      ): void => {
         result.skipped += count;
+        if (
+          occurrences !== undefined &&
+          !occurrences.some(
+            (at) => tick.getTime() - at.getTime() < SCHEDULE_TICK_MS,
+          )
+        )
+          return;
         log(`[schedule] ${code}: ${where} starts no run.`);
       };
       try {
@@ -190,29 +208,41 @@ export function createScheduleRunner(
           skip("SCHEDULE_DOCUMENT_UNUSABLE", 1);
           continue;
         }
+        // Deliberate: the bound is the save of the CURRENT version, so an unrelated edit during an outage drops a missed occurrence (at most one
+        // tick's worth of catch-up). A version is immutable and whether a trigger changed between two versions is not tracked.
         const savedAt = new Date(current.createdAt);
+        let invalid = 0;
         const due = read.triggers
           .filter((trigger) => trigger.kind === SCHEDULE_TRIGGER_KIND)
           .flatMap((trigger) => {
+            // A cron that does not parse (a lane saved when the validator only counted the fields, `0 6 * * MON`) never fires: it is said,
+            // every tick, not left looking like a lane that is simply not due.
+            if (parseCron(trigger.cron ?? "") === undefined) {
+              invalid += 1;
+              return [];
+            }
             const occurrence = dueOccurrence(trigger.cron ?? "", tick, savedAt);
             return occurrence === undefined ? [] : [{ trigger, occurrence }];
           });
+        if (invalid > 0) skip("SCHEDULE_CRON_INVALID", invalid);
         if (due.length === 0) {
-          result.notDue += 1;
+          if (invalid === 0) result.notDue += 1;
           continue;
         }
-        // The platform is asked (the repository's default branch) only once something is due.
+        const occurrences = due.map(({ occurrence }) => occurrence);
+        // The platform is asked (the repository's default branch) only once something is due. (`listWithScheduleTrigger` joins the project, so a
+        // lane without one does not reach here today; the guard keeps this module right for any list it is given.)
         const project =
           workflow.projectId === null
             ? undefined
             : await workspace.projectOf(workflow.projectId);
         if (project === undefined || !project.active) {
-          skip("SCHEDULE_PROJECT_UNAVAILABLE", due.length);
+          skip("SCHEDULE_PROJECT_UNAVAILABLE", due.length, occurrences);
           continue;
         }
         const repository = await workspace.repositoryOf(project.repositoryId);
         if (repository === undefined) {
-          skip("SCHEDULE_REPOSITORY_UNAVAILABLE", due.length);
+          skip("SCHEDULE_REPOSITORY_UNAVAILABLE", due.length, occurrences);
           continue;
         }
         for (const { trigger, occurrence } of due) {
@@ -221,11 +251,11 @@ export function createScheduleRunner(
             kind: trigger.kind,
           });
           if (document === undefined) {
-            skip("SCHEDULE_DOCUMENT_UNUSABLE", 1);
+            skip("SCHEDULE_DOCUMENT_UNUSABLE", 1, [occurrence]);
             continue;
           }
           if (unsupportedStep(document) !== undefined) {
-            skip("SCHEDULE_STEP_NOT_SUPPORTED", 1);
+            skip("SCHEDULE_STEP_NOT_SUPPORTED", 1, [occurrence]);
             continue;
           }
           try {
