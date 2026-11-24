@@ -92,6 +92,8 @@ const PUBLIC_ROUTES = [
   "/api/internal/tracker-resync",
   // The nightly extension of the Jira webhooks (#1039): the same credential.
   "/api/internal/jira-webhooks",
+  // The hourly tick of the schedule triggers (#1140): the same credential.
+  "/api/internal/schedule-runs",
 ] as const;
 const PROTECTED_ROUTES = [
   "/",

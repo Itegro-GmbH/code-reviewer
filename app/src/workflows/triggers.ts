@@ -23,7 +23,8 @@ import {
  * - `ticket.labeled`: a label put on a ticket (an issue of a repository of the workspace).
  * - `ticket.statusChanged` (#1036): a ticket moved into the status `to` (optionally from `from`), in the provider's own status names: the
  *   Status of the project board for GitHub. Whoever moved it, the factory's own moves included.
- * - `pullRequest.pushed`, `schedule`: reserved. The format knows and validates them, the engine starts no run from them yet.
+ * - `schedule` (#1140): a cron expression in UTC; the hourly tick of the platform starts a run for the most recent occurrence that is due.
+ * - `pullRequest.pushed`: reserved. The format knows and validates it, the engine starts no run from it yet.
  * - `github.issueLabeled`: the name `ticket.labeled` had before #916, accepted everywhere it was.
  */
 export const TRIGGER_KINDS = [
@@ -128,7 +129,7 @@ function inputFieldsOf(input: ResultSchema): ObjectType {
  * - `ticket.labeled`: `ticket`, and `issue` and `repo` as workflows written before #916 read them;
  * - `ticket.statusChanged`: `ticket` and `status.from`, `status.to` (texts; `from` is empty when the ticket had no status);
  * - `manual`, `api`: `input` (what the schema declares, without the ticket) and, when the input requires one, `ticket`;
- * - the reserved kinds: nothing more.
+ * - `schedule`, and the reserved kind: nothing more.
  */
 export function triggerOutput(trigger: TriggerInfo): ObjectType {
   const kind = canonicalTriggerKind(trigger.kind);

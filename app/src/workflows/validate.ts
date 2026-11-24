@@ -10,6 +10,7 @@ import {
   type Checker,
   type StepState,
 } from "./check-steps.ts";
+import { parseCron } from "./cron.ts";
 import { FAILURE_ID, FAILURE_TYPE } from "./failure.ts";
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
@@ -171,7 +172,6 @@ function indexSteps(
 }
 
 const TRIGGER_ID_RESERVED = ["trigger", "previous"] as const;
-const CRON = /^[^\s]+( [^\s]+){4}$/;
 const CRON_MAX_LENGTH = 100;
 
 /**
@@ -408,17 +408,20 @@ function checkTrigger(
         issue(
           pointer(path, "cron"),
           "missing_field",
-          "'cron' is required: five fields separated by one space, like \"0 6 * * 1\". The schedule is reserved: it is checked, and no run starts from it yet.",
+          "'cron' is required: five fields separated by one space, like \"0 6 * * 1\" (minute, hour, day of month, month, day of week; UTC).",
         ),
       );
     else if (typeof cron !== "string")
       report(issue(pointer(path, "cron"), "wrong_type", "'cron' is a text."));
-    else if (textLength(cron) > CRON_MAX_LENGTH || !CRON.test(cron))
+    else if (
+      textLength(cron) > CRON_MAX_LENGTH ||
+      parseCron(cron) === undefined
+    )
       report(
         issue(
           pointer(path, "cron"),
           "invalid_value",
-          "'cron' has five fields (minute, hour, day of month, month, day of week) separated by one space.",
+          "'cron' has five fields (minute, hour, day of month, month, day of week) separated by one space, each `*`, a number, a range, a list or a step in its bounds, like \"0 6 * * 1\". It is read in UTC.",
         ),
       );
     return checked;

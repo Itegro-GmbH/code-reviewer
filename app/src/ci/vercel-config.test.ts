@@ -53,8 +53,19 @@ describe("app/vercel.json", () => {
       // #1131: the same route, walking only the webhooks that wait for a registration after a move.
       "/api/internal/jira-webhooks?retry=pending",
       "/api/internal/repository-sync",
+      // #1140: the hourly tick that starts the runs of schedule triggers.
+      "/api/internal/schedule-runs",
       "/api/internal/tracker-resync",
     ]);
+    // #1140: the route runs under the 300 seconds the glob of the internal routes gives every cron (no route sets its own `maxDuration`).
+    expect(config.functions?.["src/app/api/internal/**/route.ts"]).toEqual({
+      maxDuration: 300,
+    });
+    // #1140: once an hour, so a schedule starts at the first tick at or after its time (minute precision is not given).
+    expect(
+      (config.crons ?? []).find(({ path }) => path.endsWith("schedule-runs"))
+        ?.schedule,
+    ).toBe("0 * * * *");
   });
 
   // #319-T08

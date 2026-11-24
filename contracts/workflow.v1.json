@@ -950,7 +950,7 @@
       }
     },
     "ScheduleTriggerEntry": {
-      "description": "Reserved (#916): a schedule, `cron` with five fields separated by one space. The format validates it, the engine starts no run from it yet.",
+      "description": "A schedule (#916, runs since #1140): `cron` with five fields (minute, hour, day of month, month, day of week) separated by one space, read in UTC. The platform's hourly tick starts a run for the most recent occurrence that is due: at the first tick at or after its time, at most one, none older than 24 hours.",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "kind", "cron"],
@@ -1039,7 +1039,7 @@
       }
     },
     "ScheduleTrigger": {
-      "description": "Reserved (#916): a schedule, `cron` with five fields separated by one space. The format validates it, the engine starts no run from it yet.",
+      "description": "A schedule (#916, runs since #1140): `cron` with five fields (minute, hour, day of month, month, day of week) separated by one space, read in UTC. The platform's hourly tick starts a run for the most recent occurrence that is due: at the first tick at or after its time, at most one, none older than 24 hours.",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "cron"],

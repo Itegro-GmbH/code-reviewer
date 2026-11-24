@@ -2549,6 +2549,12 @@ const CASES: Case[] = [
     run: (a, b) => a.workflows.listWithStatusTrigger(b.repository.id),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
+  // #1140: the lanes a schedule starts are read in the workspace of the tick's repositories only
+  {
+    name: "workflows.listWithScheduleTrigger",
+    run: (a) => a.workflows.listWithScheduleTrigger(),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
   // #1129: the lanes a label put on a Jira issue starts are read in the workspace of the registration only
   {
     name: "workflows.listProjectWithIssueTrigger",

@@ -61,6 +61,8 @@ export const PUBLIC_PATHS: readonly PublicPath[] = [
   { path: "/api/internal/tracker-resync", match: "exact" },
   // The same cron, once a night: the Jira webhooks the factory registered are extended before they expire (#1039).
   { path: "/api/internal/jira-webhooks", match: "exact" },
+  // The same cron, once an hour: the lanes whose schedule trigger is due start a run (#1140).
+  { path: "/api/internal/schedule-runs", match: "exact" },
 ];
 
 /**
