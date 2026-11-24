@@ -186,7 +186,7 @@ def test_claude_code_runs_as_a_user_that_is_not_root() -> None:
     assert ":" in AGENT_USER
 
 
-# #1138-T03
+# #1138-T01
 def test_the_exec_names_the_user_so_that_the_groups_of_the_layer_apply() -> None:
     # A Docker exec given `uid:gid` drops the supplementary groups of /etc/group (measured with
     # Docker 29); a name, or a bare uid, loads them. The name also fails closed when the user is

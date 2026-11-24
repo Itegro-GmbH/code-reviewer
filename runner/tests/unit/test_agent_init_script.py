@@ -23,7 +23,8 @@ SCRIPT = Path(__file__).resolve().parents[2] / "docker" / "agent-init.sh"
 
 FAKE_DOCKERD = """#!/bin/sh
 echo "args=$*" >> "$LOG"
-echo "http=${HTTP_PROXY-unset} https=${HTTPS_PROXY-unset} no=${NO_PROXY-unset}" >> "$LOG"
+echo "http=${HTTP_PROXY-unset} https=${HTTPS_PROXY-unset} no=${NO_PROXY-unset}" \\
+  "node=${NODE_USE_ENV_PROXY-unset}" >> "$LOG"
 echo $$ > "$ROOT/var/run/docker.pid"
 trap 'exit 0' TERM
 while :; do sleep 0.05; done
@@ -139,7 +140,7 @@ def test_the_daemons_socket_belongs_to_the_docker_group_the_agent_user_is_in(
 def test_a_requested_restart_starts_the_daemon_again_with_the_new_variables_only(
     init: Callable[..., Init],
 ) -> None:
-    running = init(HTTP_PROXY="http://setup-proxy:3128", NO_PROXY="old")
+    running = init(HTTP_PROXY="http://setup-proxy:3128", NO_PROXY="old", NODE_USE_ENV_PROXY="1")
     running.wait_for(running.ready.exists, "the first ready file")
     # What the runner does (`AgentContainer.restart_docker`): the new variables, the flag, no ready
     # file, and the end of the daemon.
@@ -152,6 +153,8 @@ def test_a_requested_restart_starts_the_daemon_again_with_the_new_variables_only
     second = running.starts()[3]
     assert "https=http://door:3128" in second
     assert "http=unset" in second and "no=unset" in second, "the old variables are gone"
+    # #1138: the variable of the setup's first start (`OuterProxy.tool_environment`) goes too.
+    assert "node=unset" in second
     assert "--live-restore" in running.starts()[2]
     assert running.process.poll() is None, "the container did not end"
     assert not (running.root / "run" / "agent-docker-restart").exists()

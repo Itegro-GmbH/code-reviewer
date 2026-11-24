@@ -33,6 +33,31 @@ def test_the_agent_image_has_the_docker_group_with_a_number_that_is_nobody_s_pri
     )
 
 
+# #1138-T02
+def test_the_docker_group_s_number_is_none_of_the_ids_the_image_files_make() -> None:
+    # The Dockerfile's comment says the number is not the engine's (10101), the layer's user's
+    # (10201) or the runner's (10001): every other numeric id the file makes is checked, not only
+    # the one that is `> 10000`.
+    gid = int(re.search(r"groupadd --system --gid (\d+) docker\b", agent_stage()).group(1))  # pyright: ignore[reportOptionalMemberAccess]
+    others = {int(n) for n in re.findall(r"(?:--gid|--uid)[ =](\d+)", DOCKERFILE)} - {gid}
+    assert {10001, 10101} <= others
+    assert gid not in others | {10001, 10101, 10201}, "the group is nobody else's primary group"
+
+
+# #1138-T02
+def test_no_stage_but_the_agent_s_has_the_docker_group_and_the_engine_user_is_not_in_it() -> None:
+    # The engine (uid 10101) and the Worker (10001) are in `sandbox` / `runtime-base`, which are
+    # not built from the agent stage: the group, and the socket it opens, are not in their image.
+    agent = agent_stage()
+    rest = DOCKERFILE.replace(agent, "")
+    assert not re.search(r"\bdocker\b[^\n]*\bgroupadd|groupadd[^\n]*\bdocker\b", rest)
+    assert not re.search(r"usermod|--groups|-G\s", rest), "no user of those stages gets a group"
+    assert not re.search(r"(?m)^FROM\s+\S*\s+AS\s+(runtime-base|sandbox)\b.*agent", DOCKERFILE)
+    assert "FROM runtime-base AS sandbox" in DOCKERFILE and "COPY --from=agent" not in rest
+    for line in re.findall(r"useradd[^\n]*(?:\\\n[^\n]*)*", rest):
+        assert "docker" not in line
+
+
 # #1138-T01
 def test_the_init_starts_the_daemon_with_that_group_and_changes_nothing_of_the_vm_s_docker() -> (
     None

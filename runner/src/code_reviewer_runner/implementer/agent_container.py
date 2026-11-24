@@ -218,7 +218,10 @@ SYSTEM_ROOTS_PATH: Final = "/etc/ssl/certs/ca-certificates.crt"
 # system store; both hold the CA, so either way the door's certificate is trusted. The probe on a
 # runner is what proves it (docs/runner.md).
 SYSTEM_TRUST_PATH: Final = "/usr/local/share/ca-certificates/code-reviewer-network-door.crt"
-SYSTEM_TRUST_SCRIPT: Final = 'umask 022 && cat > "$1" && update-ca-certificates >/dev/null'
+# `exec 2>&1`: `run_exec` drops the standard error, and the reason `update-ca-certificates` gave
+# (a missing tool, a read-only directory) is what the turn's error says, clipped.
+SYSTEM_TRUST_SCRIPT: Final = 'exec 2>&1; umask 022 && cat > "$1" && update-ca-certificates'
+SYSTEM_TRUST_REASON_CHARS: Final = 300
 TURBOPACK_SYSTEM_TLS_VARIABLE: Final = "NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS"
 
 
@@ -915,7 +918,16 @@ class AgentContainer:
             name="install the door's certificate authority",
         )
         if done.returncode != 0 or done.unanswered:
-            raise unavailable("the door's certificate authority could not be installed")
+            # A hard failure, on purpose: a tool that cannot trust the door fails every connection
+            # the door ends. The reason is the exec's own output (public: a tool's message, never
+            # the certificate, which is on stdin), or what `run_exec` says of an exec that did not
+            # answer.
+            if done.unanswered:
+                why = done.stderr
+            else:
+                output = " ".join(done.stdout.split())[:SYSTEM_TRUST_REASON_CHARS]
+                why = f"exit code {done.returncode}" + (f": {output}" if output else "")
+            raise unavailable(f"the door's certificate authority could not be installed ({why})")
 
     def _exec_environment(self, environment: Mapping[str, str]) -> dict[str, str]:
         """The environment of an exec of the engine or of a tool of it. A container made for the

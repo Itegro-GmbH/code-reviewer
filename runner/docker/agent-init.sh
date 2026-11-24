@@ -26,7 +26,7 @@ mkdir -p /run /var/log /var/lib/docker
 rm -f /run/agent-ready /var/run/docker.pid /run/agent-docker-restart
 while :; do
   if [ -e /run/agent-docker-env ]; then
-    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy NODE_USE_ENV_PROXY
     set -a
     . /run/agent-docker-env
     set +a
