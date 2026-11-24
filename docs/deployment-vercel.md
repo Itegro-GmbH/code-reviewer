@@ -90,13 +90,15 @@ and uses Postgres only.
 - No work at start: the schema is migrated by a command (`pnpm migrate`), the first-run setup code is made by a
   command (`pnpm setup-code`), and `/api/health` answers `503` with `{"status":"error","code":"SCHEMA_BEHIND"}` while
   the database lacks a migration of this version.
-- Five cron entries (`app/vercel.json`): `/api/internal/repository-sync` once a day, `/api/internal/dispatch-sweep` **every
+- Six cron entries (`app/vercel.json`): `/api/internal/repository-sync` once a day, `/api/internal/dispatch-sweep` **every
   2 hours**, `/api/internal/tracker-resync` once a night (the full sync of the ticket mirror of every active project,
   #932: it heals what a missed delivery left behind; a deployment without the factory answers `skipped` and asks GitHub
   for nothing) and `/api/internal/jira-webhooks` once a night (#1039: extends the Jira webhooks the factory registered itself,
   which Atlassian ends after 30 days; `skipped` without the factory or the Atlassian settings, `docs/jira-cloud-setup.md`), and
   `/api/internal/jira-webhooks?retry=pending` every 15 minutes (#1131: the same route, walking only the webhooks that wait for a
-  registration after a move of a connection's webhooks). All of them need `CRON_SECRET`.
+  registration after a move of a connection's webhooks), and `/api/internal/schedule-runs` **once an hour** (#1140: starts the runs of lanes with a
+  schedule trigger that are due, in UTC; minute precision is not given, a lane with `30 6 * * 0` starts at the 07:00 tick; `skipped` without the
+  factory, `docs/workflows.md`, "The schedule trigger"). All of them need `CRON_SECRET`.
 
 ## 2. What you need first
 
@@ -122,7 +124,7 @@ and uses Postgres only.
 
   | Project | Root directory | Framework | Config |
   |---|---|---|---|
-  | App | `app/` | Next.js | `app/vercel.json`: region `fra1`, install command `pnpm install --frozen-lockfile --filter code-reviewer-app...`, function durations, the three crons |
+  | App | `app/` | Next.js | `app/vercel.json`: region `fra1`, install command `pnpm install --frozen-lockfile --filter code-reviewer-app...`, function durations, the crons |
   | Dispatcher | `dispatcher/` | Hono (the entry is `src/index.ts`, the only file named `app`, `index` or `server` that imports `hono`) | `dispatcher/vercel.json`: region `fra1`, install command `pnpm install --frozen-lockfile --filter code-reviewer-dispatcher...`, `maxDuration` 1800 for `src/index.ts`, one cron (the reaper, every 5 minutes) |
 
   Both need Node.js 24 (`engines` in both `package.json` files, `.nvmrc`). Set the Node.js version of each project to

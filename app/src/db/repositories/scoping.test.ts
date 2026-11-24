@@ -146,6 +146,9 @@ const SCOPED = [
  * - jira-webhook-directory: a delivery of Jira names a webhook registration by the id in the address it was sent to, before the workspace
  *   is known, and the nightly job extends the webhooks of every workspace (#1039). It only reads, and every answer names its own workspace;
  *   writing webhook rows goes through the scoped jira webhooks repository;
+ * - schedule-directory: the hourly tick that starts scheduled runs goes over all workspaces and only has to know which of them have a
+ *   lane with a schedule trigger (#1140). It reads workspace ids and nothing else; the lanes are listed and the runs written through
+ *   repositories created for each workspace;
  * - runner-credentials: what happens to a customer's runner before its workspace is known (#854): the exchange of a registration
  *   token for a runner and the lookup of a runner by its credential on every call it makes. The caller holds only a secret
  *   (the database keeps its hash), so there is no workspace to scope to before the secret is looked up; it never lists, and every
@@ -192,6 +195,7 @@ const INSTANCE_LEVEL = [
   "runner-credentials-repository.ts",
   "runner-dispatches-repository.ts",
   "runner-jobs-repository.ts",
+  "schedule-directory-repository.ts",
   "secrets-repository.ts",
   "setup-codes-repository.ts",
   "unclaimed-installations-repository.ts",

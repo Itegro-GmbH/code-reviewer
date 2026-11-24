@@ -36,6 +36,8 @@ export type RunTrigger = {
   /** `to` and `from` of a status trigger (#1036): the status a ticket is moved into, and optionally the one it is moved out of. */
   to?: string;
   from?: string;
+  /** `cron` of a schedule trigger (#1140): five fields, read in UTC. */
+  cron?: string;
   /** `input` of a manual or api trigger, the result schema as written. */
   input?: unknown;
   /** The steps that run first when this trigger started the run, before the shared ones. */
@@ -75,6 +77,7 @@ function readTrigger(raw: unknown, legacy: boolean): RunTrigger | undefined {
     ...(typeof raw.label === "string" ? { label: raw.label } : {}),
     ...(typeof raw.to === "string" ? { to: raw.to } : {}),
     ...(typeof raw.from === "string" ? { from: raw.from } : {}),
+    ...(typeof raw.cron === "string" ? { cron: raw.cron } : {}),
     ...(raw.input === undefined ? {} : { input: raw.input }),
     steps,
   };
