@@ -66,6 +66,7 @@ from code_reviewer_runner.dynamic_review.model_door_route import (
 )
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.outer_proxy import NODE_PROXY_VARIABLE
 from code_reviewer_runner.result import ErrorCode
 
 from .agent import CommandOutcome
@@ -207,6 +208,21 @@ TRUST_BUNDLE_NAME: Final = "network-door-bundle.pem"
 TRUST_CA_PATH: Final = f"{AGENT_CONFIG_DIRECTORY}/{TRUST_CA_NAME}"
 TRUST_BUNDLE_PATH: Final = f"{AGENT_CONFIG_DIRECTORY}/{TRUST_BUNDLE_NAME}"
 SYSTEM_ROOTS_PATH: Final = "/etc/ssl/certs/ca-certificates.crt"
+# #1138: some tools bring their own list of roots and read neither of the variables above (Turbopack
+# in `next build`, which fetches the fonts of `next/font/google` at build time). The CA also goes
+# into the container's system store, as root before the agent starts: `update-ca-certificates` (the
+# image's `ca-certificates` package) adds it to `/etc/ssl/certs/ca-certificates.crt` and the hashed
+# directory OpenSSL reads. `NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS=1` (the variable Next
+# names in its own error) makes Turbopack use the system's roots. A native-roots loader of the
+# rustls kind reads `SSL_CERT_FILE` (`TRUST_BUNDLE_PATH`, which holds the CA) first, else the
+# system store; both hold the CA, so either way the door's certificate is trusted. The probe on a
+# runner is what proves it (docs/runner.md).
+SYSTEM_TRUST_PATH: Final = "/usr/local/share/ca-certificates/code-reviewer-network-door.crt"
+# `exec 2>&1`: `run_exec` drops the standard error, and the reason `update-ca-certificates` gave
+# (a missing tool, a read-only directory) is what the turn's error says, clipped.
+SYSTEM_TRUST_SCRIPT: Final = 'exec 2>&1; umask 022 && cat > "$1" && update-ca-certificates'
+SYSTEM_TRUST_REASON_CHARS: Final = 300
+TURBOPACK_SYSTEM_TLS_VARIABLE: Final = "NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS"
 
 
 def trust_environment(rule: NetworkRule) -> dict[str, str]:
@@ -222,6 +238,7 @@ def trust_environment(rule: NetworkRule) -> dict[str, str]:
         "CURL_CA_BUNDLE": TRUST_BUNDLE_PATH,
         "PIP_CERT": TRUST_BUNDLE_PATH,
         "CARGO_HTTP_CAINFO": TRUST_BUNDLE_PATH,
+        TURBOPACK_SYSTEM_TLS_VARIABLE: "1",
     }
 
 
@@ -244,7 +261,7 @@ def proxy_environment(
         "https_proxy": url,
         "NO_PROXY": no_proxy,
         "no_proxy": no_proxy,
-        "NODE_USE_ENV_PROXY": "1",
+        NODE_PROXY_VARIABLE: "1",
     }
 
 
@@ -884,6 +901,33 @@ class AgentContainer:
             )
             if done.returncode != 0 or done.unanswered:
                 raise unavailable("a file of the engine's configuration could not be written")
+
+    def install_system_trust(self, ca: bytes) -> None:
+        """Put the door's certificate authority (public, PEM) into the container's system store
+        (#1138): the standard input of a root exec that runs a constant script; the path is a
+        constant of the runner, the content goes in no argument."""
+        container = self._container
+        if container is None:
+            raise unavailable("there is no container")
+        done = run_exec(
+            self._api,
+            container,
+            ["/bin/sh", "-c", SYSTEM_TRUST_SCRIPT, "trust", SYSTEM_TRUST_PATH],
+            stdin=ca,
+            timeout=60.0,
+            name="install the door's certificate authority",
+        )
+        if done.returncode != 0 or done.unanswered:
+            # A hard failure, on purpose: a tool that cannot trust the door fails every connection
+            # the door ends. The reason is the exec's own output (public: a tool's message, never
+            # the certificate, which is on stdin), or what `run_exec` says of an exec that did not
+            # answer.
+            if done.unanswered:
+                why = done.stderr
+            else:
+                output = " ".join(done.stdout.split())[:SYSTEM_TRUST_REASON_CHARS]
+                why = f"exit code {done.returncode}" + (f": {output}" if output else "")
+            raise unavailable(f"the door's certificate authority could not be installed ({why})")
 
     def _exec_environment(self, environment: Mapping[str, str]) -> dict[str, str]:
         """The environment of an exec of the engine or of a tool of it. A container made for the

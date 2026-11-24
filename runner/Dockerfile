@@ -144,6 +144,11 @@ RUN ln -s /opt/node/bin/node /usr/local/bin/node \
     && ln -s /opt/node/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -s /opt/pnpm/bin/pnpm.cjs /usr/local/bin/pnpm \
     && mkdir -p /etc/code-reviewer /work/repo /root
+# The group of the inner daemon's socket (`agent-init.sh`: `dockerd --group docker`, #1138). Nobody is in it here: the
+# agent runs as root without a Claude Code layer; the layer's unprivileged user is added to it
+# (`implementer/claude_code/layer.py`). A fixed number, not 10101 (engine), 10201 (the layer's user) or the
+# runner's.
+RUN groupadd --system --gid 10202 docker
 # GPG_KEY and PYTHON_SHA256 come from the Python base image (the release signing key's id and a checksum): public values,
 # emptied so that no variable of the agent's environment is named like a credential.
 ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \

@@ -144,6 +144,9 @@ def test_the_tools_trust_the_doors_certificate_only_for_a_rule_that_names_a_regi
     for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT"):
         assert variables[name] == TRUST_BUNDLE_PATH
     assert variables["CARGO_HTTP_CAINFO"] == TRUST_BUNDLE_PATH
+    # #1138-T04: Turbopack (Rust) has roots of its own; this makes it read the system's, which
+    # `SSL_CERT_FILE` and the system store both hold the door's CA in.
+    assert variables["NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS"] == "1"
     assert variables.items() <= proxy_environment(LIST).items()
     for rule in (OFF, OPEN, NetworkRule(MODE_LIST, ("example.com", "api.anthropic.com"))):
         assert trust_environment(rule) == {}
@@ -693,13 +696,20 @@ class CaDoor:
     def __init__(self, ca: bytes | None) -> None:
         self.registry_ca = ca
 
+    def stop(self) -> None:
+        return None
+
 
 class Place:
     def __init__(self) -> None:
         self.files: dict[str, tuple[bytes, int]] = {}
+        self.system_trust: list[bytes] = []
 
     def write_files(self, files: dict[str, tuple[bytes, int]]) -> None:
         self.files.update(files)
+
+    def install_system_trust(self, ca: bytes) -> None:
+        self.system_trust.append(ca)
 
 
 def trust_session(
@@ -735,6 +745,120 @@ def test_the_ca_and_a_bundle_of_the_system_roots_with_it_are_written_before_the_
     }
 
 
+# #1138-T03
+def test_the_ca_is_also_put_into_the_containers_system_store() -> None:
+    place = Place()
+
+    install(trust_session(LIST, CA_PEM, lambda: b"ROOT-A\n"), place)
+
+    assert place.system_trust == [CA_PEM]
+
+
+class OrderPlace(Place):
+    """The agent's container as far as the order of a turn is concerned."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+
+    def create(self) -> tuple[str, ...]:
+        self.events.append("create")
+        return ()
+
+    def write_files(self, files: dict[str, tuple[bytes, int]]) -> None:
+        self.events.append("write_files")
+        super().write_files(files)
+
+    def install_system_trust(self, ca: bytes) -> None:
+        self.events.append("install_system_trust")
+        super().install_system_trust(ca)
+
+    def stop(self) -> bool:
+        return True
+
+
+class ModelStub:
+    def stop(self) -> None:
+        return None
+
+
+class Stop(Exception):
+    """Ends the turn where the test wants it to."""
+
+
+def turn_with(
+    monkeypatch: pytest.MonkeyPatch, place: OrderPlace, events: list[str]
+) -> ImplementerSession:
+    """A session whose turn runs only as far as the agent's start: everything around it (the
+    doors, the model, the push) is replaced by nothing."""
+    session = trust_session(LIST, CA_PEM, lambda: b"ROOT\n")
+    session._place_factory = lambda: cast("Any", place)  # pyright: ignore[reportPrivateUsage]
+
+    def nothing(*_args: object, **_options: object) -> None:
+        return None
+
+    def a_model(_self: ImplementerSession) -> Any:
+        return ModelStub()
+
+    def no_result(_self: ImplementerSession) -> Any:
+        return None
+
+    def agent_starts(*_args: object) -> Any:
+        events.append("agent")
+        raise Stop
+
+    patched: dict[str, Any] = {
+        "_start_network": nothing,
+        "_start_mcp": nothing,
+        "_start_model": a_model,
+        "_finish": nothing,
+        "_result": no_result,
+        "_agent": agent_starts,
+    }
+    for name, replacement in patched.items():
+        monkeypatch.setattr(ImplementerSession, name, replacement)
+    return session
+
+
+# #1138-T03
+def test_the_ca_is_in_the_system_store_after_the_files_and_before_the_agent_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The agent's inner dockerd is started by the container's init, before any of this: it works
+    # because Go loads the roots at the first TLS handshake, which is the agent's first `docker
+    # pull`, and that is after the agent starts (docs/runner.md). The order is what holds that.
+    events: list[str] = []
+
+    turn_with(monkeypatch, OrderPlace(events), events).run()
+
+    assert events == ["create", "write_files", "install_system_trust", "agent"]
+
+
+# #1138-T03
+def test_a_trust_install_that_fails_ends_the_turn_setup_failed_and_the_agent_never_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Refusing(OrderPlace):
+        def install_system_trust(self, ca: bytes) -> None:
+            super().install_system_trust(ca)
+            raise JobError(
+                ErrorCode.SETUP_FAILED,
+                "agent_container_unavailable: the door's certificate authority could not be "
+                "installed (exit code 127: update-ca-certificates: not found)",
+            )
+
+    session = turn_with(monkeypatch, Refusing(events), events)
+
+    session.run()
+
+    assert "agent" not in events
+    assert session._error is not None  # pyright: ignore[reportPrivateUsage]
+    code, detail = session._error  # pyright: ignore[reportPrivateUsage]
+    assert code is ErrorCode.SETUP_FAILED and "update-ca-certificates: not found" in detail
+
+
 # #784-T10
 def test_a_rule_without_a_registry_writes_nothing() -> None:
     place = Place()
@@ -742,7 +866,7 @@ def test_a_rule_without_a_registry_writes_nothing() -> None:
     install(trust_session(NetworkRule(MODE_LIST, ("example.com",)), None, lambda: b"R"), place)
     install(trust_session(OPEN, None, lambda: b"R"), place)
 
-    assert place.files == {}
+    assert place.files == {} and place.system_trust == []
 
 
 # #784-T10

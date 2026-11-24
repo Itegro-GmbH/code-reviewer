@@ -261,6 +261,10 @@ class AgentPlace(EngineRuntime, Protocol):
         """Make the container; the notes for the report (a check that did not hold)."""
         ...
 
+    def install_system_trust(self, ca: bytes) -> None:
+        """Add the door's certificate authority to the container's system store (#1138)."""
+        ...
+
     def remove(self) -> None: ...
 
 
@@ -976,6 +980,8 @@ class ImplementerSession:
                 TRUST_BUNDLE_NAME: (roots.rstrip(b"\n") + b"\n" + ca, 0o644),
             }
         )
+        # #1138: a tool with roots of its own (Turbopack) reads the system store, not the variables.
+        place.install_system_trust(ca)
 
     def _stop_network(self) -> None:
         """End the network door and keep its log. Safe to call twice."""

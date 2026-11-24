@@ -268,6 +268,9 @@ class FakePlace:
     def write_files(self, files: Mapping[str, tuple[bytes, int]]) -> None:
         return None
 
+    def install_system_trust(self, ca: bytes) -> None:
+        return None
+
     def run_command(
         self, argv: list[str], environment: Mapping[str, str], timeout: float
     ) -> CommandOutcome:

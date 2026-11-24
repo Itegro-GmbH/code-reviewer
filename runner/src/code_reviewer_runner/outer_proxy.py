@@ -44,6 +44,11 @@ PRIVATE_NETWORKS: Final = (
 LOOPBACK_NO_PROXY: Final = "localhost,127.0.0.1,::1"
 PROXY_VARIABLES: Final = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 NO_PROXY_VARIABLES: Final = ("NO_PROXY", "no_proxy")
+# Node 24's own `fetch` reads the proxy variables only when this is "1" (npm and pnpm read them by
+# themselves). Set wherever the variables are, so a script's `fetch` does not wait for a direct
+# route the VM does not have (#1138); the agent's container has the same
+# (`agent_container.proxy_environment`).
+NODE_PROXY_VARIABLE: Final = "NODE_USE_ENV_PROXY"
 
 # A name the tunnel is asked for: the lower-case, ASCII form of a host name (the door's
 # `ascii_name`). Never a space or a control character, so a name cannot add a header line.
@@ -103,6 +108,7 @@ class OuterProxy:
         return [
             *(f"{name}={self.url}" for name in PROXY_VARIABLES),
             *(f"{name}={LOOPBACK_NO_PROXY}" for name in NO_PROXY_VARIABLES),
+            f"{NODE_PROXY_VARIABLE}=1",
         ]
 
     @classmethod

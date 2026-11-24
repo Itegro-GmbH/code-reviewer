@@ -135,14 +135,25 @@ def test_a_variable_that_is_set_and_wrong_is_an_error_not_a_direct_connection(va
 def test_the_tools_of_a_container_get_both_spellings_and_loopback_is_not_proxied() -> None:
     entries = dict(entry.split("=", 1) for entry in PROXY.tool_environment())
 
-    assert {name for name in entries if "proxy" in name.lower() and "no_" not in name.lower()} == {
+    spellings = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+    assert {name for name in spellings if entries[name] == PROXY.url} == set(spellings)
+    assert entries["NO_PROXY"] == entries["no_proxy"] == "localhost,127.0.0.1,::1"
+
+
+# #1138-T05
+def test_node_s_own_fetch_is_told_to_use_the_proxy_like_the_agents_tools_are() -> None:
+    entries = dict(entry.split("=", 1) for entry in PROXY.tool_environment())
+
+    assert entries["NODE_USE_ENV_PROXY"] == "1"
+    assert set(entries) == {
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "http_proxy",
         "https_proxy",
-    }
-    assert {value for name, value in entries.items() if name.lower() != "no_proxy"} == {PROXY.url}
-    assert entries["NO_PROXY"] == entries["no_proxy"] == "localhost,127.0.0.1,::1"
+        "NO_PROXY",
+        "no_proxy",
+        "NODE_USE_ENV_PROXY",
+    }, "no certificate variable: the outer proxy tunnels, it never shows a certificate of its own"
 
 
 def test_a_tunnel_asks_the_proxy_for_the_name_and_returns_the_open_socket() -> None:
