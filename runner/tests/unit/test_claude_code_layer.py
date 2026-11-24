@@ -94,6 +94,17 @@ def test_the_layer_makes_the_user_the_exec_runs_as_and_leaves_the_base_alone() -
     assert not re.search(r"(?i)token|api[_-]?key|oauth|secret", text)
 
 
+# #1138-T02
+def test_the_layers_user_is_a_member_of_the_docker_group_of_the_agents_own_daemon() -> None:
+    text = dockerfile(BASE, SPEC)
+
+    assert "--groups docker" in text
+    # The group is the image's (`runner/Dockerfile`), not made here: a base without it fails the
+    # build instead of silently giving a user a group of another number.
+    assert "groupadd --system" not in text and "groupadd docker" not in text
+    assert text.index("--groups docker") > text.index("useradd")
+
+
 # #856-T14
 def test_the_build_context_is_the_dockerfile_alone() -> None:
     with tarfile.open(fileobj=io.BytesIO(build_context(dockerfile(BASE, SPEC)))) as archive:

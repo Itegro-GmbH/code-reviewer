@@ -114,6 +114,9 @@ class Rig:
         if argv[:3] == ["/bin/sh", "-c", ac.WRITE_FILE_SCRIPT]:
             self.written[argv[4]] = stdin.read()
             return 0
+        if argv[:3] == ["/bin/sh", "-c", ac.SYSTEM_TRUST_SCRIPT]:
+            self.written[argv[4]] = stdin.read()
+            return 0
         if argv[:3] == ["/bin/sh", "-c", ac.RESTART_DOCKER_SCRIPT]:
             self.written[argv[4]] = stdin.read()
             stdout.write(ac.NO_DOCKER + "\n" if self.no_inner_docker else "restarting\n")
@@ -373,6 +376,38 @@ def test_the_config_goes_in_through_an_exec_and_the_engine_starts_with_an_exec_n
     assert url.startswith("http://127.0.0.1:"), (
         "a loopback listener of Control, not an address in the agent"
     )
+    place.stop()
+
+
+# #1138-T03
+def test_the_door_s_ca_goes_into_the_system_store_through_a_root_exec_with_the_content_on_stdin(
+    rig: Rig,
+) -> None:
+    place = container(rig)
+    place.create()
+
+    place.install_system_trust(b"-----BEGIN CERTIFICATE-----\nDOOR\n-----END CERTIFICATE-----\n")
+
+    (made,) = [e for e in rig.execs if e[0][:3] == ["/bin/sh", "-c", ac.SYSTEM_TRUST_SCRIPT]]
+    assert made[0][-1] == ac.SYSTEM_TRUST_PATH
+    assert rig.written[ac.SYSTEM_TRUST_PATH].startswith(b"-----BEGIN CERTIFICATE-----")
+    assert "DOOR" not in json.dumps(made[0]), "the content is on stdin, not in argv"
+    assert "update-ca-certificates" in ac.SYSTEM_TRUST_SCRIPT
+    assert ac.SYSTEM_TRUST_PATH.startswith("/usr/local/share/ca-certificates/")
+    assert ac.SYSTEM_TRUST_PATH.endswith(".crt")
+    place.stop()
+
+
+# #1138-T03
+def test_a_system_store_that_cannot_be_written_ends_the_turn_free(rig: Rig) -> None:
+    place = container(rig)
+    place.create()
+    rig.engine.exec_behaviour = lambda made, stdin, stdout: 1
+
+    with pytest.raises(JobError) as refused:
+        place.install_system_trust(b"CA")
+
+    assert refused.value.code is ErrorCode.SETUP_FAILED
     place.stop()
 
 

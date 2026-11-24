@@ -42,7 +42,14 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
 from code_reviewer_runner.resume_wire import ResumeReason
 
-from .command import AGENT_PATH, AGENT_USER, ClaudeCommand, SessionChoice, claude_environment
+from .command import (
+    AGENT_EXEC_USER,
+    AGENT_PATH,
+    AGENT_USER,
+    ClaudeCommand,
+    SessionChoice,
+    claude_environment,
+)
 from .events import ClaudeEvents, ClaudeResult, LineSplitter, parse_result
 from .login import OAUTH_VARIABLE, ClaudeLogin
 
@@ -275,7 +282,7 @@ class ClaudeCodeAgent:
                     self._place.run_streaming(
                         argv,
                         environment,
-                        user=AGENT_USER,
+                        user=AGENT_EXEC_USER,
                         stdin=prompt.encode("utf-8"),
                         timeout=remaining + TIMEOUT_MARGIN_SECONDS,
                         consume=consume,

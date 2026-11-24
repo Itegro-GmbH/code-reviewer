@@ -14,6 +14,11 @@
 # again. The variables of the first start are unset when that file is there: a container made for the setup
 # has the setup's, and the agent must not inherit them.
 #
+# The socket is `root:docker 0660` (#1138): the image's `docker` group (`runner/Dockerfile`) is the one the
+# Claude Code layer puts its unprivileged user in, so the agent's tools reach this container's own daemon and
+# nothing else (the VM's or the host's Docker is not in this container, only this socket is). Nobody else but
+# root is in the group.
+#
 # No secret, no credential and no network address of the VM is read or written here. The daemon logs to
 # /var/log/dockerd.log, which the agent can read.
 set -eu
@@ -26,7 +31,7 @@ while :; do
     . /run/agent-docker-env
     set +a
   fi
-  dockerd --host=unix:///var/run/docker.sock --ipv6=false --live-restore >>/var/log/dockerd.log 2>&1 &
+  dockerd --host=unix:///var/run/docker.sock --group docker --ipv6=false --live-restore >>/var/log/dockerd.log 2>&1 &
   daemon=$!
   tries=0
   until docker info >/dev/null 2>&1; do

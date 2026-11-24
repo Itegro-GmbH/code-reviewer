@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from code_reviewer_runner.implementer.claude_code.command import (
+    AGENT_EXEC_USER,
     AGENT_USER,
     CONFIG_DIRECTORY,
     FINISH_SERVER,
@@ -183,6 +184,15 @@ def test_the_environment_is_built_from_names_and_keeps_every_other_door_shut() -
 def test_claude_code_runs_as_a_user_that_is_not_root() -> None:
     assert AGENT_USER != "root" and not AGENT_USER.startswith("0")
     assert ":" in AGENT_USER
+
+
+# #1138-T03
+def test_the_exec_names_the_user_so_that_the_groups_of_the_layer_apply() -> None:
+    # A Docker exec given `uid:gid` drops the supplementary groups of /etc/group (measured with
+    # Docker 29); a name, or a bare uid, loads them. The name also fails closed when the user is
+    # not in the image, where a bare uid would run with the primary group 0.
+    assert AGENT_EXEC_USER == "agent"
+    assert ":" not in AGENT_EXEC_USER and not AGENT_EXEC_USER.isdigit()
 
 
 # -- the login of the device ---------------------------------------------------------------------

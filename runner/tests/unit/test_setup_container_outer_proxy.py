@@ -44,8 +44,11 @@ def test_with_a_proxy_the_container_gets_the_proxy_variables_and_nothing_else_ch
     assert env["HTTPS_PROXY"] == env["https_proxy"] == "http://172.31.0.13:3128"
     assert env["HTTP_PROXY"] == env["http_proxy"] == "http://172.31.0.13:3128"
     assert env["NO_PROXY"] == env["no_proxy"] == "localhost,127.0.0.1,::1"
+    # #1138-T05: Node's own `fetch` reads the variables only when told to, as in the agent's tools.
+    assert env["NODE_USE_ENV_PROXY"] == "1"
     assert set(env) == {
-        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"
+        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
+        "NODE_USE_ENV_PROXY",
     }  # fmt: skip
 
 

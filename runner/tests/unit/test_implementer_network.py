@@ -144,6 +144,9 @@ def test_the_tools_trust_the_doors_certificate_only_for_a_rule_that_names_a_regi
     for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT"):
         assert variables[name] == TRUST_BUNDLE_PATH
     assert variables["CARGO_HTTP_CAINFO"] == TRUST_BUNDLE_PATH
+    # #1138-T04: Turbopack (Rust) has roots of its own; this makes it read the system's, which
+    # `SSL_CERT_FILE` and the system store both hold the door's CA in.
+    assert variables["NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS"] == "1"
     assert variables.items() <= proxy_environment(LIST).items()
     for rule in (OFF, OPEN, NetworkRule(MODE_LIST, ("example.com", "api.anthropic.com"))):
         assert trust_environment(rule) == {}
@@ -697,9 +700,13 @@ class CaDoor:
 class Place:
     def __init__(self) -> None:
         self.files: dict[str, tuple[bytes, int]] = {}
+        self.system_trust: list[bytes] = []
 
     def write_files(self, files: dict[str, tuple[bytes, int]]) -> None:
         self.files.update(files)
+
+    def install_system_trust(self, ca: bytes) -> None:
+        self.system_trust.append(ca)
 
 
 def trust_session(
@@ -735,6 +742,15 @@ def test_the_ca_and_a_bundle_of_the_system_roots_with_it_are_written_before_the_
     }
 
 
+# #1138-T03
+def test_the_ca_is_also_put_into_the_containers_system_store() -> None:
+    place = Place()
+
+    install(trust_session(LIST, CA_PEM, lambda: b"ROOT-A\n"), place)
+
+    assert place.system_trust == [CA_PEM]
+
+
 # #784-T10
 def test_a_rule_without_a_registry_writes_nothing() -> None:
     place = Place()
@@ -742,7 +758,7 @@ def test_a_rule_without_a_registry_writes_nothing() -> None:
     install(trust_session(NetworkRule(MODE_LIST, ("example.com",)), None, lambda: b"R"), place)
     install(trust_session(OPEN, None, lambda: b"R"), place)
 
-    assert place.files == {}
+    assert place.files == {} and place.system_trust == []
 
 
 # #784-T10

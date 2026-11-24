@@ -43,7 +43,7 @@ from typing import Any, Final, Protocol
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
-from .command import AGENT_HOME, AGENT_UID
+from .command import AGENT_HOME, AGENT_NAME, AGENT_UID
 
 PACKAGE: Final = "@anthropic-ai/claude-code"
 CLAUDE_CODE_VERSION: Final = "2.1.311"
@@ -205,6 +205,12 @@ def _install_script(spec: LayerSpec) -> str:
     return "\n".join(lines)
 
 
+# The group of the agent's own `dockerd` socket (`runner/Dockerfile`, `agent-init.sh`, #1138):
+# the image makes it, the user is put in it here. Only that daemon, in the agent's container, is
+# behind it; a base without the group fails the build.
+DOCKER_GROUP: Final = "docker"
+
+
 def dockerfile(base_id: str, spec: LayerSpec) -> str:
     """The text of the layer. `base_id` is the image **id** of the agent image, so the layer is
     exactly on what its tag names."""
@@ -220,9 +226,9 @@ def dockerfile(base_id: str, spec: LayerSpec) -> str:
         f"RUN {install} \\\n"
         '    ln -sf "$(npm prefix --global)/bin/claude" /usr/local/bin/claude; \\\n'
         f'    test "$(claude --version | cut -d" " -f1)" = "{spec.version}"\n'
-        f"RUN groupadd --gid {uid} agent \\\n"
-        f"    && useradd --uid {uid} --gid {uid} --create-home --home-dir {AGENT_HOME} "
-        "--shell /bin/bash agent \\\n"
+        f"RUN groupadd --gid {uid} {AGENT_NAME} \\\n"
+        f"    && useradd --uid {uid} --gid {uid} --groups {DOCKER_GROUP} --create-home "
+        f"--home-dir {AGENT_HOME} --shell /bin/bash {AGENT_NAME} \\\n"
         f"    && install -d -m 0700 -o {uid} -g {uid} {AGENT_HOME}/.claude\n"
     )
 
