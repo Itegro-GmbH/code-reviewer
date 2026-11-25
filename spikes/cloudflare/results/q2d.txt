@@ -1,0 +1,21 @@
+ Runtimes: runc sysbox-runc io.containerd.runc.v2
+--- sysbox container, plain:
+   [0.99 s rc=125] docker run --rm --runtime=sysbox-runc public.ecr.aws/docker/library/busybox:1.37 sh -c id; cat /proc/self/uid_map; grep -E "Cap(Eff)" /proc/self/status
+--- sysbox-fs log tail:
+time="2026-11-25 12:29:02" level=info msg="IOvec memParser elected"
+time="2026-11-25 12:29:02" level=info msg="Listening on /run/sysbox/sysfs.sock"
+time="2026-11-25 12:29:02" level=info msg="Ready ..."
+time="2026-11-25 12:29:25" level=info msg="Container pre-registration completed: id = ede52e196315"
+time="2026-11-25 12:29:26" level=info msg="Container unregistration completed: id = ede52e196315"
+--- sysbox-mgr log tail:
+time="2026-11-25 12:29:01" level=info msg="Listening on /run/sysbox/sysmgr.sock"
+time="2026-11-25 12:29:01" level=info msg="Ready ..."
+time="2026-11-25 12:29:25" level=info msg="registered new container ede52e196315"
+time="2026-11-25 12:29:26" level=info msg="unregistered container ede52e196315"
+time="2026-11-25 12:29:26" level=info msg="released resources for container ede52e196315"
+
+ERR: docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: container_linux.go:439: starting container process caused: process_linux.go:608: container init caused: process_linux.go:529: applying cgroup configuration for process caused: failed to write 2779 to cgroup.procs: write /sys/fs/cgroup/docker/ede52e196315f587a47d6ca3844606b96f95aea0fec78606bb86ce6a19156ff3/init.scope/cgroup.procs: operation not supported
+
+Run 'docker run --help' for more information
+
+exit 0 ms 12353

@@ -1,0 +1,13 @@
+root: type=domain threaded subtree=[cpuset cpu pids] procs=1 2378 2396 2513 2530 2863 2866 2867 2868 
+after: type=domain subtree=[cpuset cpu io memory pids]
+--- sysbox container, plain:
+uid=0(root) gid=0(root) groups=0(root),10(wheel)
+         0     165536      65536
+CapEff:	00000000abac35fb
+   [1.01 s rc=0] docker run --rm --runtime=sysbox-runc public.ecr.aws/docker/library/busybox:1.37 sh -c id; cat /proc/self/uid_map; grep -E "Cap(Eff)" /proc/self/status
+time="2026-11-25T12:29:41.493614049Z" level=info msg="shim disconnected" id=5a7238c57a29281cfe6e95ed0f8ffa6d709c288dcddbbc30468b343e0a00b88d namespace=moby
+time="2026-11-25T12:29:41.493673099Z" level=info msg="cleaning up after shim disconnected" id=5a7238c57a29281cfe6e95ed0f8ffa6d709c288dcddbbc30468b343e0a00b88d namespace=moby
+time="2026-11-25T12:29:41.493690039Z" level=info msg="cleaning up dead shim" id=5a7238c57a29281cfe6e95ed0f8ffa6d709c288dcddbbc30468b343e0a00b88d namespace=moby
+
+ERR: 
+exit 0 ms 2937

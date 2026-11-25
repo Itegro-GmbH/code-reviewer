@@ -1,0 +1,15 @@
+--- is /proc/modules really absent, and does a bind mount onto it work?
+ls: cannot access '/proc/modules': No such file or directory
+33
+gzip: /proc/config.gz: No such file or directory
+mount: /proc/modules: mount point does not exist.
+       dmesg(1) may have more information after failed mount system call.
+--- patched COPY of sysbox-mgr (same-length path swap, throwaway, spike only)
+1
+0
+2152 [sysbox-fs] <defunct>
+2256 sysbox-fs
+
+ERR: bash: line 11:  2194 Segmentation fault      nohup /tmp/sysbox-mgr-patched > /var/log/sysbox-mgr.log 2>&1
+
+exit 0 ms 19787

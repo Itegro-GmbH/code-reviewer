@@ -1,0 +1,9 @@
+download 10 MB through the door: 200 10000000B in 0.234588s = 42627926 B/s
+download 100 MB through the door: 403 1B in 0.046148s = 21 B/s
+download 300 MB through the door: 403 1B in 0.043871s = 22 B/s
+upload 50 MB (POST body through the handler):
+upload: 200 in 1.598028s = 31288563 B/s
+many small requests: 100 sequential GETs of example.com:
+100 requests: 5.9 s -> 59 ms per request (new TLS handshake each)
+
+ERR: 

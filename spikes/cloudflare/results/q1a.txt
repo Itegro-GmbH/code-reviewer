@@ -1,0 +1,43 @@
+0x00000000abac35fb=cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,cap_setpcap,cap_net_bind_service,cap_net_admin,cap_net_raw,cap_sys_chroot,cap_sys_ptrace,cap_sys_admin,cap_sys_nice,cap_sys_resource,cap_sys_time,cap_mknod,cap_audit_write,cap_setfcap
+--- missing caps from full:
+20
+--- namespaces/idmap/seccomp:
+uid=0(root) gid=0(root) groups=0(root)
+NoNewPrivs:	0
+Seccomp:	0
+Seccomp_filters:	0
+1
+34
+42
+43
+cgroup.controllers
+cgroup.events
+cgroup.freeze
+cgroup.kill
+cgroup.max.depth
+cgroup.max.descendants
+cgroup.procs
+cgroup.stat
+cgroup.stat.local
+cgroup.subtree_control
+cgroup.threads
+cgroup.type
+cpu.idle
+cpu.max
+cpu.max.burst
+cpu.stat
+cpu.stat.local
+cpu.weight
+cpu.weight.nice
+cpuset.cpus
+--- kernel modules/fs:
+nodev	tmpfs nodev	devtmpfs 	ext4 	fuseblk nodev	fuse nodev	fusectl nodev	overlay 	xfs nodev	selinuxfs 	btrfs 
+bridge overlay 
+ls: cannot access '/lib/modules': No such file or directory
+6.18.64-cloudflare-microvm-2026.11.44
+/usr/sbin/nft
+net.ipv4.ip_forward = 0
+net.bridge.bridge-nf-call-iptables = 1
+
+ERR: 
+exit 0 ms 98

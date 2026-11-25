@@ -1,0 +1,52 @@
+public.ecr.aws/docker/library/docker:29.1.3-dind
+   [11.26 s rc=0] docker pull -q public.ecr.aws/docker/library/docker:29.1.3-dind
+public.ecr.aws/docker/library/alpine:3.21 13.1MB
+public.ecr.aws/docker/library/docker:29.1.3-dind 511MB
+public.ecr.aws/docker/library/busybox:1.37 6.69MB
+--- DinD under Sysbox (the agent container's shape: sysbox-runc, own dockerd inside):
+   inner dockerd ready 9.5 s after docker run
+ Server Version: 29.1.3
+ Storage Driver: overlayfs
+  driver-type: io.containerd.snapshotter.v1
+ Cgroup Driver: cgroupfs
+ Cgroup Version: 2
+ Runtimes: io.containerd.runc.v2 runc
+         0     165536      65536
+--- hand busybox to the inner daemon (docker save | load), run an inner container with its own network:
+Loaded image: public.ecr.aws/docker/library/busybox:1.37
+   [0.76 s rc=0] sh -c docker save public.ecr.aws/docker/library/busybox:1.37 | docker exec -i agent docker load
+default via 172.18.0.1 dev eth0 
+172.18.0.0/16 dev eth0 scope link  src 172.18.0.2 
+inner-inner-ok
+   [1.68 s rc=0] docker exec agent docker run --rm public.ecr.aws/docker/library/busybox:1.37 sh -c ip -br a; ip r; echo inner-inner-ok
+   [6.63 s rc=1] docker exec agent sh -c docker network create inner-net >/dev/null; docker run -d --rm --name x --network inner-net public.ecr.aws/docker/library/busybox
+--- inner container -> internet over two NAT layers (HTTP:80 to the door):
+<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data:
+iptables v1.8.11 (nf_tables)
+-P PREROUTING ACCEPT
+-P INPUT ACCEPT
+-P OUTPUT ACCEPT
+-P POSTROUTING ACCEPT
+-N DOCKER
+
+ERR: BusyBox v1.37.0 (2024-09-26 21:31:42 UTC) multi-call binary.
+
+Usage: ip [OPTIONS] address|route|link|tunnel|neigh|rule [ARGS]
+
+OPTIONS := -f[amily] inet|inet6|link | -o[neline]
+
+ip addr add|del IFADDR dev IFACE | show|flush [dev IFACE] [to PREFIX]
+ip route list|flush|add|del|change|append|replace|test ROUTE
+ip link set IFACE [up|down] [arp on|off] [multicast on|off]
+	[promisc on|off] [mtu NUM] [name NAME] [qlen NUM] [address MAC]
+	[master IFACE | nomaster] [netns PID] [type TYPE ARGS]
+ip tunnel add|change|del|show [NAME]
+	[mode ipip|gre|sit] [remote ADDR] [local ADDR] [ttl TTL]
+ip neigh show|flush [to PREFIX] [dev DEV] [nud STATE]
+ip rule [list] | add|del SELECTOR ACTION
+docker: Error response from daemon: Invalid container name (x), only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed
+
+Run 'docker run --help' for more information
+wget: download timed out
+
+exit 0 ms 32248
