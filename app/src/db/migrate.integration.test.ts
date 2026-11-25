@@ -174,6 +174,7 @@ describe("the migrations of both epics", () => {
       "20261121100000_add_hosted_runners",
       "20261121140000_allow_runner_turn_setup",
       "20261122120000_jira_webhook_shared_address",
+      "20261125100000_create_factory_oauth",
     ]);
   });
 
@@ -218,6 +219,11 @@ describe("starting the database", () => {
       "billing_webhook_events",
       "billing_workspace_settings",
       "email_verification_tokens",
+      "factory_oauth_clients",
+      "factory_oauth_codes",
+      "factory_oauth_grants",
+      "factory_oauth_requests",
+      "factory_oauth_tokens",
       "implementer_environments",
       "implementer_session_snapshot_parts",
       "implementer_session_snapshots",

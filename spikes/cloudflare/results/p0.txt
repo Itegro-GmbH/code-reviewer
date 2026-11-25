@@ -1,0 +1,55 @@
+Linux e5f415f3c666d37251ca37cffb8693b53a48dcdc68a1d35090603f2dff2f0fb 6.18.64-cloudflare-microvm-2026.11.44 #1 SMP PREEMPT_DYNAMIC Mon Sep 27 00:00:00 UTC 2010 x86_64 x86_64 x86_64 GNU/Linux
+nomodule console=hvc0 quiet cloudchamber.config_drive=0 cloudchamber.cgroup_nsdelegate=1 swiotlb=noforce root=/dev/vda rootfstype=squashfs ro reboot=k panic=1 8250.nr_uarts=0 cloudchamber.template=1 memory_hotplug.memmap_on_memory=1 memhp_default_state=online cloudchamber.csprint=1 cloudchamber.cpu_
+2
+               total        used        free      shared  buff/cache   available
+Mem:            8484         309        8244           3          26        8174
+/dev/vdb         15G  235M   15G   2% /
+uid=0(root) gid=0(root) groups=0(root)
+CapPrm:	00000000abac35fb
+CapEff:	00000000abac35fb
+CapBnd:	00000000abac35fb
+btrfs-control console cpu cpu_dma_latency fd full fuse hvc0 hvc1 hvc2 hvc3 hvc4 hvc5 hvc6 hvc7 kmsg kvm loop-control loop0 loop1 loop2 loop3 loop4 loop5 loop6 loop7 mapper mem mqueue net null port ptmx ptp0 pts random shm stderr stdin stdout tty tty0 tty1 tty10 tty11 tty12 tty13 tty14 tty15 tty16 
+crw------- 1 root root 10, 229 Nov 24 23:52 /dev/fuse
+crw------- 1 root root 10, 232 Nov 24 23:52 /dev/kvm
+crw-rw-rw- 1 root root 10, 200 Nov 24 23:52 /dev/net/tun
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+NAME="Ubuntu"
+tmpfs on /dev type tmpfs (rw,nosuid,size=65536k,nr_inodes=26440,mode=755)
+devpts on /dev/pts type devpts (rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=666)
+shm on /dev/shm type tmpfs (rw,nosuid,nodev,noexec,relatime,size=65536k,nr_inodes=26440)
+mqueue on /dev/mqueue type mqueue (rw,nosuid,nodev,noexec,relatime)
+sysfs on /sys type sysfs (rw,nosuid,nodev,noexec,relatime)
+/dev/vdb on / type btrfs (rw,noatime,compress=zstd:1,discard=async,space_cache=v2,commit=60,subvolid=262,subvol=/rootfs)
+cgroup2 on /sys/fs/cgroup type cgroup2 (rw,nosuid,nodev,noexec,relatime,nsdelegate)
+devtmpfs on /dev type devtmpfs (rw,relatime,size=103672k,nr_inodes=25918,mode=755)
+devpts on /dev/pts type devpts (rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=666)
+shm on /dev/shm type tmpfs (rw,nosuid,nodev,noexec,relatime,size=65536k,nr_inodes=26440)
+mqueue on /dev/mqueue type mqueue (rw,nosuid,nodev,noexec,relatime)
+tmpfs on /run type tmpfs (rw,relatime,size=105760k,nr_inodes=26440,mode=755)
+proc on /run/cloudchamber/proc type proc (rw,nosuid,nodev,noexec,relatime)
+sysfs on /run/cloudchamber/sys type sysfs (rw,nosuid,nodev,noexec,relatime)
+overlay on /etc/hostname type overlay (ro,relatime,lowerdir=/etc,upperdir=/container/etc,workdir=/container/work,uuid=on)
+overlay on /etc/hosts type overlay (ro,relatime,lowerdir=/etc,upperdir=/container/etc,workdir=/container/work,uuid=on)
+overlay on /etc/resolv.conf type overlay (rw,relatime,lowerdir=/etc,upperdir=/container/etc,workdir=/container/work,uuid=on)
+cpuview on /proc/stat type fuse.cpuview (ro,nosuid,nodev,noexec,relatime,user_id=0,group_id=0,allow_other)
+cpuview on /proc/interrupts type fuse.cpuview (ro,nosuid,nodev,noexec,relatime,user_id=0,group_id=0,allow_other)
+cpuview on /proc/softirqs type fuse.cpuview (ro,nosuid,nodev,noexec,relatime,user_id=0,group_id=0,allow_other)
+ls: cannot access '/proc/config.gz': No such file or directory
+cpuset cpu io memory hugetlb pids misc
+domain
+0
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+bond0            DOWN           
+dummy0           DOWN           
+cfeth0           UP             10.0.0.1/24 fd00::11/8 fe80::211:22ff:fe33:4466/64 
+default via 10.0.0.254 dev cfeth0 proto static 
+10.0.0.0/24 dev cfeth0 proto kernel scope link src 10.0.0.1 
+cloudflare-containers-ca.crt
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0   2708  1492 ?        Ss   12:25   0:00 sleep infinity
+root           3  5.0  0.0   4336  3388 ?        Ss   12:25   0:00 bash -c uname -a; cat /proc/cmdline 2>/dev/null | cut -c1-300; nproc; free -m | head -2; df -h / | tail -1; id; grep -E 'Cap(Eff|Prm|Bnd)' /proc/self/status ls /dev | head -50 | tr '\n' ' '; echo; ls -l /dev/fuse /dev/net/tun /dev/kvm 2>&1 cat /etc/os-release | head -2; mount | head -20 ls /proc/config.gz 2>&1; zcat /proc/config.gz 2>/dev/null | grep -E 'USER_NS|OVERLAY_FS=|CGROUP_BPF|SECCOMP_FILTER|RT_GROUP_SCHED|VETH|BRIDGE=|NF_TABLES=|NFT_MASQ|FUSE_FS|TUN=|NF_NAT|VSOCK|IP_NF_RAW|CGROUP_MISC|BLK_DEV_LOOP|XFS_FS|EXT4_FS='  cat /sys/fs/cgroup/cgroup.controllers; cat /sys/fs/cgroup/cgroup.type 2>/dev/null; cat /sys/fs/cgroup/cgroup.subtree_control cat /proc/sys/net/ipv4/ip_forward; ip -br a; ip r ls /etc/cloudflare/certs 2>&1 ps aux | head -15 
+root          32  0.0  0.0   7904  4072 ?        R    12:25   0:00 ps aux
+root          33  0.0  0.0   2720  1568 ?        S    12:25   0:00 head -15
+
+ERR: 
+exit 0 ms 207

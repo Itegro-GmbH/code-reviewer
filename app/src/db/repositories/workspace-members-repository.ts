@@ -56,6 +56,36 @@ export function createWorkspaceMembersRepository(
   workspaceId: WorkspaceId,
   now: () => Date = () => new Date(),
 ): WorkspaceMembersRepository {
+  /**
+   * The AI apps a person connected to the factory MCP (#1144) end with their membership: the grants of this workspace are revoked and
+   * their codes and tokens deleted, in the transaction that removes the member (the service runs `remove` in one). Without it a
+   * person who is invited again would find the old connection alive, with its old scope, and the settings list would show an ex-member.
+   */
+  async function revokeAiApps(userId: string): Promise<void> {
+    const grants = await db
+      .selectFrom("factory_oauth_grants")
+      .select("id")
+      .where("workspace_id", "=", workspaceId)
+      .where("user_id", "=", userId)
+      .where("revoked_at", "is", null)
+      .execute();
+    if (grants.length === 0) return;
+    const ids = grants.map((grant) => grant.id);
+    await db
+      .updateTable("factory_oauth_grants")
+      .set({ revoked_at: formatTimestamp(now()) })
+      .where("id", "in", ids)
+      .execute();
+    await db
+      .deleteFrom("factory_oauth_codes")
+      .where("grant_id", "in", ids)
+      .execute();
+    await db
+      .deleteFrom("factory_oauth_tokens")
+      .where("grant_id", "in", ids)
+      .execute();
+  }
+
   function members() {
     return (
       db
@@ -175,7 +205,9 @@ export function createWorkspaceMembersRepository(
         .where("workspace_id", "=", workspaceId)
         .where("user_id", "=", userId)
         .executeTakeFirst();
-      return Number(result.numDeletedRows) === 1;
+      const removed = Number(result.numDeletedRows) === 1;
+      if (removed) await revokeAiApps(userId);
+      return removed;
     },
 
     async lock() {

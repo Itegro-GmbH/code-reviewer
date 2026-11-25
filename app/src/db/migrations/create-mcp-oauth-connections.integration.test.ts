@@ -31,7 +31,11 @@ async function snapshot(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
-    if (table.name === "mcp_oauth_connections") continue;
+    if (
+      table.name === "mcp_oauth_connections" ||
+      table.name.startsWith("factory_oauth_")
+    )
+      continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,

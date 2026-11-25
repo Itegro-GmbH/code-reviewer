@@ -116,6 +116,7 @@ import { migration as widenWorkflowRunTriggerForStatus } from "./20261114150000_
 import { migration as createJiraConnections } from "./20261114160000_create_jira_connections.ts";
 import { migration as createJiraWebhooks } from "./20261114180000_create_jira_webhooks.ts";
 import { migration as createMcpServers } from "./20261117100000_create_mcp_servers.ts";
+import { migration as createFactoryOauth } from "./20261125100000_create_factory_oauth.ts";
 import { migration as createMcpOauthConnections } from "./20261117140000_create_mcp_oauth_connections.ts";
 import { migration as addJobMcpCalls } from "./20261117150000_add_job_mcp_calls.ts";
 import { migration as createJobMcpCalls } from "./20261117160000_create_job_mcp_calls.ts";
@@ -282,6 +283,7 @@ const migrations: Record<string, Migration> = {
   "20261121100000_add_hosted_runners": addHostedRunners,
   "20261121140000_allow_runner_turn_setup": allowRunnerTurnSetup,
   "20261122120000_jira_webhook_shared_address": jiraWebhookSharedAddress,
+  "20261125100000_create_factory_oauth": createFactoryOauth,
 };
 
 export const migrationProvider: MigrationProvider = {

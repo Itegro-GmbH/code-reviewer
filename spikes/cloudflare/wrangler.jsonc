@@ -1,0 +1,17 @@
+{
+  // Spike #1149. Everything in this account that this spike creates is named cr-spike-*. Not wired into production.
+  "name": "cr-spike-cf",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "containers": [
+    {
+      "class_name": "CrSpikeBox",
+      "scheduling_policy": "durable_object",
+      "images": { "base": { "dockerfile": "./image/Dockerfile", "build_context": "." } }
+    }
+  ],
+  "durable_objects": { "bindings": [{ "name": "BOX", "class_name": "CrSpikeBox" }] },
+  "exports": { "CrSpikeBox": { "type": "durable-object", "storage": "sqlite" } },
+  "observability": { "enabled": false }
+}

@@ -9,6 +9,7 @@ import { getAccessGates } from "./access-gates-runtime.ts";
 import { getAuth } from "./auth.ts";
 import { getGithubAuth } from "./github-auth.ts";
 import { landingWithInvitation, pathCarrying } from "./invitation-return.ts";
+import { landingWithOauth, oauthRequestIdOf } from "./oauth-return.ts";
 import { pathAfterPasswordSignIn } from "./post-sign-in.ts";
 import { signInWithPasswordChecked } from "./password-sign-in.ts";
 import { getSignInLimiter, getSignInMethods } from "./sign-in-runtime.ts";
@@ -16,16 +17,23 @@ import { getSignInLimiter, getSignInMethods } from "./sign-in-runtime.ts";
 export async function signInWithGithub(formData?: FormData): Promise<void> {
   // A way the admin switched off is off here too, not only on the login page. (redirect() works by
   // throwing, so it stays outside the try block.)
+  const oauth = oauthRequestIdOf(formData?.get("oauth"));
+  const carried: Record<string, string> = oauth === null ? {} : { oauth };
   if (!(await getSignInMethods()).github)
     redirect(
       pathCarrying("/login", formData?.get("invitation"), {
         error: "sign_in_method_disabled",
+        ...carried,
       }),
     );
   // An invitation link the person came from: carried through GitHub (in the callback address Better Auth keeps
   // with its own state, not in anything the browser can change on the way) to the page of the invitation.
   // Only a value shaped like a link token is carried, and the only place it leads to is that page.
-  const landing = landingWithInvitation("/", formData?.get("invitation"));
+  // A pending authorization request of the factory MCP is carried the same way, and only when there is no invitation.
+  const landing = landingWithInvitation(
+    landingWithOauth("/", oauth),
+    formData?.get("invitation"),
+  );
   let githubUrl: string | undefined;
   let notConfigured = false;
   try {
@@ -47,9 +55,11 @@ export async function signInWithGithub(formData?: FormData): Promise<void> {
       (notConfigured
         ? pathCarrying("/login", formData?.get("invitation"), {
             error: "github_not_configured",
+            ...carried,
           })
         : pathCarrying("/login", formData?.get("invitation"), {
             error: "sign_in_unavailable",
+            ...carried,
           })),
   );
 }
@@ -65,8 +75,15 @@ export async function signOut(): Promise<void> {
  * answer, so the page does not tell which email addresses have an account.
  */
 export async function signInWithPassword(formData: FormData): Promise<void> {
+  const oauth = oauthRequestIdOf(formData.get("oauth"));
+  const carried: Record<string, string> = oauth === null ? {} : { oauth };
   if (!(await getSignInMethods()).emailPassword)
-    redirect("/login?error=sign_in_method_disabled");
+    redirect(
+      pathCarrying("/login", null, {
+        error: "sign_in_method_disabled",
+        ...carried,
+      }),
+    );
   const email = formData.get("email");
   const password = formData.get("password");
   // An invitation link the person came from: carried to the page of the invitation after the sign-in.
@@ -92,10 +109,10 @@ export async function signInWithPassword(formData: FormData): Promise<void> {
   redirect(
     error === null
       ? landingWithInvitation(
-          await landingAfterSignIn(email as string),
+          landingWithOauth(await landingAfterSignIn(email as string), oauth),
           invitation,
         )
-      : pathCarrying("/login", invitation, { error }),
+      : pathCarrying("/login", invitation, { error, ...carried }),
   );
 }
 

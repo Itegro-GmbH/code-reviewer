@@ -198,6 +198,128 @@ describe("changing the role of a member", () => {
 });
 
 describe("removing a member and leaving", () => {
+  /** An AI app the person connected to the factory MCP in the workspace (#1144): a connected grant with its tokens. */
+  async function connectApp(
+    h: WorkspaceHarness,
+    workspaceId: string,
+    userId: string,
+    id: string,
+  ) {
+    await h.db
+      .insertInto("factory_oauth_clients")
+      .values({
+        id: `client-${id}`,
+        name: "Claude Code",
+        redirect_uris: "[]",
+        created_at: "2026-11-25T08:00:00.000Z",
+      })
+      .onConflict((conflict) => conflict.doNothing())
+      .execute();
+    await h.db
+      .insertInto("factory_oauth_grants")
+      .values({
+        id,
+        workspace_id: workspaceId,
+        user_id: userId,
+        client_id: `client-${id}`,
+        scope: "factory:control",
+        resource: "https://factory.example.test/api/mcp",
+        created_at: "2026-11-25T08:00:00.000Z",
+        connected_at: "2026-11-25T08:00:01.000Z",
+        last_used_at: null,
+        revoked_at: null,
+      })
+      .execute();
+    await h.db
+      .insertInto("factory_oauth_tokens")
+      .values({
+        token_hash: `token-${id}`,
+        grant_id: id,
+        workspace_id: workspaceId,
+        kind: "refresh",
+        created_at: "2026-11-25T08:00:01.000Z",
+        expires_at: "2099-01-01T00:00:00.000Z",
+        used_at: null,
+      })
+      .execute();
+  }
+
+  async function grantsOf(h: WorkspaceHarness) {
+    return h.db
+      .selectFrom("factory_oauth_grants")
+      .select(["id", "revoked_at"])
+      .orderBy("id")
+      .execute();
+  }
+
+  // #1144-T240
+  it("revokes the AI apps a person connected when they are removed, and only theirs in this workspace", async () => {
+    const { h, workspace } = await team();
+    const other = await h.addWorkspace("other");
+    await h.workspaces.addMember(other.id, "member-1", "member");
+    await connectApp(h, workspace.id, "member-1", "mine");
+    await connectApp(h, workspace.id, "member-2", "colleague");
+    await connectApp(h, other.id, "member-1", "elsewhere");
+
+    await h.members.remove({
+      workspaceId: workspace.id,
+      actorId: "admin-1",
+      targetUserId: "member-1",
+    });
+
+    const grants = await grantsOf(h);
+    expect(grants.map((g) => [g.id, g.revoked_at !== null])).toEqual([
+      ["colleague", false],
+      ["elsewhere", false],
+      ["mine", true],
+    ]);
+    // Its codes and tokens are gone with it: a re-invitation does not bring the old grant back.
+    expect(
+      (
+        await h.db
+          .selectFrom("factory_oauth_tokens")
+          .select("grant_id")
+          .execute()
+      )
+        .map((t) => t.grant_id)
+        .sort(),
+    ).toEqual(["colleague", "elsewhere"]);
+  });
+
+  // #1144-T241
+  it("revokes them when the person leaves by themselves too", async () => {
+    const { h, workspace } = await team();
+    await connectApp(h, workspace.id, "member-1", "mine");
+
+    await h.members.remove({
+      workspaceId: workspace.id,
+      actorId: "member-1",
+      targetUserId: "member-1",
+    });
+
+    expect((await grantsOf(h)).map((g) => g.revoked_at !== null)).toEqual([
+      true,
+    ]);
+    expect(
+      await h.db.selectFrom("factory_oauth_tokens").selectAll().execute(),
+    ).toEqual([]);
+  });
+
+  // #1144-T242
+  it("revokes nothing when the removal is refused", async () => {
+    const { h, workspace } = await team();
+    await connectApp(h, workspace.id, "owner-1", "owners");
+
+    const result = await h.members.remove({
+      workspaceId: workspace.id,
+      actorId: "admin-1",
+      targetUserId: "owner-1",
+    });
+
+    expect(result).toEqual({ ok: false, error: "forbidden" });
+    expect((await grantsOf(h)).map((g) => g.revoked_at)).toEqual([null]);
+  });
+
   // #101-WM-27
   it("lets an Owner remove an Owner while another Owner remains, an Admin and a Member", async () => {
     const { h, workspace } = await team();

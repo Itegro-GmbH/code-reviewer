@@ -34,6 +34,8 @@ asked again in each route file; the navigation entry (between the QA area and Ru
 | Billing                                | `billing/enabled.ts` (the one reader of the switch) answers "off" without `billing`, so no balance is read, no credit checked, no start credit granted, whatever a stored setting says                                                                                                                                                                                                                                                                                                                                           |
 | Health                                 | `GET /api/health` reports `product` and `capabilities`, the latter **sorted alphabetically** (a stable contract: `["dynamic-review","review"]`, with the Implementer `["dynamic-review","implementer","review"]`). The `health-factory` job of `deploy-production.yml` compares the sorted list with the repository variable `FACTORY_EXPECTED_CAPABILITIES` (`dynamic-review,review` while it is unset, `dynamic-review,implementer,review` once the Implementer is switched on; the App's reported list may come in any order) |
 
+The factory MCP server (#1144, epic #1143) is `implementer` too: `/api/mcp`, the discovery documents under `/.well-known/`, the OAuth server (`/api/oauth/*`, `/oauth/authorize`, `/oauth/consent`) and the "Connected AI apps" page and routes of the settings. The first group is public in `PUBLIC_PATHS` (it authenticates with its own OAuth tokens), so on a deployment without the capability it answers as a path that does not exist.
+
 A new page or route: add an entry of its own to `ROUTE_CLASSES` or the classification test fails.
 
 ## When the set is read

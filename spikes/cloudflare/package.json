@@ -1,0 +1,7 @@
+{
+  "name": "cr-spike-cloudflare",
+  "private": true,
+  "description": "Spike #1149: Cloudflare Containers as a hosted sandbox. Not product code, not part of the workspace.",
+  "scripts": { "dev": "wrangler dev", "deploy": "wrangler deploy" },
+  "devDependencies": { "wrangler": "^4", "typescript": "^5", "@cloudflare/workers-types": "^4" }
+}

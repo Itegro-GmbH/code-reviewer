@@ -85,6 +85,8 @@ type Ids = {
   jiraConnectionId: string;
   /** #1050: an MCP server of the workspace. */
   mcpServerId: string;
+  /** #1144: an AI app connected to the factory MCP in the workspace. */
+  factoryGrantId: string;
 };
 
 /** A valid form of an MCP server (#1050): no authentication, a public https address. */
@@ -1092,6 +1094,31 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #1144-T230: every member lists the AI apps connected in their own workspace (a Member only their own), never another workspace's.
+    name: "GET ai-apps",
+    route: "/api/w/[workspace]/ai-apps",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: () => "/ai-apps",
+    params: () => ({}),
+    file: "ai-apps/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #1144-T231: revoking an AI app: an Owner or Admin any connection of their workspace, a Member their own (the service decides, so it
+    // is out of the matrix of roles); the other workspace's connection is not reachable.
+    name: "POST ai-apps/[grantId]/revoke",
+    route: "/api/w/[workspace]/ai-apps/[grantId]/revoke",
+    method: "POST",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/ai-apps/${ids.factoryGrantId}/revoke`,
+    params: (ids) => ({ grantId: ids.factoryGrantId }),
+    file: "ai-apps/[grantId]/revoke/route.ts",
+    notInRoleMatrix: true,
+    implementer: true,
+  },
+  {
     // #1050-T03: every member lists the MCP servers of their own workspace, never a header value; the other workspace's are not reachable.
     name: "GET mcp/servers",
     route: "/api/w/[workspace]/mcp/servers",
@@ -1668,11 +1695,37 @@ async function seedWorkspace(
       updated_at: "2026-11-17T08:00:00.000Z",
     })
     .execute();
+  // An AI app connected to the factory MCP (#1144): the other workspace's must not be listed or revoked through this one's address.
+  await db
+    .insertInto("factory_oauth_clients")
+    .values({
+      id: `factory-client-${slug}`,
+      name: `Client ${slug}`,
+      redirect_uris: JSON.stringify(["http://127.0.0.1:1/cb"]),
+      created_at: "2026-11-25T08:00:00.000Z",
+    })
+    .execute();
+  await db
+    .insertInto("factory_oauth_grants")
+    .values({
+      id: `factory-grant-${slug}`,
+      workspace_id: workspace.id,
+      user_id: names.owner,
+      client_id: `factory-client-${slug}`,
+      scope: "factory:control",
+      resource: "https://factory.example.test/api/mcp",
+      created_at: "2026-11-25T08:00:00.000Z",
+      connected_at: "2026-11-25T08:00:01.000Z",
+      last_used_at: null,
+      revoked_at: null,
+    })
+    .execute();
   return {
     workspace,
     owner,
     keySentinel,
     ids: {
+      factoryGrantId: `factory-grant-${slug}`,
       environmentId: environment.environment.id,
       workflowId: workflow.workflow.id,
       workflowRunId: workflowRun.run.id,
@@ -1828,7 +1881,8 @@ async function start() {
         | "profiles"
         | "profile_versions"
         | "jira_connections"
-        | "mcp_servers",
+        | "mcp_servers"
+        | "factory_oauth_grants",
     ) =>
       db
         .selectFrom(table)
@@ -1858,6 +1912,7 @@ async function start() {
       profileVersions: await select("profile_versions"),
       jiraConnections: await select("jira_connections"),
       mcpServers: await select("mcp_servers"),
+      factoryOAuthGrants: await select("factory_oauth_grants"),
       projects: await db
         .selectFrom("projects")
         .innerJoin("repositories", "repositories.id", "projects.repository_id")

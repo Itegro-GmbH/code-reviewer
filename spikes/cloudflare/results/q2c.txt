@@ -1,0 +1,27 @@
+occurrences 1 size 16162672
+16162672 /tmp/sysbox-mgr-p2
+16162672 /usr/bin/sysbox-mgr
+sysbox-mgr
+	edition: 	Community Edition (CE)
+2152 [sysbox-fs] <defunct>
+2256 [sysbox-fs] <defunct>
+2348 [sysbox-fs] <defunct>
+2378 /tmp/sysbox-mgr-p2
+2396 sysbox-fs
+time="2026-11-25 12:29:01" level=info msg="Sysbox data root: /var/lib/sysbox"
+time="2026-11-25 12:29:01" level=warning msg="No kernel-headers found in host filesystem at /usr/src/linux-headers-6.18.64-cloudflare-microvm-2026.11.44. No headers will be mounted inside any of the containers."
+time="2026-11-25 12:29:01" level=warning msg="No lib-modules found in host filesystem at /lib/modules/6.18.64-cloudflare-microvm-2026.11.44. lib-modules won't be mounted inside any of the containers."
+time="2026-11-25 12:29:01" level=info msg="System container mode enabled."
+time="2026-11-25 12:29:01" level=info msg="Shiftfs module found in kernel: no"
+time="2026-11-25 12:29:01" level=info msg="Shiftfs works properly: no"
+time="2026-11-25 12:29:01" level=info msg="Shiftfs-on-overlayfs works properly: no"
+time="2026-11-25 12:29:01" level=info msg="ID-mapped mounts supported by kernel: yes"
+time="2026-11-25 12:29:01" level=info msg="Overlayfs on ID-mapped mounts supported by kernel: yes"
+time="2026-11-25 12:29:01" level=info msg="Operating in system container mode."
+time="2026-11-25 12:29:01" level=info msg="Relaxed read-only mode disabled."
+time="2026-11-25 12:29:01" level=info msg="Inner container image preloading enabled."
+time="2026-11-25 12:29:01" level=info msg="Listening on /run/sysbox/sysmgr.sock"
+time="2026-11-25 12:29:01" level=info msg="Ready ..."
+
+ERR: 
+exit 0 ms 1907

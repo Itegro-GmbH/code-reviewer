@@ -1,0 +1,8 @@
+boot: ca-installed at +1.63 s
+boot: cgroup-ready (domain [cpuset cpu io memory pids]) at +1.7 s
+boot: sysbox-up at +2.28 s
+boot: dockerd-ready at +3.59 s
+ Runtimes: io.containerd.runc.v2 runc sysbox-runc
+
+ERR: 
+exit 0 ms 3775
