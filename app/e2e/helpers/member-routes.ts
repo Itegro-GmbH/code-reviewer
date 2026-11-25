@@ -115,6 +115,9 @@ export function addressesOf(
         // The MCP servers of a workspace (#1050) are the factory's.
         route.pattern.startsWith("/api/w/:workspace/mcp/") ||
         route.pattern === "/w/:workspace/mcp" ||
+        // The AI apps connected to the factory MCP (#1144) are the factory's.
+        route.pattern.startsWith("/api/w/:workspace/ai-apps") ||
+        route.pattern === "/w/:workspace/settings/ai-apps" ||
         // The shell of the factory (#925): the ToDos, the tabs of a project's cockpit, the settings tabs that moved from
         // `/connections` and `/members`, and the review settings below a project.
         route.pattern === "/w/:workspace/settings/integrations" ||
