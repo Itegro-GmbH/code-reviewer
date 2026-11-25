@@ -264,6 +264,26 @@ describe("the runner of an agent step (#1105)", () => {
     ]);
   });
 
+  // #1150-T16
+  it("lets a harness that is not OpenCode run on a hosted runner once the workspace has a Claude Code OAuth token, and says what is missing otherwise", () => {
+    const claude = { harness: "claude-code", model: LOGIN };
+    const withToken = resolver({ claudeCodeToken: () => true });
+    const without = resolver({ claudeCodeToken: () => false });
+
+    expect(codes(lane(step(claude)), withToken)).toEqual([]);
+    expect(codes(lane(step(claude)), without)).toEqual([
+      ["/steps/0/runner", "harness_needs_runner"],
+    ]);
+    // The message names the way out: the token under LLM keys.
+    expect(
+      result(lane(step(claude)), without).errors[0]?.message,
+    ).toContain("Claude Code OAuth token");
+    // A self-hosted runner needs no token to be valid: its own login may do (the runner announces it).
+    expect(
+      codes(lane(step({ ...claude, runner: DEVBOX.id })), without),
+    ).toEqual([]);
+  });
+
   // #1105-R12
   it("warns when the runner is online and does not announce what the step asks for, over its own announcement", () => {
     const asks = lane(

@@ -36,11 +36,31 @@ export type ManagedEntryOption = {
   providerLabel: string;
 };
 
-export type ModelOptions =
+/** The models of the harness `claude-code` on a login of the user's own, as Claude Code reads them (aliases). */
+export const CLAUDE_CODE_SUBSCRIPTION_MODELS = [
+  "sonnet",
+  "opus",
+  "haiku",
+] as const;
+
+/**
+ * #1150: the harness `claude-code` is offered next to the models above when the workspace can log it in: it has a Claude Code OAuth token
+ * (LLM keys), or an online self-hosted runner announces a login of its own device. No catalog, key or price is behind these models: the
+ * login is the user's, and a run on it shows as "≈ … via subscription" and is not charged to our budget. `source` says where the login is.
+ */
+export type ClaudeCodeOption = {
+  harness: "claude-code";
+  /** The model names Claude Code reads (the announced ones of a runner's login, or the three aliases for the token). */
+  models: readonly string[];
+  source: "workspace_token" | "runner_login" | "both";
+};
+
+export type ModelOptions = (
   | { keyMode: "own"; providers: OwnProviderOption[] }
   | { keyMode: "managed"; entries: ManagedEntryOption[] }
   /** The entitlements cannot be read: nothing is offered. */
-  | { keyMode: "unreadable" };
+  | { keyMode: "unreadable" }
+) & { claudeCode?: ClaudeCodeOption };
 
 export type ImplementerModels = {
   options(): Promise<ModelOptions>;
@@ -59,6 +79,8 @@ export type ImplementerModelsDependencies = {
   catalog: CatalogSelectionSource;
   /** Whether the catalog entry has a model the native path can price and describe (the claim's `policyFor` and `entryFor`). */
   entryUsable(entryId: string): Promise<boolean>;
+  /** #1150: where the harness `claude-code` can log in for this workspace, or null when nowhere. Left out: it is not offered. */
+  claudeCode?(): Promise<ClaudeCodeOption | null>;
 };
 
 const CATALOG_REASON: Record<CatalogEntryRefusal, ModelRefusalReason> = {
@@ -79,33 +101,40 @@ export function createImplementerModels(
     return (await deps.entryUsable(entryId)) ? null : "entry_unavailable";
   }
 
+  async function baseOptions(): Promise<ModelOptions> {
+    const keyMode = await deps.keyMode();
+    if (keyMode === "unreadable") return { keyMode };
+    if (keyMode === "own") {
+      const configured = await deps.configuredProviders();
+      const providers: OwnProviderOption[] = [];
+      for (const provider of await deps.nativeCatalog.providers()) {
+        if (!configured.has(provider.id)) continue;
+        const models = await deps.nativeCatalog.models(provider.id);
+        if (models === undefined || models.length === 0) continue;
+        providers.push({ id: provider.id, label: provider.label, models });
+      }
+      return { keyMode, providers };
+    }
+    const entries: ManagedEntryOption[] = [];
+    for (const candidate of await deps.catalog.entries()) {
+      // The same checks, in the same order, as `check` makes for a choice; copies fields one by one.
+      if ((await checkEntry(candidate.id)) !== null) continue;
+      entries.push({
+        id: candidate.id,
+        name: candidate.name,
+        description: candidate.description,
+        providerLabel: candidate.providerLabel,
+      });
+    }
+    return { keyMode, entries };
+  }
+
   return {
     async options() {
-      const keyMode = await deps.keyMode();
-      if (keyMode === "unreadable") return { keyMode };
-      if (keyMode === "own") {
-        const configured = await deps.configuredProviders();
-        const providers: OwnProviderOption[] = [];
-        for (const provider of await deps.nativeCatalog.providers()) {
-          if (!configured.has(provider.id)) continue;
-          const models = await deps.nativeCatalog.models(provider.id);
-          if (models === undefined || models.length === 0) continue;
-          providers.push({ id: provider.id, label: provider.label, models });
-        }
-        return { keyMode, providers };
-      }
-      const entries: ManagedEntryOption[] = [];
-      for (const candidate of await deps.catalog.entries()) {
-        // The same checks, in the same order, as `check` makes for a choice; copies fields one by one.
-        if ((await checkEntry(candidate.id)) !== null) continue;
-        entries.push({
-          id: candidate.id,
-          name: candidate.name,
-          description: candidate.description,
-          providerLabel: candidate.providerLabel,
-        });
-      }
-      return { keyMode, entries };
+      const base = await baseOptions();
+      const claudeCode =
+        deps.claudeCode === undefined ? null : await deps.claudeCode();
+      return claudeCode === null ? base : { ...base, claudeCode };
     },
 
     async check(choice) {

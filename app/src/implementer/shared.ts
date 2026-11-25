@@ -30,6 +30,9 @@ import {
 import { configuredKeyProviders } from "./key-providers.ts";
 import { createTurnPricer } from "./turn-price.ts";
 import { createImplementerModels, type ImplementerModels } from "./models.ts";
+import { claudeCodeOptionFor } from "./claude-code-option.ts";
+import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { onlineRunnersFrom } from "../runner-identity/online.ts";
 import {
   createImplementerService,
   type ImplementerService,
@@ -66,6 +69,14 @@ export function implementerModelsFor(workspaceId: string): ImplementerModels {
     keyMode: async () => keyModeForJob(await readEntitlements()),
     configuredProviders: () => configuredKeyProviders(keys),
     nativeCatalog: getImplementerCatalog(),
+    // #1150: where the harness `claude-code` can log in: the token of the workspace, a login announced by an online runner of its own.
+    claudeCode: () =>
+      claudeCodeOptionFor({
+        token: async () =>
+          (await getWorkspaceLlm().claudeCodeTokenFor(workspaceId).tokenForJob())
+            .state === "token",
+        runners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),
+      }),
     catalog: catalogSelectionFrom(catalog, async (id) =>
       entryAllowed(await readEntitlements(), { id }),
     ),
