@@ -275,9 +275,9 @@ describe("the runner of an agent step (#1105)", () => {
       ["/steps/0/runner", "harness_needs_runner"],
     ]);
     // The message names the way out: the token under LLM keys.
-    expect(
-      result(lane(step(claude)), without).errors[0]?.message,
-    ).toContain("Claude Code OAuth token");
+    expect(result(lane(step(claude)), without).errors[0]?.message).toContain(
+      "Claude Code OAuth token",
+    );
     // A self-hosted runner needs no token to be valid: its own login may do (the runner announces it).
     expect(
       codes(lane(step({ ...claude, runner: DEVBOX.id })), without),

@@ -446,7 +446,9 @@ const ENTRIES: Entry[] = [
     method: "PUT",
     minRole: MINIMUM_ROLE.manage_llm_key,
     path: () => "/llm-keys/claude-code",
-    body: () => ({ token: "sk-ant-oat01-written-by-the-isolation-test-0123456789" }),
+    body: () => ({
+      token: "sk-ant-oat01-written-by-the-isolation-test-0123456789",
+    }),
     params: () => ({}),
     file: "llm-keys/claude-code/route.ts",
     takesNoIds: true,

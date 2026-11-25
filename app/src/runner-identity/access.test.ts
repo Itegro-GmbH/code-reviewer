@@ -136,10 +136,17 @@ describe("the rule", () => {
     });
 
     expect(accessMatches([OPENCODE, token], any)).toBe(true);
-    expect(accessMatches([OPENCODE, token], demandOfTurn({ harness: "claude-code", modelChoice: OPUS }))).toBe(true);
+    expect(
+      accessMatches(
+        [OPENCODE, token],
+        demandOfTurn({ harness: "claude-code", modelChoice: OPUS }),
+      ),
+    ).toBe(true);
     // The harness is still the harness: a key of the app for OpenCode is no way to run Claude Code, and the token is no way to run OpenCode.
     expect(accessMatches([OPENCODE], any)).toBe(false);
-    expect(accessMatches([token], demandOfTurn({ modelChoice: OWN }))).toBe(false);
+    expect(accessMatches([token], demandOfTurn({ modelChoice: OWN }))).toBe(
+      false,
+    );
     // And a key of the app does not stand in for a login on the device's own key.
     expect(accessMatches([{ ...token, auth: "local-key" }], any)).toBe(false);
   });

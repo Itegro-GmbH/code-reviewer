@@ -1762,7 +1762,11 @@ async function prepareSubscription(
   deps: ClaimDeps,
   claimed: NonNullable<ClaimResult>,
   engines: readonly RunnerEngine[],
-  caller: { customer: boolean; split: boolean; entries: readonly HarnessAccess[] },
+  caller: {
+    customer: boolean;
+    split: boolean;
+    entries: readonly HarnessAccess[];
+  },
 ): Promise<Prepared | undefined> {
   const { job } = claimed;
   if (job.reviewKind !== "implementer") return undefined;
@@ -1809,7 +1813,8 @@ async function prepareSubscription(
     heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
     access: {
       harness: CLAUDE_CODE_HARNESS,
-      auth: source === "device" ? ("subscription" as const) : ("app-key" as const),
+      auth:
+        source === "device" ? ("subscription" as const) : ("app-key" as const),
       model: choice.model,
     },
   };

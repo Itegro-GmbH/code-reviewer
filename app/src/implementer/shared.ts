@@ -73,8 +73,11 @@ export function implementerModelsFor(workspaceId: string): ImplementerModels {
     claudeCode: () =>
       claudeCodeOptionFor({
         token: async () =>
-          (await getWorkspaceLlm().claudeCodeTokenFor(workspaceId).tokenForJob())
-            .state === "token",
+          (
+            await getWorkspaceLlm()
+              .claudeCodeTokenFor(workspaceId)
+              .tokenForJob()
+          ).state === "token",
         runners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),
       }),
     catalog: catalogSelectionFrom(catalog, async (id) =>

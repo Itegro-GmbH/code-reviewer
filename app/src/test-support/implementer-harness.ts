@@ -84,7 +84,10 @@ export async function startImplementerHarness(
     operatorCostLimitCents: async () => options.operatorCostLimitCents ?? 500,
     ...(options.claudeCodeToken === undefined
       ? {}
-      : { claudeCodeTokenConfigured: async () => options.claudeCodeToken === true }),
+      : {
+          claudeCodeTokenConfigured: async () =>
+            options.claudeCodeToken === true,
+        }),
     log: (line) => lines.push(line),
   });
 

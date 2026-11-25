@@ -236,7 +236,9 @@ function claimQuery(
     scope === undefined
       ? claim.acceptsWorkspaceLogin === true
         ? PLATFORM_ACCESS
-        : PLATFORM_ACCESS.filter((entry) => entry.harness !== CLAUDE_CODE_HARNESS)
+        : PLATFORM_ACCESS.filter(
+            (entry) => entry.harness !== CLAUDE_CODE_HARNESS,
+          )
       : customerAccess(scope.customerRunner.access),
   );
   const routing =

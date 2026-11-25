@@ -27,7 +27,8 @@ function memoryStore(): WorkspaceSecretStore<ClaudeCodeTokenSecretName> & {
   held(): { value: string; binding: string } | undefined;
   breakIt(): void;
 } {
-  let row: { value: string; binding: string; lastFour: string | null } | undefined;
+  let row:
+    { value: string; binding: string; lastFour: string | null } | undefined;
   let broken = false;
   const status = (name: string): WorkspaceSecretStatus =>
     row === undefined
@@ -82,14 +83,18 @@ function memoryStore(): WorkspaceSecretStore<ClaudeCodeTokenSecretName> & {
       return Promise.resolve(had);
     },
     take: () => Promise.reject(new Error("not used")),
-    names: () => Promise.resolve(row === undefined ? [] : [CLAUDE_CODE_TOKEN_SECRET_NAME]),
+    names: () =>
+      Promise.resolve(row === undefined ? [] : [CLAUDE_CODE_TOKEN_SECRET_NAME]),
   };
 }
 
 describe("the rule for a Claude Code token", () => {
   // #1150-T01
   it("accepts one printable token and ignores whitespace around it", () => {
-    expect(checkClaudeCodeToken(` ${TOKEN}\n`)).toEqual({ ok: true, token: TOKEN });
+    expect(checkClaudeCodeToken(` ${TOKEN}\n`)).toEqual({
+      ok: true,
+      token: TOKEN,
+    });
   });
 
   // #1150-T01
@@ -108,7 +113,9 @@ describe("the rule for a Claude Code token", () => {
   // #1150-T01
   it("knows the shape of what `claude setup-token` prints, and no other", () => {
     expect(hasKnownTokenShape(TOKEN)).toBe(true);
-    expect(hasKnownTokenShape("sk-or-v1-0123456789abcdef0123456789")).toBe(false);
+    expect(hasKnownTokenShape("sk-or-v1-0123456789abcdef0123456789")).toBe(
+      false,
+    );
     expect(hasKnownTokenShape("sk-ant-oat01-short")).toBe(false);
   });
 });
@@ -147,7 +154,10 @@ describe("the token service", () => {
     const kept = await service.save("  ", "user-2");
 
     expect(kept).toMatchObject({ ok: true, changed: false });
-    expect(await service.tokenForJob()).toEqual({ state: "token", token: TOKEN });
+    expect(await service.tokenForJob()).toEqual({
+      state: "token",
+      token: TOKEN,
+    });
   });
 
   // #1150-T02
@@ -155,7 +165,10 @@ describe("the token service", () => {
     const service = createClaudeCodeTokenService({ store: memoryStore() });
     await service.save(TOKEN, "user-1");
     await service.save(OTHER, "user-1");
-    expect(await service.tokenForJob()).toEqual({ state: "token", token: OTHER });
+    expect(await service.tokenForJob()).toEqual({
+      state: "token",
+      token: OTHER,
+    });
 
     expect(await service.remove()).toBe(true);
     expect(await service.remove()).toBe(false);
@@ -220,7 +233,11 @@ describe("the routes of the token", () => {
   async function handlers() {
     const store = memoryStore();
     const token = createClaudeCodeTokenService({ store });
-    return { store, token, routes: createClaudeCodeTokenRouteHandlers({ token }) };
+    return {
+      store,
+      token,
+      routes: createClaudeCodeTokenRouteHandlers({ token }),
+    };
   }
 
   // #1150-T03
@@ -231,7 +248,10 @@ describe("the routes of the token", () => {
     const member = await (await routes.get(json({}), access("member"))).json();
     const admin = await (await routes.get(json({}), access("admin"))).json();
 
-    expect(member).toEqual({ canManage: false, token: { state: "configured" } });
+    expect(member).toEqual({
+      canManage: false,
+      token: { state: "configured" },
+    });
     expect(admin).toMatchObject({
       canManage: true,
       token: { state: "configured", lastFour: TOKEN.slice(-4) },
@@ -252,7 +272,10 @@ describe("the routes of the token", () => {
   it("saves from the body, answers without the token and keeps nothing for a refused one", async () => {
     const { store, routes } = await handlers();
 
-    const refused = await routes.put(json({ token: "two tokens" }), access("owner"));
+    const refused = await routes.put(
+      json({ token: "two tokens" }),
+      access("owner"),
+    );
     expect(refused.status).toBe(422);
     expect(await refused.json()).toEqual({
       error: "invalid_input",
@@ -263,7 +286,9 @@ describe("the routes of the token", () => {
     const saved = await routes.put(json({ token: TOKEN }), access("admin"));
     expect(saved.status).toBe(200);
     expect(saved.headers.get("cache-control")).toBe("no-store");
-    expect(JSON.stringify(await saved.json())).not.toContain(TOKEN.slice(0, -4));
+    expect(JSON.stringify(await saved.json())).not.toContain(
+      TOKEN.slice(0, -4),
+    );
     expect(store.held()?.value).toBe(TOKEN);
   });
 
@@ -273,10 +298,21 @@ describe("the routes of the token", () => {
     const { token, routes } = await handlers();
 
     const typed = await routes.test(json({ token: TOKEN }), access("admin"));
-    expect(await typed.json()).toEqual({ ok: true, verified: false, format: "known" });
+    expect(await typed.json()).toEqual({
+      ok: true,
+      verified: false,
+      format: "known",
+    });
 
-    const unusual = await routes.test(json({ token: "abc123" }), access("admin"));
-    expect(await unusual.json()).toEqual({ ok: true, verified: false, format: "unknown" });
+    const unusual = await routes.test(
+      json({ token: "abc123" }),
+      access("admin"),
+    );
+    expect(await unusual.json()).toEqual({
+      ok: true,
+      verified: false,
+      format: "unknown",
+    });
 
     const none = await routes.test(json({}), access("admin"));
     expect(none.status).toBe(422);
@@ -287,9 +323,16 @@ describe("the routes of the token", () => {
 
     await token.save(TOKEN, "user-1");
     const stored = await routes.test(json({}), access("admin"));
-    expect(await stored.json()).toEqual({ ok: true, verified: false, format: "known" });
+    expect(await stored.json()).toEqual({
+      ok: true,
+      verified: false,
+      format: "known",
+    });
 
-    const broken = await routes.test(json({ token: "two tokens" }), access("admin"));
+    const broken = await routes.test(
+      json({ token: "two tokens" }),
+      access("admin"),
+    );
     expect(broken.status).toBe(422);
     expect(fetched).not.toHaveBeenCalled();
     fetched.mockRestore();

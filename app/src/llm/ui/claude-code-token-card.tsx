@@ -43,7 +43,11 @@ type Outcome =
   | { kind: "saved"; changed: boolean }
   | { kind: "removed" }
   | { kind: "tested"; format: "known" | "unknown" }
-  | { kind: "failed"; text: string; issues: Array<{ field: string; code: string }> }
+  | {
+      kind: "failed";
+      text: string;
+      issues: Array<{ field: string; code: string }>;
+    }
   | null;
 
 export function ClaudeCodeTokenCard({

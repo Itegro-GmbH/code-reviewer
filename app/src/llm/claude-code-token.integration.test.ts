@@ -89,10 +89,9 @@ describe("the Claude Code token over a database", () => {
   // #1150-T06
   it("is masked in a result together with the keys, and not before it is stored or after it is removed", async () => {
     const { llm, alpha } = await start();
-    await llm.keyServiceFor(alpha).save(
-      { provider: "openrouter", apiKey: OPENROUTER_KEY },
-      null,
-    );
+    await llm
+      .keyServiceFor(alpha)
+      .save({ provider: "openrouter", apiKey: OPENROUTER_KEY }, null);
     expect(await llm.currentKeysFor(alpha)).toEqual([OPENROUTER_KEY]);
 
     await llm.claudeCodeTokenFor(alpha).save(TOKEN, null);

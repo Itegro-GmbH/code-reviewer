@@ -29,7 +29,10 @@ export async function claudeCodeOptionFor({
   let withRunner = false;
   for (const runner of await runners())
     for (const entry of runner.access) {
-      if (entry.harness !== CLAUDE_CODE_HARNESS || entry.auth !== "subscription")
+      if (
+        entry.harness !== CLAUDE_CODE_HARNESS ||
+        entry.auth !== "subscription"
+      )
         continue;
       withRunner = true;
       add(entry.models ?? CLAUDE_CODE_SUBSCRIPTION_MODELS);
@@ -38,6 +41,11 @@ export async function claudeCodeOptionFor({
   return {
     harness: CLAUDE_CODE_HARNESS,
     models,
-    source: withToken && withRunner ? "both" : withToken ? "workspace_token" : "runner_login",
+    source:
+      withToken && withRunner
+        ? "both"
+        : withToken
+          ? "workspace_token"
+          : "runner_login",
   };
 }

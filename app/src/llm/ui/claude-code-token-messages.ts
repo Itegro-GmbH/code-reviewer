@@ -23,7 +23,8 @@ export function describeClaudeCodeTokenIssue(code: string): string {
 }
 
 const FAILURE_COPY: Record<string, string> = {
-  forbidden: "Only an Admin or an Owner of this workspace can change the token.",
+  forbidden:
+    "Only an Admin or an Owner of this workspace can change the token.",
   not_found: NOT_AVAILABLE_TO_YOU,
   cross_site_request:
     "The request did not come from this page. Reload it and try again.",

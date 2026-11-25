@@ -158,7 +158,11 @@ describe("the role action of the LLM key route files", () => {
   );
 
   // #426-T04
-  it.each(["/llm-keys/openrouter", "/llm-keys/claude-code", "/llm-key"] as const)(
+  it.each([
+    "/llm-keys/openrouter",
+    "/llm-keys/claude-code",
+    "/llm-key",
+  ] as const)(
     "let a Member read %s (the action is view, not manage_llm_key)",
     async (path) => {
       const t = await start();

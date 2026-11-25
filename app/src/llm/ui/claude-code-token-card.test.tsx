@@ -30,7 +30,9 @@ const CONFIGURED: ClaudeCodeTokenStatus = {
   updatedBy: "admin-1",
 };
 
-function fakeApi(overrides: Partial<ClaudeCodeTokenApi> = {}): ClaudeCodeTokenApi {
+function fakeApi(
+  overrides: Partial<ClaudeCodeTokenApi> = {},
+): ClaudeCodeTokenApi {
   return {
     save: vi.fn(
       async () =>

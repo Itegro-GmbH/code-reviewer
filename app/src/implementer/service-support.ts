@@ -235,7 +235,10 @@ export async function requireRunnerForHarness(
     runnerEnvironment !== null
   )
     return;
-  if (claudeCodeTokenConfigured !== undefined && (await claudeCodeTokenConfigured()))
+  if (
+    claudeCodeTokenConfigured !== undefined &&
+    (await claudeCodeTokenConfigured())
+  )
     return;
   throw new ImplementerError(
     "IMPLEMENTER_HARNESS_NEEDS_RUNNER",

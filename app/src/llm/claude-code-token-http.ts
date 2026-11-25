@@ -138,7 +138,8 @@ export function createClaudeCodeTokenRouteHandlers({
       let value: string;
       if (typed) {
         const checked = checkClaudeCodeToken(typedValue);
-        if (!checked.ok) return invalid([{ field: "token", code: "token_invalid" }]);
+        if (!checked.ok)
+          return invalid([{ field: "token", code: "token_invalid" }]);
         value = checked.token;
       } else {
         const stored = await token.reveal();
