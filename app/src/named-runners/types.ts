@@ -7,14 +7,22 @@ import type {
   RunnerLimits,
   RunnerManifest,
 } from "../runner-identity/announcement.ts";
+import type { HostedPlacement } from "../runner-identity/labels.ts";
 
 export type HostedRunner = {
   kind: "hosted";
   id: string;
-  /** "Vercel Sandbox 4 vCPU". */
+  /** "Vercel Sandbox 4 vCPU", or "Cloudflare Container 4 vCPU". */
   name: string;
   /** The fixed size of the type. */
   vcpus: number;
+  /** #1158: where its VM runs. */
+  placement: HostedPlacement;
+  /**
+   * #1158: whether a step may use it now. A Vercel runner always is; a Cloudflare runner only while its size is in `CLOUDFLARE_RUNNER_SIZES`: a
+   * size the operator switched off later keeps its row (a lane may name it) and the validator says it is unavailable.
+   */
+  available: boolean;
   /** How many turns it may run at the same time. */
   concurrency: number;
 };
@@ -36,4 +44,9 @@ export type NamedRunner = HostedRunner | SelfHostedRunner;
 
 export function isRevoked(runner: NamedRunner): boolean {
   return runner.kind === "self_hosted" && runner.revokedAt !== null;
+}
+
+/** #1158: a hosted runner the operator switched off (a Cloudflare size no longer in `CLOUDFLARE_RUNNER_SIZES`): its row stays, nothing may start on it. */
+export function isUnavailable(runner: NamedRunner): boolean {
+  return runner.kind === "hosted" && !runner.available;
 }

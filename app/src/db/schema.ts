@@ -1389,6 +1389,11 @@ export interface ImplementerEnvironmentsTable {
     number | null | undefined,
     number | null
   >;
+  /**
+   * #1158 (epic #1157): where the VM of a hosted runner runs, `vercel` (the Vercel Sandbox, the default and every row that existed) or `cloudflare`
+   * (a Cloudflare Container). `cloudflare` only on a hosted runner (the check of the table); an environment of a person is always `vercel`.
+   */
+  placement: ColumnType<string, string | undefined, string>;
   /** Null for a row the platform made (a hosted runner). */
   created_by: string | null;
   /** ISO 8601 UTC. */

@@ -391,6 +391,11 @@ export type ClaimOptions = {
    */
   acceptsWorkspaceLogin?: boolean;
   /**
+   * #1158: the caller named the claim feature `placement_cloudflare`: its Dispatcher can launch a hosted job on a Cloudflare Container, so the
+   * platform identity has the label `cr:placement:cloudflare` for this claim. Without it a job of a Cloudflare runner is not a candidate (it waits).
+   */
+  acceptsPlacementCloudflare?: boolean;
+  /**
    * #854: the claim is a customer's runner's. It takes only the jobs of `workspaceId` whose required labels are all in `labels` (#971: the
    * labels of a customer's runner never include the reserved namespace `cr:`, except the label of its own id, `cr:runner:<runnerId>`,
    * ADR 0007 decision 10), and never a job of another kind. Without it the claim is
@@ -1288,6 +1293,9 @@ export function createRunnerJobsRepository(
             // #1150: only a claim that names `implementer_workspace_token` is handed a hosted turn on the token of the workspace.
             ...(claimOptions.acceptsWorkspaceLogin === true
               ? { acceptsWorkspaceLogin: true }
+              : {}),
+            ...(claimOptions.acceptsPlacementCloudflare === true
+              ? { acceptsPlacementCloudflare: true }
               : {}),
           };
           const reviewKinds = reviewKindsForEngines(engines);

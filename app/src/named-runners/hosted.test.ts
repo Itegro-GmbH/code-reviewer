@@ -10,6 +10,7 @@ import {
   HOSTED_RUNNER_CONCURRENCY_MAX,
   HOSTED_RUNNER_DEFAULT_CONCURRENCY,
   HOSTED_RUNNER_VCPUS,
+  cloudflareRunnerVcpus,
   hostedRunnerDefaultConcurrency,
   hostedRunnerName,
   isHostedConcurrency,
@@ -78,5 +79,39 @@ describe("the hosted runner types", () => {
       null,
     ])
       expect(isHostedConcurrency(bad)).toBe(false);
+  });
+});
+
+describe("the Cloudflare placement of the hosted runners (#1158)", () => {
+  it("names a type by its placement and size, and keeps the name of a Vercel one", () => {
+    expect(hostedRunnerName(4, "cloudflare")).toBe(
+      "Cloudflare Container 4 vCPU",
+    );
+    expect(hostedRunnerName(4, "vercel")).toBe("Vercel Sandbox 4 vCPU");
+    expect(hostedRunnerName(4)).toBe("Vercel Sandbox 4 vCPU");
+  });
+
+  it("has no size until the operator enables one: CLOUDFLARE_RUNNER_SIZES unset or empty is the placement off", () => {
+    expect(cloudflareRunnerVcpus({})).toEqual([]);
+    expect(cloudflareRunnerVcpus({ CLOUDFLARE_RUNNER_SIZES: "" })).toEqual([]);
+    expect(cloudflareRunnerVcpus({ CLOUDFLARE_RUNNER_SIZES: "  " })).toEqual(
+      [],
+    );
+  });
+
+  it("reads a comma list of sizes of the platform, smallest first, each once", () => {
+    const sizesOf = (value: string) =>
+      cloudflareRunnerVcpus({ CLOUDFLARE_RUNNER_SIZES: value });
+    expect(sizesOf("4")).toEqual([4]);
+    expect(sizesOf(" 8 , 4,4")).toEqual([4, 8]);
+    expect(sizesOf("2,4,6,8")).toEqual([2, 4, 6, 8]);
+  });
+
+  it("ignores what is no size an environment may name, so a typo or a size nobody offers enables nothing", () => {
+    const sizesOf = (value: string) =>
+      cloudflareRunnerVcpus({ CLOUDFLARE_RUNNER_SIZES: value });
+    expect(sizesOf("1")).toEqual([]);
+    expect(sizesOf("3,four,,4.5,-4,0x4,16")).toEqual([]);
+    expect(sizesOf("4,nope")).toEqual([4]);
   });
 });

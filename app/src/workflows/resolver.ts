@@ -60,6 +60,11 @@ export type RunnerInfo = {
   kind: "hosted" | "self_hosted";
   /** A self-hosted runner a member revoked. */
   revoked?: boolean;
+  /**
+   * #1158: a hosted runner the operator switched off (a Cloudflare size not in `CLOUDFLARE_RUNNER_SIZES`). It is still known, so the validator says
+   * `runner_unavailable` and not `runner_unknown`; it is listed in no `available`.
+   */
+  unavailable?: boolean;
 };
 
 /** An MCP server of the workspace as a lane may name it (#1052). */

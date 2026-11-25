@@ -25,6 +25,7 @@ import { CLAUDE_CODE_HARNESS } from "../../runner-identity/harness.ts";
 import {
   isReservedLabel,
   MANAGED_LABEL,
+  PLACEMENT_CLOUDFLARE_LABEL,
   PLATFORM_LABELS,
   runnerLabel,
 } from "../../runner-identity/labels.ts";
@@ -46,6 +47,11 @@ export type JobClaim = {
    * candidate and stays queued for a Dispatcher whose image can run it (a snapshot built before this feature is the case).
    */
   acceptsWorkspaceLogin?: boolean;
+  /**
+   * #1158: the claim names the feature `placement_cloudflare`. The platform identity then also has the label `cr:placement:cloudflare`; without it
+   * a job that requires that label (a turn of a Cloudflare runner) is not a candidate and stays queued.
+   */
+  acceptsPlacementCloudflare?: boolean;
   now: Date;
   leaseExpiresAt: Date;
 };
@@ -199,7 +205,12 @@ function claimQuery(
   // reserved label of its own id (`cr:runner:<id>`), which is derived from the credential's row and which no other runner has.
   const callerLabels =
     scope === undefined
-      ? [...PLATFORM_LABELS]
+      ? [
+          ...PLATFORM_LABELS,
+          ...(claim.acceptsPlacementCloudflare === true
+            ? [PLACEMENT_CLOUDFLARE_LABEL]
+            : []),
+        ]
       : [
           ...scope.customerRunner.labels.filter(
             (label) => !isReservedLabel(label),

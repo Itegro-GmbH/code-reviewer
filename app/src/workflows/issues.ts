@@ -94,6 +94,8 @@ export const SEMANTIC_ISSUE_CODES = [
   "runner_with_environment",
   /** #1105: no runner with that id in this workspace, or it was revoked (ADR 0007, decision 14: a revoked runner registered again has a new id). `available` lists the ids. */
   "runner_unknown",
+  /** #1158: the runner exists but is switched off on this server (a hosted Cloudflare Container size the operator did not enable). `available` lists the ids that can be named. */
+  "runner_unavailable",
   /** The profile does not exist (`available` names those that do). */
   "profile_unknown",
   /** The profile was archived (`available` names those that can be run). */
