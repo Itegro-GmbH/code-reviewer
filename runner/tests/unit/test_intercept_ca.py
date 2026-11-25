@@ -90,7 +90,7 @@ def test_a_variable_the_document_sets_itself_is_kept(tmp_path: Path) -> None:
 
 # #1158-R05
 def test_without_the_file_the_document_is_untouched(tmp_path: Path) -> None:
-    document = {"Image": "x", "Env": ["A=1"], "HostConfig": {"Binds": []}}
+    document: dict[str, Any] = {"Image": "x", "Env": ["A=1"], "HostConfig": {"Binds": []}}
 
     assert with_intercept_ca(document, path=str(tmp_path / "none.crt")) == document
 
