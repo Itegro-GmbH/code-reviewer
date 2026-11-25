@@ -1280,6 +1280,10 @@ export function createRunnerJobsRepository(
             ...(claimOptions.acceptsMultiRepo === true
               ? { acceptsMultiRepo: true }
               : {}),
+            // #1150: only a Dispatcher's claim (the per-job credential) is handed a hosted turn on the token of the workspace.
+            ...(claimOptions.workerCredential === true
+              ? { acceptsWorkspaceLogin: true }
+              : {}),
           };
           const reviewKinds = reviewKindsForEngines(engines);
           // #746: a caller whose engines run no kind this queue holds (the Implementer's engine, until its jobs are queued, #752)

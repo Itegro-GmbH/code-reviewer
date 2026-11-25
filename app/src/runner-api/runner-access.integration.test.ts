@@ -223,8 +223,8 @@ describe("the manifest of a runner and the claim", () => {
     expect((await h.claim(claimOf(box.credential))).status).toBe(200);
   });
 
-  // #973-T01
-  it("never hands the platform's Dispatcher a turn that asks for a subscription, and still hands it a hosted turn on a catalog entry or a key of the app", async () => {
+  // #973-T01, #1150-T08
+  it("never hands a claim that is no Dispatcher's (no worker credential) a turn that asks for Claude Code, and still hands it a hosted turn on a catalog entry or a key of the app", async () => {
     const h = await start();
     const subscription = await h.enqueueTurn({
       modelChoice: OPUS,
