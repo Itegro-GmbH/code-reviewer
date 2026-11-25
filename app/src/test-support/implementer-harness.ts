@@ -41,6 +41,8 @@ export async function startImplementerHarness(
     accepted?: FakePermissions;
     models?: ImplementerModels;
     operatorCostLimitCents?: number;
+    /** #1150: the workspace has a Claude Code OAuth token, so a task on the harness claude-code needs no runner environment. */
+    claudeCodeToken?: boolean;
     /** The most connections the pool of the database opens. */
     poolMax?: number;
   } = {},
@@ -80,6 +82,9 @@ export async function startImplementerHarness(
     models: options.models ?? ALLOW_ALL,
     queue,
     operatorCostLimitCents: async () => options.operatorCostLimitCents ?? 500,
+    ...(options.claudeCodeToken === undefined
+      ? {}
+      : { claudeCodeTokenConfigured: async () => options.claudeCodeToken === true }),
     log: (line) => lines.push(line),
   });
 
