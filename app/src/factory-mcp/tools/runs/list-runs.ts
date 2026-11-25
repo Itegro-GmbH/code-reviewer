@@ -58,8 +58,12 @@ export const listRuns = defineTool({
     return {
       runs: page.runs.map((run) => {
         // The lane's nodes are the web page's drawing aid, not an answer to an AI.
-        const { nodesKey: _nodesKey, ...rest } = run;
-        return { ...rest, url: runUrl(context, run) };
+        const view: Record<string, unknown> = {
+          ...run,
+          url: runUrl(context, run),
+        };
+        delete view.nodesKey;
+        return view;
       }),
       nextCursor: page.nextCursor,
       now: page.now,

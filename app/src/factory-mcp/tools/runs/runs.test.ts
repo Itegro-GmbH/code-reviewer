@@ -735,3 +735,35 @@ describe("answer_run", () => {
     ).toMatchObject({ error: "invalid_input" });
   });
 });
+
+describe("the tools of the slice", () => {
+  // #1146-T110
+  it("hold the tools of the issue, each with the scope and the workspace action of the route it mirrors", async () => {
+    const { ALL_TOOLS } = await import("../all.ts");
+    const found = Object.fromEntries(
+      ALL_TOOLS.map((tool) => [tool.name, `${tool.scope} ${tool.action}`]),
+    );
+    const expected: Record<string, string> = {
+      start_run: "factory:control start_implementer_task",
+      list_runs: "factory:read start_implementer_task",
+      get_run: "factory:read start_implementer_task",
+      wait_for_run: "factory:read start_implementer_task",
+      get_step: "factory:read start_implementer_task",
+      get_step_log: "factory:read view",
+      list_run_mcp_calls: "factory:read view",
+      answer_run: "factory:control start_implementer_task",
+      pause_run: "factory:control start_implementer_task",
+      resume_run: "factory:control start_implementer_task",
+      cancel_run: "factory:control start_implementer_task",
+      discard_run: "factory:control start_implementer_task",
+      list_todos: "factory:read view",
+      resolve_todo: "factory:control start_implementer_task",
+      list_issues: "factory:read view",
+      sync_issues: "factory:control change_project_settings",
+      list_pull_requests: "factory:read start_review",
+      list_reviews: "factory:read view",
+    };
+    for (const [name, requirement] of Object.entries(expected))
+      expect(found[name], name).toBe(requirement);
+  });
+});

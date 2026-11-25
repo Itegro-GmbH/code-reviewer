@@ -15,6 +15,12 @@ import { listRuns } from "../runs/list-runs.ts";
 import { pauseRun } from "../runs/pause-run.ts";
 import { resumeRun } from "../runs/resume-run.ts";
 import { startRun } from "../runs/start-run.ts";
+import { listIssues } from "../todos/list-issues.ts";
+import { listPullRequests } from "../todos/list-pull-requests.ts";
+import { listReviews } from "../todos/list-reviews.ts";
+import { listTodos } from "../todos/list-todos.ts";
+import { resolveTodo } from "../todos/resolve-todo.ts";
+import { syncIssues } from "../todos/sync-issues.ts";
 import { waitForRun } from "../runs/wait-for-run.ts";
 
 export const runAndTodoTools: readonly FactoryTool[] = [
@@ -30,4 +36,10 @@ export const runAndTodoTools: readonly FactoryTool[] = [
   resumeRun,
   cancelRun,
   discardRun,
+  listTodos,
+  resolveTodo,
+  listIssues,
+  syncIssues,
+  listPullRequests,
+  listReviews,
 ];
