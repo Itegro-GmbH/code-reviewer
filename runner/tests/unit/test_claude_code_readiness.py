@@ -12,13 +12,13 @@ from typing import Any
 from code_reviewer_runner.factory_runner.config import RunnerConfig
 from code_reviewer_runner.factory_runner.prepare import announcement_for, prepare
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
-from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin, holds_device_login
 from code_reviewer_runner.implementer.claude_code.layer import (
     CLAUDE_CODE_VERSION,
     LayerSpec,
     layer_labels,
     layer_tag,
 )
+from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin, holds_device_login
 from code_reviewer_runner.implementer.claude_code.readiness import (
     HARNESS_CLAUDE_CODE,
     HarnessNotReady,

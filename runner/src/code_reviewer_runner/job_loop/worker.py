@@ -265,7 +265,8 @@ async def run_worker(
         request.credential,
         request_timeout=settings.request_timeout,
         proxy=request.outer_proxy,
-        # #1150: a Worker whose environment holds no login of a device runs a Claude Code turn on the token of the workspace.
+        # #1150: with no login of a device in its environment a Worker runs a Claude Code turn
+        # on the token of the workspace.
         workspace_login=not holds_device_login(environment),
     )
     host = JobHost(

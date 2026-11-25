@@ -136,8 +136,10 @@ def ready_harness(
     if isinstance(spec, str):
         return HarnessNotReady(spec)
     try:
-        layer = ensure_layer(daemon, agent_image, spec) if build else find_layer(
-            daemon, agent_image, spec
+        layer = (
+            ensure_layer(daemon, agent_image, spec)
+            if build
+            else find_layer(daemon, agent_image, spec)
         )
     except LayerError as error:
         return HarnessNotReady(str(error))

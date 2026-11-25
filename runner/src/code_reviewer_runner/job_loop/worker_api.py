@@ -196,8 +196,9 @@ class HttpWorkerApi:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._credential = credential
-        # #1150: this Worker holds no login of a device (its dispatcher handed it none, or it is a hosted VM): a turn on Claude Code runs on the
-        # Claude Code token of the workspace, which the app puts into the input of this fetch. A Worker with a login of its own says nothing.
+        # #1150: this Worker holds no login of a device (its dispatcher handed it none, or it is
+        # a hosted VM): a turn on Claude Code runs on the Claude Code token of the workspace,
+        # which the app puts into the input of this fetch. A Worker with its own login says nothing.
         self._workspace_login = workspace_login
         self._timeout = request_timeout
         # A VM on a customer's machine reaches the app through the host's outer-wall proxy only

@@ -615,7 +615,7 @@ def run_implementer_job(
         job.implementer.profile is not None
         and job.implementer.profile.harness == HARNESS_CLAUDE_CODE
     ):
-        # #1150: the token of the workspace is the login of a machine that has none of its own (`ready_harness`).
+        # #1150: the token of the workspace is the login of a machine with none of its own.
         token = job.implementer.subscription.oauth_token if job.implementer.subscription else None
         looked = (
             seams.harness
