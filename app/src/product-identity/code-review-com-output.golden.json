@@ -344,6 +344,7 @@
         "subscription_auth": "The Claude login on the machine that runs this task was refused (it has expired or was revoked), so the task stopped and nothing was charged. The owner of that machine makes a new token with claude setup-token and replaces the old one there; the machine takes tasks for Claude Code again after a few hours or when the token is replaced.",
         "subscription_limit": "The usage limit of the Claude subscription on the machine that runs this task is reached, so the task stopped and nothing was charged. The machine takes tasks for Claude Code again when the limit has reset; start the task again later.",
         "subscription_model_refused": "The Claude subscription on the machine that runs this task does not allow the AI model this task asks for, so the task stopped and nothing was charged. Choose a model the subscription includes.",
+        "mcp_unavailable": "An MCP server assigned to this step did not connect, or did not list its tools, so the step was stopped before the agent started and nothing was charged. The log below names the server. Check the server in MCP, then start the task again.",
         "no_result": "The agent finished without handing in the result this task asks for, also after a reminder. Anything it committed is on its branch. Read its summary, then try again.",
         "unknown": "The run failed for a reason this version does not know."
       },

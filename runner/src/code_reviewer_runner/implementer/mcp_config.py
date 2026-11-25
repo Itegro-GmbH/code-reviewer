@@ -71,6 +71,13 @@ class McpEndpoint:
     key: str
     url: str
     server_id: str
+    # The name the server has in the lane's configuration (the key is that name made a plain
+    # token): what an error says about it (#1142). Empty: the key is the name.
+    name: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.name or self.key
 
 
 def _could_build_a_built_in(key: str) -> bool:
@@ -99,7 +106,7 @@ def endpoints_of(servers: Sequence[McpServerRef], door_url: str) -> tuple[McpEnd
     """The endpoints of a turn's servers at the door: `<door_url>/mcp/<server id>`."""
     base = door_url.rstrip("/")
     return tuple(
-        McpEndpoint(key, f"{base}/mcp/{server.id}", server.id)
+        McpEndpoint(key, f"{base}/mcp/{server.id}", server.id, server.name)
         for key, server in zip(endpoint_keys(servers), servers, strict=True)
     )
 

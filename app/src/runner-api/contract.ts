@@ -306,6 +306,8 @@ export const RUNNER_ERROR_CODES = [
   "subscription_auth",
   "subscription_limit",
   "subscription_model_refused",
+  // #1142: an MCP server of the step was not connected (or had not listed its tools) before the first prompt, also after one reconnect. Free: the model was never used.
+  "mcp_unavailable",
 ] as const;
 export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
 
