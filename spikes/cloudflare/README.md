@@ -21,7 +21,7 @@ and it is not part of the pnpm workspace.
 - Only the box names `a` and `b` exist, so at most **two instances** can run at once; every start sets an inactivity timeout of 45 s to 10 min
   (the long runs use a 2 min timeout and a keep-alive alarm).
 - All traffic of a container goes through the outbound handler (`enableInternet: false`) except in the one test of `enableInternet: true`.
-- At the end the Worker, the Durable Object namespace, the container application and every image tag were deleted (listed in the report).
+- At the end no instance runs and the secrets are deleted (the endpoint answers 404). The Worker and its container application stay until Cloudflare Support has closed a limit-increase case; then `wrangler delete --name cr-spike-cf` (see "Clean-up of the spike" in the report).
 
 ## Run it again
 
