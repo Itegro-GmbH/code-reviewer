@@ -1737,6 +1737,27 @@ function deviceLoginServes(
   );
 }
 
+/**
+ * #1126: the refusal for a network rule the harness `claude-code` cannot honour: its login is inside the container, so an open network, or a
+ * wildcard on a domain anybody can get a subdomain of, would be a place to send it to. Free and early, before any VM or token exists.
+ */
+function subscriptionNetworkRefusal(
+  setup: { network: NetworkRule } | null,
+): Refusal | null {
+  if (setup === null) return null;
+  if (setup.network.mode === "open")
+    return refuse(
+      "implementer_config_invalid",
+      "reason=subscription_network_open",
+    );
+  if (setup.network.hosts.some(isSharedWildcard))
+    return refuse(
+      "implementer_config_invalid",
+      "reason=subscription_network_wildcard",
+    );
+  return null;
+}
+
 /** The refusal for a token that cannot be used: the turn would only fail later and cost a VM. */
 function tokenRefusal(token: ClaudeCodeTokenForJob): Refusal | null {
   if (token.state === "token") return null;
@@ -1819,6 +1840,11 @@ async function prepareSubscription(
     },
   };
   if (!onRunner) {
+    // The rule the Worker would refuse at its fetch: refused now, before a VM is started for it.
+    const unfit = subscriptionNetworkRefusal(
+      hostedSetupOf(turn.turn.environment),
+    );
+    if (unfit !== null) return unfit;
     // #1150: a hosted turn. The Dispatcher starts a Sandbox VM of the environment's size (the default size for a task without one) and
     // narrows its network after the setup: the model host is the one of Claude Code, which the Dispatcher signs into the switch token.
     const environment = turn.turn.environment;
@@ -1921,18 +1947,8 @@ export async function buildSubscriptionJob(
   // #1126, defence in depth beside the validator (at save) and the runner (at start): the login lives in the container, so a rule the
   // runner would refuse is refused here, free, before the git token is minted. A lane saved before the validator knew it, or a row
   // written by hand, ends the same way.
-  if (setup !== null) {
-    if (setup.network.mode === "open")
-      return refuse(
-        "implementer_config_invalid",
-        "reason=subscription_network_open",
-      );
-    if (setup.network.hosts.some(isSharedWildcard))
-      return refuse(
-        "implementer_config_invalid",
-        "reason=subscription_network_wildcard",
-      );
-  }
+  const unfit = subscriptionNetworkRefusal(setup);
+  if (unfit !== null) return unfit;
   if (setup !== null && !features.includes("implementer_subscription_setup"))
     return refuse(
       "implementer_engine_unavailable",

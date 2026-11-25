@@ -674,6 +674,72 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     expect(h.logLines().join("\n")).not.toContain(OAUTH_TOKEN);
   });
 
+  // #1150-T11
+  it("carries the size, the script and the rule of the hosted environment of the turn: the Dispatcher starts the VM of that size and the Worker reads the same setup as on a runner", async () => {
+    const h = await start();
+    await saveToken(h);
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+      environment: {
+        id: "env-hosted",
+        name: "Standard",
+        vcpus: 4,
+        setupScript: "npm ci\n",
+        network: { mode: "list", hosts: ["registry.npmjs.org"] },
+      },
+    });
+
+    const response = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+    const { job } = (await response.json()) as SplitClaimResponse;
+
+    expect(job).toMatchObject({
+      vcpus: 4,
+      network: { mode: "list", hosts: ["registry.npmjs.org"] },
+      modelHost: "api.anthropic.com",
+    });
+    const input = (await turnInput(
+      await h.worker.details(job.id, job.credential, HOSTED_FEATURES.join(",")),
+    )) as unknown as { implementer: { environment: unknown } };
+    expect(input.implementer.environment).toEqual({
+      name: "Standard",
+      setupScript: "npm ci\n",
+      network: { mode: "list", hosts: ["registry.npmjs.org"] },
+    });
+  });
+
+  // #1150-T11
+  it("ends a hosted turn with an open network before a VM is started: the token would be inside a container that can reach anything", async () => {
+    const h = await start();
+    await saveToken(h);
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+      environment: {
+        id: "env-hosted",
+        name: "Standard",
+        vcpus: 4,
+        setupScript: "",
+        network: { mode: "open", hosts: [] },
+      },
+    });
+
+    const claim = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+
+    expect(claim.status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+    });
+    expect(h.issuedJobTokens()).toEqual([]);
+  });
+
   // #1150-T12
   it("hands a runner without a login of its own the turn on the token, and says so in the access the dispatcher reads", async () => {
     const h = await start();
