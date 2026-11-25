@@ -219,3 +219,14 @@ def test_a_token_that_is_not_one_printable_token_is_refused_without_its_value(va
     assert "oauthToken" in str(refused.value)
     if isinstance(value, str) and value:
         assert value not in str(refused.value)
+
+
+# #1150-J03
+def test_the_token_of_the_workspace_is_among_the_secrets_the_host_masks() -> None:
+    from code_reviewer_runner.job_loop.host import _secrets_in  # pyright: ignore[reportPrivateUsage]
+
+    token = "sk-" + "ant-" + "oat01-workspace-token-not-real-0123456789"
+    document = subscription_job(**{"implementer.subscription.oauthToken": token})
+
+    assert token in _secrets_in(document)
+    assert token not in _secrets_in(subscription_job())

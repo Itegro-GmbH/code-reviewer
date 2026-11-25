@@ -383,6 +383,12 @@ def _secrets_in(raw_input: Mapping[str, Any]) -> list[str]:
         value = part.get(key) if part else None
         if isinstance(value, str) and value.strip():
             values.append(value)
+    # #1150: the Claude Code OAuth token of the workspace, for a turn on that harness.
+    implementer = as_object(raw_input.get("implementer"))
+    subscription = as_object(implementer.get("subscription")) if implementer else None
+    oauth = subscription.get("oauthToken") if subscription else None
+    if isinstance(oauth, str) and oauth.strip():
+        values.append(oauth)
     # #1093: a multi-repository job has one git token for each installation (`git.tokens`).
     git = as_object(raw_input.get("git"))
     tokens: object = git.get("tokens") if git else None
