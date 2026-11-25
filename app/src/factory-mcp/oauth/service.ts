@@ -199,7 +199,6 @@ export function normalizeResource(value: string): string | null {
  * What is taken out of a client's name: C0 and C1 controls, zero width and direction marks (U+200B to U+200F, U+2028 to U+202E,
  * U+2060 to U+2069) and the byte order mark. Written as escapes so the source holds no invisible character.
  */
-// eslint-disable-next-line no-control-regex
 const CONTROL_AND_DIRECTION_CHARACTERS = new RegExp(
   "[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff]",
   "g",

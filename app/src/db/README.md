@@ -729,6 +729,21 @@ constraints keep status, tokens, client and error in line. Expand only: one new 
 `scoping.test.ts`, covered row by row in `scoped-isolation.integration.test.ts`); `connected_by` is moved by a user merge; the erasure of a workspace deletes it.
 The registry's update deletes or replaces the row in ITS transaction when the address, the transport, the kind or the client changes.
 
+### The factory MCP's OAuth server (#1144)
+
+Migration `20261125100000_create_factory_oauth` (epic #1143): five new tables, nothing existing changes (expand only; safe for the version that is still running,
+which never reads them). `factory_oauth_clients` are the AI apps that registered themselves (RFC 7591), public clients with a JSON list of redirect URIs;
+`factory_oauth_requests` are authorization requests that wait for the person's consent (10 minutes); `factory_oauth_grants` is what a person approved (one workspace,
+one scope `factory:read` or `factory:control`, one client, the audience; `connected_at` when the code was exchanged, `revoked_at` when it ended; a row goes with its
+user); `factory_oauth_codes` and `factory_oauth_tokens` hold the authorization code (60 seconds, single use) and the access and refresh tokens, **only as SHA-256 hashes**,
+with the grant's `workspace_id` so that a lookup by hash answers the workspace. Foreign keys take a short lock on `users` and `workspaces`, bounded by a
+`lock_timeout` of 5 s that rolls the batch back. **Classification:** `factory-oauth-repository.ts` is **customer data, workspace scoped** (grants: make, list, revoke;
+classified in `scoping.test.ts`, covered in `scoped-isolation.integration.test.ts`); `factory-oauth-directory-repository.ts` is **instance level**, for the reasons in
+`scoping.test.ts` (clients and pending requests have no workspace, a code or a token is looked up by its hash and the workspace is the answer, nothing is listed).
+The erasure of a workspace deletes its codes, tokens and grants; a user merge ends a retired user's grants (`USER_REFERENCES`); the nightly clean-up
+(`maintenance/cleanup.ts`) removes what expired a day ago. The vocabulary and row types are `factory-oauth-types.ts`, so this layer imports nothing of `src/factory-mcp/`.
+See `src/factory-mcp/README.md`.
+
 ## Workspace scoping
 
 Every repository that reads or writes customer data is created for one workspace:

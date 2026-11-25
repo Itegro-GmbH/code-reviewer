@@ -54,9 +54,12 @@ export function defineTool<Shape extends z.ZodRawShape>(
   definition: ToolDefinition<Shape>,
 ): FactoryTool {
   const schema = z.object(definition.input).strict();
-  const { $schema: _dialect, ...inputSchema } = z.toJSONSchema(schema, {
-    io: "input",
-  });
+  // The dialect marker is dropped: `tools/list` carries the schema inside a message that names no dialect of its own.
+  const inputSchema = Object.fromEntries(
+    Object.entries(z.toJSONSchema(schema, { io: "input" })).filter(
+      ([key]) => key !== "$schema",
+    ),
+  );
   return {
     name: definition.name,
     title: definition.title,

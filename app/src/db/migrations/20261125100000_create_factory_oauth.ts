@@ -45,7 +45,10 @@ export const migration: Migration = {
       .createTable("factory_oauth_requests")
       .addColumn("id", "text", (column) => column.primaryKey())
       .addColumn("client_id", "text", (column) =>
-        column.notNull().references("factory_oauth_clients.id").onDelete("cascade"),
+        column
+          .notNull()
+          .references("factory_oauth_clients.id")
+          .onDelete("cascade"),
       )
       .addColumn("redirect_uri", "text", (column) => column.notNull())
       .addColumn("state", "text")
@@ -72,7 +75,10 @@ export const migration: Migration = {
         column.notNull().references("users.id").onDelete("cascade"),
       )
       .addColumn("client_id", "text", (column) =>
-        column.notNull().references("factory_oauth_clients.id").onDelete("cascade"),
+        column
+          .notNull()
+          .references("factory_oauth_clients.id")
+          .onDelete("cascade"),
       )
       // What the person approved, separated by a space: one scope.
       .addColumn("scope", "text", (column) => column.notNull())
@@ -101,7 +107,10 @@ export const migration: Migration = {
       .createTable("factory_oauth_codes")
       .addColumn("code_hash", "text", (column) => column.primaryKey())
       .addColumn("grant_id", "text", (column) =>
-        column.notNull().references("factory_oauth_grants.id").onDelete("cascade"),
+        column
+          .notNull()
+          .references("factory_oauth_grants.id")
+          .onDelete("cascade"),
       )
       .addColumn("workspace_id", "text", (column) =>
         column.notNull().references("workspaces.id"),
@@ -122,7 +131,10 @@ export const migration: Migration = {
       .createTable("factory_oauth_tokens")
       .addColumn("token_hash", "text", (column) => column.primaryKey())
       .addColumn("grant_id", "text", (column) =>
-        column.notNull().references("factory_oauth_grants.id").onDelete("cascade"),
+        column
+          .notNull()
+          .references("factory_oauth_grants.id")
+          .onDelete("cascade"),
       )
       .addColumn("workspace_id", "text", (column) =>
         column.notNull().references("workspaces.id"),

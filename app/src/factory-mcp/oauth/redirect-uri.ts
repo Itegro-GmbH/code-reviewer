@@ -33,6 +33,9 @@ const FORBIDDEN_SCHEMES: ReadonlySet<string> = new Set([
 
 export const REDIRECT_URI_MAX_LENGTH = 2048;
 
+/** C0 controls, the space, DEL and the backslash; written as escapes so the source holds none of them. */
+const UNSAFE_URI_CHARACTERS = new RegExp("[\\u0000-\\u0020\\u007f\\\\]");
+
 export type RedirectUriCheck =
   { ok: true; uri: string } | { ok: false; reason: string };
 
@@ -47,9 +50,8 @@ export function checkRedirectUri(value: unknown): RedirectUriCheck {
     return { ok: false, reason: "A redirect URI must be a non-empty string." };
   if (value.length > REDIRECT_URI_MAX_LENGTH)
     return { ok: false, reason: "A redirect URI is too long." };
-  // Control characters and spaces make two readers see two addresses.
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000- \u007f\\]/.test(value))
+  // Control characters, spaces and backslashes make two readers see two addresses.
+  if (UNSAFE_URI_CHARACTERS.test(value))
     return {
       ok: false,
       reason:

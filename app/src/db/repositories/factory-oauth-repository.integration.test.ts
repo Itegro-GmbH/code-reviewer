@@ -245,13 +245,13 @@ describe("the OAuth server over Postgres", () => {
         }),
       ),
     ).toMatchObject({ kind: "ok" });
-    expect(
-      await db
-        .selectFrom("factory_oauth_grants")
-        .select("id")
-        .where("id", "=", bobGrant!.id)
-        .execute(),
-    ).toHaveLength(1);
+    // The revoked grant of Bob (revoked before the cutoff) is gone; the live grant of Ada is not.
+    const grants = await db
+      .selectFrom("factory_oauth_grants")
+      .select("id")
+      .execute();
+    expect(grants.map((grant) => grant.id)).not.toContain(bobGrant!.id);
+    expect(grants).toHaveLength(1);
     expect(dead.refresh_token).toBeTruthy();
   });
 

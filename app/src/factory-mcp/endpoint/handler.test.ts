@@ -75,6 +75,8 @@ const call = (id: number, name: string, args: unknown = {}) => ({
 });
 
 async function json(response: Response) {
+  // The shape of each answer is asserted where it is read.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- a test reads many different JSON-RPC answers
   return (await response.json()) as Record<string, any>;
 }
 

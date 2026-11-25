@@ -110,6 +110,7 @@ describe("describe_factory", () => {
 describe("get_lane_schema", () => {
   // #1144-T146
   it("answers an overview with the way to write a lane, the validator's limits, triggers and connectors", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the overview is a large JSON document read field by field
     const answer = (await data("get_lane_schema", {})) as Record<string, any>;
     expect(answer.howToWriteOne.join(" ")).toMatch(/validate/i);
     expect(answer.limits).toMatchObject({
@@ -150,7 +151,7 @@ describe("get_lane_schema", () => {
   it("hands out the JSON Schema, the result schema and a complete example", async () => {
     const schema = (await data("get_lane_schema", { section: "schema" })) as {
       format: string;
-      content: any;
+      content: { $defs: { Workflow: { properties: { steps: unknown } } } };
     };
     expect(schema.format).toBe("json");
     expect(schema.content.$defs.Workflow.properties.steps).toBeDefined();

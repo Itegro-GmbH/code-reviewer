@@ -37,7 +37,11 @@ async function rowsOfEveryOldTable(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
-    if (table.name === "job_mcp_calls") continue;
+    if (
+      table.name === "job_mcp_calls" ||
+      table.name.startsWith("factory_oauth_")
+    )
+      continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,
@@ -53,7 +57,11 @@ async function columnsOfEveryOldTable(
 ): Promise<Record<string, string[]>> {
   const result: Record<string, string[]> = {};
   for (const table of await db.introspection.getTables()) {
-    if (table.name === "job_mcp_calls") continue;
+    if (
+      table.name === "job_mcp_calls" ||
+      table.name.startsWith("factory_oauth_")
+    )
+      continue;
     // A column a later migration added (#1092: the repositories of a session) is no change this migration made.
     const later = columnsAddedLater(table.name);
     result[table.name] = table.columns
