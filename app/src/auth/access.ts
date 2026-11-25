@@ -63,6 +63,18 @@ export const PUBLIC_PATHS: readonly PublicPath[] = [
   { path: "/api/internal/jira-webhooks", match: "exact" },
   // The same cron, once an hour: the lanes whose schedule trigger is due start a run (#1140).
   { path: "/api/internal/schedule-runs", match: "exact" },
+  // The factory MCP (#1144): the endpoint authenticates with an OAuth access token it checks itself (and answers 401 with the address of
+  // the metadata), and the discovery documents, the registration of an AI app, the token and the revocation are called by programs with
+  // no session. Exact paths: `/api/mcp/oauth/callback` (the callback of an agent MCP server's own OAuth) keeps its session.
+  { path: "/api/mcp", match: "exact" },
+  { path: "/.well-known/oauth-protected-resource", match: "prefix" },
+  { path: "/.well-known/oauth-authorization-server", match: "exact" },
+  { path: "/api/oauth/register", match: "exact" },
+  { path: "/api/oauth/token", match: "exact" },
+  { path: "/api/oauth/revoke", match: "exact" },
+  // The browser an AI app sends the person to: the route looks at the session itself (the sign in, then the consent page, which is
+  // behind the sign in like every page).
+  { path: "/oauth/authorize", match: "exact" },
 ];
 
 /**

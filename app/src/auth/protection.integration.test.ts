@@ -94,9 +94,21 @@ const PUBLIC_ROUTES = [
   "/api/internal/jira-webhooks",
   // The hourly tick of the schedule triggers (#1140): the same credential.
   "/api/internal/schedule-runs",
+  // The factory MCP (#1144): the endpoint checks its own OAuth access token; the discovery documents, the registration of an AI app, the token
+  // and the revocation have no session; the authorization request looks at the session itself (src/factory-mcp/).
+  "/api/mcp",
+  "/.well-known/oauth-protected-resource",
+  "/.well-known/oauth-protected-resource/api/mcp",
+  "/.well-known/oauth-authorization-server",
+  "/api/oauth/register",
+  "/api/oauth/token",
+  "/api/oauth/revoke",
+  "/oauth/authorize",
 ] as const;
 const PROTECTED_ROUTES = [
   "/",
+  // The consent page of an AI app that wants to connect (#1144): behind the sign in; /oauth/authorize carries the request through it.
+  "/oauth/consent",
   // The files of the admin portal; people use /admin, which is rewritten to them for the instance admin
   // and does not exist for anybody else (src/admin/guard.integration.test.ts).
   "/instance-portal",
@@ -146,6 +158,8 @@ const PROTECTED_ROUTES = [
   "/w/[workspace]/runs/[id]",
   "/w/[workspace]/settings",
   "/w/[workspace]/settings/advanced",
+  // The AI apps connected to the factory MCP (#1144).
+  "/w/[workspace]/settings/ai-apps",
   "/w/[workspace]/settings/billing",
   "/w/[workspace]/settings/integrations",
   "/w/[workspace]/settings/llm",
@@ -200,6 +214,10 @@ const PROTECTED_DATA_ROUTES = [
   "/api/jira/callback",
   // Where an MCP server's authorization server sends the browser after the consent page (#1051, src/mcp/oauth/): a signed in person only.
   "/api/mcp/oauth/callback",
+  // The answer of the consent page of an AI app and the AI apps connected to a workspace (#1144): behind the sign in, for its members.
+  "/api/oauth/consent",
+  "/api/w/[workspace]/ai-apps",
+  "/api/w/[workspace]/ai-apps/[grantId]/revoke",
   // The data routes of a workspace: for its members only (src/workspaces/access-runtime.ts).
   "/api/w/[workspace]",
   "/api/w/[workspace]/jira/choose",

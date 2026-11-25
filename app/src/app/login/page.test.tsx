@@ -32,6 +32,7 @@ function follows(anchor: Element, other: Element): boolean {
 function data(overrides: Partial<LoginPageData> = {}): LoginPageData {
   return {
     invitation: null,
+    oauth: null,
     emailPassword: true,
     github: true,
     signUpOpen: true,

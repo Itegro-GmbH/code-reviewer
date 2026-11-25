@@ -23,7 +23,9 @@ export type SettingsSection =
   | "advanced"
   // The members list of the factory's tabs moved here from `/members`; the GitHub App page (`integrations`) is a place of Setup.
   | "members"
-  | "integrations";
+  | "integrations"
+  // The AI apps connected to the factory MCP (#1144); a page of the General tab of the factory.
+  | "ai-apps";
 
 type SectionEntry = {
   segment: SettingsSection;
@@ -89,6 +91,12 @@ export const FACTORY_SETTINGS_SECTIONS: readonly (SectionEntry & {
     label: "Review defaults",
     title: "Review defaults",
     capability: "review",
+  },
+  {
+    segment: "ai-apps",
+    tab: "general",
+    label: "Connected AI apps",
+    title: "Connected AI apps",
   },
   { segment: "advanced", tab: "general", label: "Advanced", title: "Advanced" },
   { segment: "members", tab: "members", label: "Members", title: "Members" },

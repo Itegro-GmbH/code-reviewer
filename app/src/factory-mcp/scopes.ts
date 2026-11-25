@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: LicenseRef-Proprietary
+
+// The two scopes of the factory MCP server (epic #1143). `factory:read` looks (projects, lanes, runs, models, costs);
+// `factory:control` also changes things (saves lanes, starts and cancels runs, answers ToDos, ...). Control includes read, so a
+// token with control may call every read tool. The user's role in the workspace applies on top of the scope, per tool
+// (`tools/define.ts`): a scope never gives more than the role allows.
+
+import {
+  FACTORY_SCOPES,
+  formatScopeList,
+  isFactoryScope,
+  parseScopeList,
+  type FactoryScope,
+} from "../db/factory-oauth-types.ts";
+
+export {
+  FACTORY_SCOPES,
+  formatScopeList,
+  isFactoryScope,
+  parseScopeList,
+  type FactoryScope,
+};
+
+/** What the person is asked to approve when the client names no scope: look only. */
+export const DEFAULT_SCOPE: FactoryScope = "factory:read";
+
+/** Whether a token that was granted `granted` may use something that needs `needed` (control includes read). */
+export function scopeSatisfies(
+  granted: readonly FactoryScope[],
+  needed: FactoryScope,
+): boolean {
+  if (granted.includes(needed)) return true;
+  return needed === "factory:read" && granted.includes("factory:control");
+}
+
+/** What a granted scope means to a person, in a sentence (the consent page and the list of connected apps). */
+export const SCOPE_DESCRIPTIONS: Record<FactoryScope, string> = {
+  "factory:read":
+    "Read only: look at projects, lanes, runs, ToDos, runners, models and costs.",
+  "factory:control":
+    "Read and control: also save lanes, start, pause and cancel runs, answer ToDos and manage runners and agent MCP servers, within your role.",
+};

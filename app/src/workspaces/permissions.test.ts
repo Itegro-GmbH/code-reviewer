@@ -28,6 +28,8 @@ const MATRIX: Record<WorkspaceAction, [boolean, boolean, boolean]> = {
   // #854-T01: a runner on a customer's machine takes the workspace's jobs: registering and revoking one is for Owners and Admins.
   manage_runners: [false, true, true],
   manage_mcp: [false, true, true],
+  // #1144-T206: Owners and Admins see and revoke every connected AI app; a Member only their own (the service narrows the list).
+  manage_ai_apps: [false, true, true],
   // #1105-T20 (ADR 0007 decision 12): saving a lane (create, new version, archive) is for Owners and Admins; a Member reads, validates and starts.
   manage_workflows: [false, true, true],
   // #588-T42: a Member saves the settings of a project, but confirming or moving the pinned address of its catalog provider is

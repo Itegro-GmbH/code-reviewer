@@ -33,6 +33,8 @@ export const WORKSPACE_ACTIONS = [
   "manage_runners",
   /** The MCP servers of the workspace: add, change, test and remove them (#1050; factory only, the routes do not exist elsewhere). Every member sees the list. */
   "manage_mcp",
+  /** See and revoke the AI apps every member of the workspace connected to the factory MCP (#1144). A Member sees and revokes their own. */
+  "manage_ai_apps",
   /**
    * Save lanes: create, save a new version, archive (ADR 0007 decision 12). A lane carries each agent step's model, push right, instructions,
    * setup script and network rule, which a profile page and an environment used to gate; whoever saves decides them. Members read, validate,
@@ -78,6 +80,7 @@ export const MINIMUM_ROLE: Record<WorkspaceAction, WorkspaceRole> = {
   manage_implementer_environments: "admin",
   manage_runners: "admin",
   manage_mcp: "admin",
+  manage_ai_apps: "admin",
   manage_workflows: "admin",
   change_project_settings: "member",
   manage_projects: "admin",
