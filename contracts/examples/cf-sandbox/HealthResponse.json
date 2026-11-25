@@ -1,8 +1,1 @@
-{
-  "ok": true,
-  "imageVersion": "7f5dca66",
-  "workerFeatures": ["implementer_multi_repo", "implementer_workspace_token"],
-  "instanceTypes": ["standard-4"],
-  "workerImageDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "sysboxProof": "proven"
-}
+{"ok":true,"imageVersion":"7f5dca66e0b1d2c3a4b5c6d7e8f901234567abcd","workerFeatures":["implementer_multi_repo"],"instanceTypes":["standard-4"],"workerImageId":"sha256:0000000000000000000000000000000000000000000000000000000000000001","agentImageId":"sha256:0000000000000000000000000000000000000000000000000000000000000002"}
