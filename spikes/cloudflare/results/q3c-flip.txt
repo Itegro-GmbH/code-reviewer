@@ -1,0 +1,4 @@
+t= 0.04s persistent=200 fresh=200
+t= 4.09s persistent=403 fresh=403
+t= 8.30s persistent=200 fresh=200
+polls: 56

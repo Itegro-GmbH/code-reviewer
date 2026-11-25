@@ -1,0 +1,2 @@
+{"from":"rm -rf /tmp/src && mkdir /tmp/src && cd /tmp/src && git init -q && git config user.email s@s && git config user.name s && head -c 100000000 /dev/urandom > blob.bin && echo hello > f.txt && git add -A && git commit -qm c1 && sha256sum blob.bin | cut -c1-16 > /tmp/src.sum && git bundle create - --all 2>/dev/null",
+ "to":"cat > /tmp/in.bundle && ls -l /tmp/in.bundle | awk '{print $5}' && rm -rf /tmp/dst && git clone -q /tmp/in.bundle /tmp/dst && sha256sum /tmp/dst/blob.bin | cut -c1-16"}

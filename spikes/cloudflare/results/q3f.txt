@@ -1,0 +1,12 @@
+--- Sysbox agent container, CA mounted + SSL_CERT_FILE (as the network door's trust files are today)
+https://example.com/ (200, b'<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data:,><meta name=viewport content="width=dev')
+https://www.facebook.com/ (403, b'door: www.facebook.com not allowed')
+http://model.door/v1/chat (200, b'{"door":"model","saw_authorization_header_from_container":false,"key_digest_added_by_door":"80694a2adcdc","method":"GET"')
+https://model.door/v1/chat (200, b'{"door":"model","saw_authorization_header_from_container":false,"key_digest_added_by_door":"80694a2adcdc","method":"GET"')
+forged Authorization to model door: b'{"door":"model","saw_authorization_header_from_container":true,"key_digest_added_by_door":"80694a2adcdc","meth'
+--- same without the CA: TLS fails, so HTTPS needs the CA file in the agent's container
+https://example.com/ ('ERR', "URLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify ")
+https://www.facebook.com/ ('ERR', "URLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify ")
+http://model.door/v1/chat (200, b'{"door":"model","saw_authorization_header_from_container":false,"key_digest_added_by_door":"80694a2adcdc","method":"GET"')
+
+ERR: 

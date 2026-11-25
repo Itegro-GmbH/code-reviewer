@@ -1,0 +1,7 @@
+boot (CA, cgroup, sysbox, dockerd): cpu_s=3.0 wall_s=3.7 mem_used_mb=383
+pull 511MB dind image through the door: cpu_s=16.77 wall_s=13.9 mem_used_mb=489
+Sysbox DinD container with its own dockerd ready: cpu_s=27.47 wall_s=22.8 mem_used_mb=551
+git clone: cpu_s=27.78 wall_s=23.7 mem_used_mb=540
++20 s of one busy core (a stand-in for a test run): cpu_s=47.7 wall_s=43.8 mem_used_mb=509
+
+ERR: 

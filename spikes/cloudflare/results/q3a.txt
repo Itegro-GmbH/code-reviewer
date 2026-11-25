@@ -1,0 +1,41 @@
+--- DNS (what does a name resolve to when enableInternet=false?)
+  example.com (allowed host) -> fd00::119:1     example.com 
+  github.com -> fd00::119:1     github.com 
+  model.door (only exists in the Worker) -> fd00::119:1     model.door 
+  not-intercepted-name.invalid -> fd00::119:1     nothing.example.invalid 
+  resolv.conf -> nameserver 1.1.1.1 nameserver 9.9.9.9 nameserver 2606:4700:4700::1111 
+--- HTTP/HTTPS through the door, allowed host
+  http example.com -> 200 remote=fd00::119:1:80 
+  https example.com -> 200 verify=0 remote=fd00::119:1 
+  https example.com issuer -> subject=CN = example.com issuer=CN = Cloudflare TLS proxy-everything Intercept CA 
+--- host not on the list
+  https github.com is on list; try facebook.com (not listed) -> 403 
+  http facebook.com -> HTTP/1.1 403 Forbidden Connection: keep-alive Content-Length: 34 Content-Type: text/plain;charset=UTF-8 X-Door: not_listed  door: www.facebook.com not allowed
+--- the model door (hostname that exists only in the Worker, key lives there)
+  model.door -> door: model.door not allowed
+  model.door with a fake Authorization from the container -> door: model.door not allowed
+  model.door over https (needs a handler for https model.door) -> door: model.door not allowed
+--- IP literals, other ports, other protocols (enableInternet=false)
+  https://1.1.1.1/ (IP, no SNI of a listed name) -> curl: (35) OpenSSL/3.0.13: error:0A000438:SSL routines::tlsv1 alert internal error 000 
+  http://1.1.1.1/ -> 301 
+  http://example.com:8080/ -> curl: (28) Connection timed out after 6001 milliseconds 000 
+  https://example.com:8443/ -> curl: (28) Connection timed out after 6000 milliseconds 000 
+  tcp github.com:22 (ssh) -> 
+  tcp 1.1.1.1:443 raw -> Connection to 1.1.1.1 443 port [tcp/https] succeeded! 
+  tcp 1.1.1.1:53 raw -> 
+  udp 1.1.1.1:53 dig ->  ; <<>> DiG 9.18.39-0ubuntu0.24.04.9-Ubuntu <<>> +time=3 +tries=1 @1.1.1.1 example.com ; (1 server found) ;; global options: +cmd ;; Got answer: ;; ->>HEADER<<- opcode: Q
+  icmp 1.1.1.1 -> PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data. From 10.0.0.2 icmp_seq=1 Destination Net Unreachable  --- 1.1.1.1 ping statistics --- 1 packets transmitted, 0 received, +1 e
+  icmp gateway 10.0.0.254 -> PING 10.0.0.254 (10.0.0.254) 56(84) bytes of data.  --- 10.0.0.254 ping statistics --- 1 packets transmitted, 0 received, 100% packet loss, time 0ms  
+--- the VM's own network
+cfeth0           UP             10.0.0.1/24 fd00::11/8 fe80::211:22ff:fe33:4466/64 
+default via 10.0.0.254 dev cfeth0 proto static 
+10.0.0.0/24 dev cfeth0 proto kernel scope link src 10.0.0.1 
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown 
+10.0.0.2 dev cfeth0 lladdr ae:a2:c2:07:22:c1 STALE 
+10.0.0.254 dev cfeth0 lladdr ae:a2:c2:07:22:c1 REACHABLE 
+fd00::119:1 dev cfeth0 lladdr ae:a2:c2:07:22:c1 router REACHABLE 
+  scan the /24 neighbours quick (1 port) -> Connection to 10.0.0.2 80 port [tcp/http] succeeded! Connection to 10.0.0.3 80 port [tcp/http] succeeded! Connection to 10.0.0.10 80 port [tcp/http] succeeded! Connection
+  metadata 169.254.169.254 -> door: 169.254.169.254 not allowed
+
+ERR: 
+exit 0 ms 28072

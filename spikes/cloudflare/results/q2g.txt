@@ -1,0 +1,57 @@
+--- what the VM-level mounts show (the agent is root with CAP_SYS_ADMIN in this container)
+drwxr-xr-x   4 root root 80 Nov 25 10:57 /run/cloudchamber
+dr-xr-xr-x 131 root root  0 Nov 25 12:35 /run/cloudchamber/proc
+dr-xr-xr-x  11 root root  0 Nov 25 10:57 /run/cloudchamber/sys
+1 sleep infinity 
+966 bash -c echo "--- what the VM-level mounts show (the agent is root with CAP_SYS_ADMIN in this container)"
+ls -ld /run/cloudchamber /run/cloudchamber/proc /run/cloudchamber/sys 2>&1
+for p in $(ls /run/cloudchamber/proc | grep -E '^[0-9]+$' | head -40); do printf "%s %s\n" "$p" "$(tr '\0' ' '
+echo "--- own pid ns vs VM pid ns"
+readlink /proc/self/ns/pid /run/cloudchamber/proc/1/ns/pid /run/cloudchamber/proc/1/ns/mnt /proc/self/ns/mnt /
+echo "--- listening sockets in the VM/container"
+ss -ltnp 2>/dev/null | head -12; ss -lxp 2>/dev/null | head -8
+echo "--- vsock?"; ls -l /dev/vsock /dev/vhost-vsock 2>&1 | head; ls /sys/class/net; 
+echo "--- can the container read the VM's root fs / host files?"
+cat /run/cloudchamber/proc/1/cmdline | tr '\0' ' '; echo; ls /run/cloudchamber/proc/1/root 2>&1 | head -5
+ls /run/cloudchamber/proc/1/root/etc 2>&1 | head -3
+ 
+968 
+969 
+970 
+971 
+--- own pid ns vs VM pid ns
+pid:[4026532355]
+pid:[4026532355]
+mnt:[4026532353]
+mnt:[4026532353]
+net:[4026531833]
+net:[4026531833]
+cgroup:[4026532356]
+--- listening sockets in the VM/container
+State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+Netid State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+--- vsock?
+crw------- 1 root root 10, 241 Nov 25 10:57 /dev/vhost-vsock
+crw------- 1 root root 10, 258 Nov 25 10:57 /dev/vsock
+bond0
+bonding_masters
+cfeth0
+dummy0
+lo
+--- can the container read the VM's root fs / host files?
+sleep infinity 
+bin
+bin.usr-is-merged
+boot
+dev
+etc
+adduser.conf
+alternatives
+apt
+
+ERR: bash: line 3: /run/cloudchamber/proc/968/cmdline: No such file or directory
+bash: line 3: /run/cloudchamber/proc/969/cmdline: No such file or directory
+bash: line 3: /run/cloudchamber/proc/970/cmdline: No such file or directory
+bash: line 3: /run/cloudchamber/proc/971/cmdline: No such file or directory
+
+exit 0 ms 39
