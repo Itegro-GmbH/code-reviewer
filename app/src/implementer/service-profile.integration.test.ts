@@ -497,7 +497,6 @@ describe("a task with a profile on the harness claude-code", () => {
           model: "claude-sonnet-5-5",
         }),
         profile_harness: "claude-code",
-        environment_kind: environmentId === null ? null : "hosted",
       });
     }
   });

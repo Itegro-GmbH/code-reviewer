@@ -122,7 +122,10 @@ describe("who may say that a job ran on a subscription", () => {
       modelChoice: CLAUDE_MODEL,
       profile: { ...PROFILE, harness: "claude-code" },
     });
-    const claimed = await h.queue.claimNext("runner-a", IMPLEMENTER);
+    const claimed = await h.queue.claimNext("runner-a", IMPLEMENTER, {
+      // The token of the workspace reaches only a Dispatcher's claim (the per-job credential).
+      workerCredential: true,
+    });
     expect(claimed?.job.id).toBe(turn.job.id);
 
     const answer = await h.complete(turn.job.id, claimed?.leaseToken ?? "", {
