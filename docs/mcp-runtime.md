@@ -197,6 +197,25 @@ OpenCode's default-deny permission gets `<key>_*: allow` for the servers of the 
 that cannot be started, a job that holds no access and a runner without a door are notes too ("… could not be reached …", "… holds no access", "… not
 available on this runner yet"): none of them fails the turn.
 
+**Before the first prompt: every server connected (#1142).** Both harnesses start an MCP server in the background and carry on without it when it does not come
+up (observed 2026-11-24: OpenCode sent `initialize` and `notifications/initialized` through the door but never `tools/list`, the agent worked the whole turn without
+the tools, said so in its summary, and the run ended `succeeded`). So a turn with servers is checked before the agent can do anything, and ends `mcp_unavailable`
+(free: the model was never used) when a server of the step is not up. A step without servers is not asked anything and behaves exactly as before.
+
+| Harness     | The check                                                                                                                                                                   | Retry                                                                                      |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| OpenCode    | After the session is open and before the audit and the prompt: `GET /mcp` (pinned 1.19.0, `server/routes/instance/httpapi/groups/mcp.ts`). Each server of the step must be `connected`. In that version a server is `connected` only when its `initialize` **and** its `tools/list` worked (`MCP.create` closes the client and reports `failed` when the listing fails), so `connected` is "connected and has listed its tools". `failed`, `needs_auth`, `needs_client_registration`, `disabled` and a server the engine does not list at all are all "not available" | One, after a pause of 2 s: `POST /mcp/<key>/connect` for each server that was not connected (the engine connects it again and lists its tools), then `GET /mcp` once more. Still not connected: the turn ends. Never a third try |
+| Claude Code | The `mcp_servers` of the `system/init` line, which Claude Code prints before its first model call: each server of the step must be `connected` (any other status, or no entry, is "not available"). The finish tool and any server the step did not name are not looked at. The watch of the turn ends it at its next tick (50 ms) | None: the process is already running |
+
+An engine that cannot answer `GET /mcp` is the engine's failure (`runner_error`, free), not a missing server. The waits count against the turn's clock; each call is
+bounded by what the clock leaves.
+
+**What the error says.** The error code is `mcp_unavailable` (`ErrorCode.MCP_UNAVAILABLE`, in the `KnownRunnerErrorCode` of `contracts/runner-api.v1.json`, billing class
+`free`, a sentence for it in `app/src/runs/error-copy.ts`), shown as a failed step in the runs view. The detail, which reaches the log of the run, names the servers by the
+name they have in the lane's configuration (cleaned to plain text, at most 64 characters), for example `the MCP server "Issues" of this step is not available: it did not
+connect or list its tools`. It never carries a server's address, a credential or the engine's own failure message (which may hold the address). Tests:
+`runner/tests/unit/test_implementer_mcp_ready.py`.
+
 **Not here.** The door's egress is the shared table (DNS and port 443 of public addresses), not the app's address alone: the app's address is a name behind a CDN, which an `nft` table cannot pin; narrowing it (a resolved set, or the host's proxy for the app) is a follow-up.
 
 ## On the Incus backend (#1068)

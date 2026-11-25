@@ -203,6 +203,10 @@ export const errorCopy = (
     "The usage limit of the Claude subscription on the machine that runs this task is reached, so the task stopped and nothing was charged. The machine takes tasks for Claude Code again when the limit has reset; start the task again later.",
   subscription_model_refused:
     "The Claude subscription on the machine that runs this task does not allow the AI model this task asks for, so the task stopped and nothing was charged. Choose a model the subscription includes.",
+  // #1142: an MCP server assigned to the step did not connect or list its tools before the agent started, also after one reconnect.
+  // The log names the server by its configured name (the error detail); the agent never ran.
+  mcp_unavailable:
+    "An MCP server assigned to this step did not connect, or did not list its tools, so the step was stopped before the agent started and nothing was charged. The log below names the server. Check the server in MCP, then start the task again.",
   agent_gave_up:
     "The agent stopped without a result it could stand behind. Read its summary, then try again with a clearer or smaller task.",
   // #843
