@@ -135,6 +135,9 @@ function sharedDeps(): WorkerApiDeps {
       createImplementerRepository(getDatabase(), job.workspaceId).getTurnByJob(
         job.id,
       ),
+    // #1150: the Claude Code OAuth token of the job's own workspace, for a turn on the harness `claude-code` that runs on it.
+    claudeCodeToken: (workspaceId) =>
+      llm.claudeCodeTokenFor(workspaceId).tokenForJob(),
     // #920: a turn a workflow step started is the only one that may ask: its delivery id is the request id of an agent step of this workspace.
     startedByWorkflow: async (job) =>
       job.deliveryId !== null &&

@@ -220,22 +220,27 @@ export function copyRunner(
 }
 
 /**
- * #856: a profile on a harness that exists only on a runner (`claude-code`) runs in a runner environment and nowhere else. A task without
- * an environment, or in a hosted one, is refused before a turn, a job or a VM exists.
+ * #856, #1150: a profile on a harness that exists only on a runner (`claude-code`) needs a login. In a runner environment it is the runner's
+ * (its own device's login, or the token of the workspace when it has none); anywhere else, in a hosted environment or in none, it is the
+ * Claude Code OAuth token of the workspace (LLM keys). A task without either is refused before a turn, a job or a VM exists.
  */
-export function requireRunnerForHarness(
+export async function requireRunnerForHarness(
   profile: TurnProfile | null,
   runnerEnvironment: TurnRunnerEnvironment | null,
-): void {
+  claudeCodeTokenConfigured: (() => Promise<boolean>) | undefined,
+): Promise<void> {
   if (
-    profile !== null &&
-    harnessNeedsRunner(profile.harness ?? OPENCODE_HARNESS) &&
-    runnerEnvironment === null
+    profile === null ||
+    !harnessNeedsRunner(profile.harness ?? OPENCODE_HARNESS) ||
+    runnerEnvironment !== null
   )
-    throw new ImplementerError(
-      "IMPLEMENTER_HARNESS_NEEDS_RUNNER",
-      "A profile on the harness claude-code runs only in a runner environment.",
-    );
+    return;
+  if (claudeCodeTokenConfigured !== undefined && (await claudeCodeTokenConfigured()))
+    return;
+  throw new ImplementerError(
+    "IMPLEMENTER_HARNESS_NEEDS_RUNNER",
+    "A profile on the harness claude-code needs a runner environment or a Claude Code OAuth token in the LLM keys.",
+  );
 }
 
 /** Whether a model is run through the workspace's keys and the catalog; the model of the harness `claude-code` is a name on a device's login. */

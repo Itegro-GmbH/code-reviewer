@@ -13,6 +13,7 @@ import { createWorkflowsRepository } from "../db/repositories/workflows-reposito
 import { getDatabase } from "../db/startup.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { implementerModelsFor } from "../implementer/shared.ts";
+import { getWorkspaceLlm } from "../llm/shared.ts";
 import { onlineRunnersFrom } from "../runner-identity/online.ts";
 import {
   createWorkflowService,
@@ -44,6 +45,10 @@ export function workflowServiceFor(
     mcpServers: createMcpServersRepository(db, workspaceId),
     mcpOAuth: createMcpOAuthRepository(db, workspaceId),
     onlineRunners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),
+    // #1150: with a Claude Code OAuth token in the workspace's LLM keys, the harness `claude-code` runs on hosted VMs too.
+    claudeCodeTokenConfigured: async () =>
+      (await getWorkspaceLlm().claudeCodeTokenFor(workspaceId).tokenForJob())
+        .state === "token",
     runners: createNamedRunnersRepository(db, workspaceId),
     ...(options.samples === undefined ? {} : { samples: options.samples }),
   });

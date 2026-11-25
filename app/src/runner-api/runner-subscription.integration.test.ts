@@ -564,3 +564,258 @@ describe("the fetch of a turn on several repositories on the harness claude-code
     });
   });
 });
+
+// #1150: the same turn on the Claude Code OAuth token of the workspace. A hosted Sandbox VM has no login of a device, so the token is its login;
+// a self-hosted runner that announces no login of its own (the entry `app-key` for the harness) runs on it as well; a runner that has its own
+// login keeps it (the runner's own login wins).
+const OAUTH_TOKEN =
+  "sk-ant-oat01-WORKSPACETOKENWORKSPACETOKEN0123456789-abcdef_WXYZ";
+const HOSTED_FEATURES = [...NOW_FEATURES, "implementer_subscription_setup"];
+const DISPATCHER_ENGINES = ["implementer", "opencode", "pr-agent"];
+const TOKEN_ACCESS = [
+  ...OPENCODE_ACCESS,
+  { harness: "claude-code", version: "2.1.311", auth: "app-key" as const },
+];
+const TOKEN_ONLY = { harnesses: [...TOKEN_ACCESS], capabilities: [] };
+
+async function saveToken(h: Awaited<ReturnType<typeof start>>) {
+  const saved = await h.llm
+    .claudeCodeTokenFor(h.workspaceId)
+    .save(OAUTH_TOKEN, null);
+  expect(saved.ok).toBe(true);
+}
+
+describe("the claim of a turn on claude-code that runs on the token of the workspace", () => {
+  // #1150-T10
+  it("ends a hosted turn, free and with its reason, when the workspace has no token: no VM is started for a turn that cannot log in", async () => {
+    const h = await start();
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+    });
+
+    const claim = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+
+    expect(claim.status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+    });
+    expect(h.issuedJobTokens()).toEqual([]);
+  });
+
+  // #1150-T11
+  it("hands a hosted Dispatcher the turn with the size of a VM and the host of Claude Code, and its Worker the token with the input and nowhere else", async () => {
+    const h = await start();
+    await saveToken(h);
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+      costLimitCents: 80,
+    });
+
+    const response = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+    expect(response.status).toBe(200);
+    const { job } = (await response.json()) as SplitClaimResponse;
+
+    // The claim holds nothing of the turn but its credential and what the Dispatcher needs to start a VM: no input, no token.
+    expect(job.id).toBe(turn.job.id);
+    expect(JSON.stringify(job)).not.toContain(OAUTH_TOKEN);
+    expect(job).not.toHaveProperty("input");
+    expect(job.access).toEqual({
+      harness: "claude-code",
+      auth: "app-key",
+      model: "claude-sonnet-5-5",
+    });
+    expect(job.sizeLabel).toMatch(/^cr:size-/);
+    // The Dispatcher narrows the VM's network to the App, GitHub and the host of Claude Code (the token of the switch signs it).
+    expect(job).toMatchObject({
+      network: { mode: "off", hosts: [] },
+      modelHost: "api.anthropic.com",
+    });
+
+    const fetched = await h.worker.details(
+      job.id,
+      job.credential,
+      HOSTED_FEATURES.join(","),
+    );
+    const input = (await turnInput(fetched)) as unknown as {
+      llm?: unknown;
+      implementer: { subscription: Record<string, unknown> };
+    };
+    expect(input.llm).toBeUndefined();
+    expect(input.implementer.subscription).toEqual({
+      model: "claude-sonnet-5-5",
+      maxBudgetUsd: "0.80",
+      oauthToken: OAUTH_TOKEN,
+    });
+    expect(h.issuedJobTokens()).toHaveLength(1);
+  });
+
+  // #1150-T11
+  it("never writes the token to the log of the App", async () => {
+    const h = await start();
+    await saveToken(h);
+    await h.enqueueTurn({ modelChoice: CLAUDE_MODEL, profile: PROFILE });
+    const response = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+    const { job } = (await response.json()) as SplitClaimResponse;
+
+    await h.worker.details(job.id, job.credential, HOSTED_FEATURES.join(","));
+
+    expect(h.logLines().join("\n")).not.toContain(OAUTH_TOKEN);
+  });
+
+  // #1150-T12
+  it("hands a runner without a login of its own the turn on the token, and says so in the access the dispatcher reads", async () => {
+    const h = await start();
+    await saveToken(h);
+    const runner = await h.registerRunner({
+      labels: ["box"],
+      manifest: TOKEN_ONLY,
+    });
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
+    });
+
+    const claim = await h.claim(claimOf(runner.credential));
+    expect(claim.status).toBe(200);
+    const { job } = (await claim.json()) as SplitClaimResponse;
+
+    // `app-key`: the dispatcher hands the Worker no credential of its device, there is none.
+    expect(job.access).toEqual({
+      harness: "claude-code",
+      auth: "app-key",
+      model: "claude-sonnet-5-5",
+    });
+    const fetched = await h.worker.details(
+      job.id,
+      job.credential,
+      NOW_FEATURES.join(","),
+      undefined,
+      undefined,
+      "workspace",
+    );
+    const input = (await turnInput(fetched)) as unknown as {
+      implementer: { subscription: { oauthToken?: string } };
+    };
+    expect(input.implementer.subscription.oauthToken).toBe(OAUTH_TOKEN);
+  });
+
+  // #1150-T12
+  it("ends a turn on a runner without a login of its own, free, when the workspace has no token", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({
+      labels: ["box"],
+      manifest: TOKEN_ONLY,
+    });
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
+    });
+
+    expect((await h.claim(claimOf(runner.credential))).status).toBe(204);
+
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+    });
+  });
+
+  // #1150-T13
+  it("keeps the runner's own login: the claim says subscription and the token of the workspace is not sent to its Worker", async () => {
+    const h = await start();
+    await saveToken(h);
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
+    });
+
+    const { claim, response } = await fetchedTurn(h, runner.credential);
+
+    expect(claim.access).toEqual({
+      harness: "claude-code",
+      auth: "subscription",
+      model: "claude-sonnet-5-5",
+    });
+    const input = (await turnInput(response)) as unknown as {
+      implementer: { subscription: Record<string, unknown> };
+    };
+    expect(input.implementer.subscription).not.toHaveProperty("oauthToken");
+  });
+
+  // #1150-T13
+  it("takes the token for a model the runner's login does not allow, as a runner without one does", async () => {
+    const h = await start();
+    await saveToken(h);
+    const runner = await h.registerRunner({
+      labels: ["box"],
+      manifest: {
+        harnesses: [
+          ...TOKEN_ACCESS,
+          {
+            harness: "claude-code",
+            version: "2.1.311",
+            auth: "subscription",
+            models: ["haiku"],
+          },
+        ],
+        capabilities: [],
+      },
+    });
+    await h.enqueueTurn({
+      modelChoice: { provider: "claude-code", model: "opus" },
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
+    });
+
+    const claim = await h.claim(claimOf(runner.credential));
+
+    expect(claim.status).toBe(200);
+    expect(((await claim.json()) as SplitClaimResponse).job.access).toEqual({
+      harness: "claude-code",
+      auth: "app-key",
+      model: "opus",
+    });
+  });
+
+  // #1150-T14
+  it("does not hand a token that cannot be read to anybody: the turn ends with its reason", async () => {
+    const h = await start();
+    await saveToken(h);
+    // A row that was made for another workspace does not decrypt for this one.
+    await h.db
+      .updateTable("workspace_secrets")
+      .set({ ciphertext: "AAAA", nonce: "AAAA" })
+      .where("name", "=", "claude_code_oauth_token")
+      .execute();
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+    });
+
+    const claim = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+
+    expect(claim.status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+    });
+  });
+});

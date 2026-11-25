@@ -590,6 +590,12 @@ export type SubscriptionJobInput = Omit<
       model?: string;
       /** The most the turn may be worth at API prices, in US dollars as a decimal string (`--max-budget-usd`). */
       maxBudgetUsd: string;
+      /**
+       * #1150: the Claude Code OAuth token of the workspace, for a Worker that has no login of a device (a hosted VM, or a self-hosted
+       * runner without a login of its own). A secret: only this response holds it, it is never logged, and the Worker keeps it out of every
+       * result. Left out when the Worker has a login of its own.
+       */
+      oauthToken?: string;
     };
     /** The profile version names the harness (`ImplementerProfile` in the contract). */
     profile: {

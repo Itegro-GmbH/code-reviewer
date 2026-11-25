@@ -110,6 +110,10 @@ export function implementerServiceFor(workspaceId: string): ImplementerService {
     models: implementerModelsFor(workspaceId),
     queue: jobQueueFor(workspaceId),
     operatorCostLimitCents: operatorCostLimitCentsFrom(db),
+    // #1150: a task on the harness claude-code outside a runner environment runs on the Claude Code token of this workspace.
+    claudeCodeTokenConfigured: async () =>
+      (await getWorkspaceLlm().claudeCodeTokenFor(workspaceId).tokenForJob())
+        .state === "token",
   });
 }
 

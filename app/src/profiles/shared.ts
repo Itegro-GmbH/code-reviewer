@@ -10,6 +10,7 @@ import { getDatabase } from "../db/startup.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { onlineRunnersFrom } from "../runner-identity/online.ts";
 import { implementerModelsFor } from "../implementer/shared.ts";
+import { getWorkspaceLlm } from "../llm/shared.ts";
 import { operatorCostLimitCentsFrom } from "../review-settings/operator-cost-limit-source.ts";
 import { createProfileService, type ProfileService } from "./service.ts";
 
@@ -21,6 +22,10 @@ export function profileServiceFor(workspaceId: string): ProfileService {
     models: implementerModelsFor(workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     onlineRunners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),
+    // #1150: with a Claude Code OAuth token in the LLM keys, the harness `claude-code` is fine in a hosted environment too.
+    claudeCodeTokenConfigured: async () =>
+      (await getWorkspaceLlm().claudeCodeTokenFor(workspaceId).tokenForJob())
+        .state === "token",
     operatorCostLimitCents: operatorCostLimitCentsFrom(db),
   });
 }

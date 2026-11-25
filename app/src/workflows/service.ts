@@ -189,6 +189,11 @@ export type WorkflowServiceDependencies = {
    */
   onlineRunners?: () => Promise<readonly OnlineRunner[]>;
   /**
+   * #1150: whether the workspace has a Claude Code OAuth token it can use, so the validator lets a step on the harness `claude-code` run on a
+   * hosted environment or runner. Left out: the workspace has none.
+   */
+  claudeCodeTokenConfigured?: () => Promise<boolean>;
+  /**
    * #1105 (ADR 0007): the concrete runners of the workspace, so a step can name only one of them (`runner_unknown`) and the rules of a
    * runner are judged at the one it names. Left out: the workspace's runners are not known, and a step that names one is refused.
    */
@@ -345,6 +350,7 @@ export function createWorkflowService({
   mcpServers,
   mcpOAuth,
   onlineRunners,
+  claudeCodeTokenConfigured,
   runners,
   models,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
@@ -387,6 +393,10 @@ export function createWorkflowService({
       ...(onlineRunners === undefined
         ? {}
         : { onlineRunners: await onlineRunners() }),
+      // One read of one row.
+      ...(claudeCodeTokenConfigured === undefined
+        ? {}
+        : { claudeCodeToken: await claudeCodeTokenConfigured() }),
       ...(runners === undefined
         ? {}
         : { runners: await runnerInfos(runners, body) }),

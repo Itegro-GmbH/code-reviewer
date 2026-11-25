@@ -115,6 +115,36 @@ describe("who may say that a job ran on a subscription", () => {
     });
   });
 
+  // #1150-T09
+  it("books a claude-code turn that a hosted Worker ran on the workspace's token as a subscription: nothing of ours is spent", async () => {
+    const { h, records, unknown } = await start();
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: { ...PROFILE, harness: "claude-code" },
+    });
+    const claimed = await h.queue.claimNext("runner-a", IMPLEMENTER);
+    expect(claimed?.job.id).toBe(turn.job.id);
+
+    const answer = await h.complete(turn.job.id, claimed?.leaseToken ?? "", {
+      implementer: BLOCK,
+      usage: CLAIMS_SUBSCRIPTION,
+    });
+
+    expect(answer.status).toBe(200);
+    expect(await records.get(turn.job.id)).toMatchObject({
+      state: "settled",
+      costMicroUsd: null,
+      costBasis: "subscription",
+    });
+    expect(await unknown()).toEqual([]);
+    const [group] = await records.summarize(WHOLE);
+    expect(group).toMatchObject({
+      settledCount: 1,
+      knownCostMicroUsd: 0,
+      unknownCostCount: 0,
+    });
+  });
+
   // #856-T75
   it("does not believe the word of an OpenCode turn on a customer's runner", async () => {
     const { h, records, unknown } = await start();

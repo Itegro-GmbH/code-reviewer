@@ -1189,12 +1189,17 @@ function checkRunnerRules(
         `The environment ${shown(known.name)} runs on a runner, and the runners with its labels that are online do not announce what ${subject} asks for (${describeDemand(demandOfProfile(facts))}). The workflow can still be saved; the turn waits until a runner announces it.`,
       ),
     );
-  if (!onRunner && harnessNeedsRunner(harness))
+  // #1150: with a Claude Code OAuth token in the workspace's LLM keys the harness runs on a hosted environment too (its Sandbox VM runs on the token).
+  if (
+    !onRunner &&
+    harnessNeedsRunner(harness) &&
+    c.resolver.claudeCodeToken?.() !== true
+  )
     c.report(
       issue(
         where,
         "harness_needs_runner",
-        `${inline ? "The step" : `The profile ${shown(parseProfileRef(String(node.profile))?.name ?? "")}`} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
+        `${inline ? "The step" : `The profile ${shown(parseProfileRef(String(node.profile))?.name ?? "")}`} runs with the harness ${shown(harness)}, which needs a login of its own: the workspace has no Claude Code OAuth token (save one under LLM keys), and the environment ${shown(known.name)} is not on a self-hosted runner. Save the token, or use an environment that runs on a runner.`,
       ),
     );
 }
@@ -1247,12 +1252,17 @@ function checkRunnerRulesAtRunner(
         `The runner ${shown(known.name)} is online and does not announce what ${subject} asks for (${describeDemand(demandOfProfile(facts))}). The workflow can still be saved; the turn waits until it announces it.`,
       ),
     );
-  if (!selfHosted && harnessNeedsRunner(harness))
+  // #1150: as above, a Claude Code OAuth token of the workspace lets the harness run on a hosted runner.
+  if (
+    !selfHosted &&
+    harnessNeedsRunner(harness) &&
+    c.resolver.claudeCodeToken?.() !== true
+  )
     c.report(
       issue(
         where,
         "harness_needs_runner",
-        `${subject.charAt(0).toUpperCase()}${subject.slice(1)} runs with the harness ${shown(harness)}, which exists only on a self-hosted runner. The runner ${shown(known.name)} is a hosted one: name a self-hosted runner.`,
+        `${subject.charAt(0).toUpperCase()}${subject.slice(1)} runs with the harness ${shown(harness)}, which needs a login of its own: the workspace has no Claude Code OAuth token (save one under LLM keys), and the runner ${shown(known.name)} is a hosted one. Save the token, or name a self-hosted runner.`,
       ),
     );
 }
