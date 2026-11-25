@@ -338,3 +338,34 @@ def test_a_diff_job_process_is_told_no_proxy() -> None:
         await settle()
 
     run(scenario)
+
+
+# #1150-W02
+def test_the_worker_api_asks_for_the_login_of_the_workspace_only_without_a_device_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[dict[str, Any]] = []
+
+    class Recorder:
+        def __init__(self, base_url: str, credential: str, **options: Any) -> None:
+            made.append(options)
+
+        async def check_app(self, job_id: str) -> None:
+            raise WorkerSetupError(WorkerFailure.APP_UNREACHABLE, "stop here")
+
+    monkeypatch.setattr(worker, "HttpWorkerApi", Recorder)
+    from code_reviewer_runner.job_loop.settings import WorkerSettings
+
+    for environment, expected in (
+        ({"PATH": "/usr/bin"}, True),
+        ({"PATH": "/usr/bin", "CLAUDE_CODE_OAUTH_TOKEN": "a-device-login"}, False),
+        ({"PATH": "/usr/bin", "FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": "/home/r/token"}, False),
+    ):
+        asyncio.run(
+            worker.run_worker(
+                WorkerRequest(APP, JOB_ID, CREDENTIAL),
+                WorkerSettings(job_command=("x",)),
+                environment,
+            )
+        )
+        assert made[-1]["workspace_login"] is expected

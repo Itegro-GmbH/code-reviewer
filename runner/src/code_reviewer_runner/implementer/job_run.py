@@ -179,13 +179,16 @@ def device_harness(
     environment: Mapping[str, str],
     *,
     daemon: Callable[[Mapping[str, str]], LayerDaemon] = device_daemon,
+    workspace_login: ClaudeLogin | None = None,
 ) -> ReadyHarness | HarnessNotReady:
     """The default look at the device for a job that asks for Claude Code (#856). The login is the
     one the dispatcher handed this process (#980): the runner's own home exists only for a Worker
     that runs on the device itself."""
     home = Path(environment.get(RUNNER_HOME_VARIABLE) or "/nonexistent")
     try:
-        return ready_harness(daemon(environment), environment, home)
+        return ready_harness(
+            daemon(environment), environment, home, workspace_login=workspace_login
+        )
     except JobError as error:
         return HarnessNotReady(error.detail)
     except Exception:
@@ -612,7 +615,15 @@ def run_implementer_job(
         job.implementer.profile is not None
         and job.implementer.profile.harness == HARNESS_CLAUDE_CODE
     ):
-        looked = (seams.harness or device_harness)(environment)
+        # #1150: the token of the workspace is the login of a machine that has none of its own (`ready_harness`).
+        token = job.implementer.subscription.oauth_token if job.implementer.subscription else None
+        looked = (
+            seams.harness
+            or partial(
+                device_harness,
+                workspace_login=None if token is None else ClaudeLogin.oauth_token(token),
+            )
+        )(environment)
         if isinstance(looked, HarnessNotReady):
             return failure(
                 ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,

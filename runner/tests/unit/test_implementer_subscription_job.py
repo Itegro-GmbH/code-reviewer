@@ -180,3 +180,42 @@ def test_an_opencode_turn_still_needs_its_cost_its_entry_and_its_key() -> None:
 
         with pytest.raises(runner_job.JobError):
             parse(document)
+
+
+# #1150-J02
+def test_a_turn_on_the_token_of_the_workspace_is_read_and_the_token_is_never_printed() -> None:
+    token = "sk-" + "ant-" + "oat01-workspace-token-not-real-0123456789"
+    document = subscription_job(**{"implementer.subscription.oauthToken": token})
+
+    job = parse(document)
+
+    assert accepted_by_schema(document)
+    assert job.implementer.subscription is not None
+    assert job.implementer.subscription.oauth_token == token
+    assert token not in repr(job.implementer.subscription)
+    assert token not in repr(job.implementer)
+
+
+# #1150-J02
+def test_a_turn_without_a_token_has_none() -> None:
+    job = parse(subscription_job())
+
+    assert job.implementer.subscription is not None
+    assert job.implementer.subscription.oauth_token is None
+
+
+# #1150-J02
+@pytest.mark.parametrize(
+    "value",
+    ["", "two tokens", "line\nbreak", "ä-not-ascii", "x" * 4097, 12345, ["a"]],
+)
+def test_a_token_that_is_not_one_printable_token_is_refused_without_its_value(value: Any) -> None:
+    document = subscription_job(**{"implementer.subscription.oauthToken": value})
+
+    assert not accepted_by_schema(document)
+    with pytest.raises(runner_job.JobError) as refused:
+        parse(document)
+    assert refused.value.code is ErrorCode.INVALID_JOB
+    assert "oauthToken" in str(refused.value)
+    if isinstance(value, str) and value:
+        assert value not in str(refused.value)

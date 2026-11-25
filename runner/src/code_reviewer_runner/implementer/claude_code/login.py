@@ -150,6 +150,13 @@ def load_legacy_login(environment: Mapping[str, str], home: Path) -> ClaudeLogin
     )
 
 
+def holds_device_login(environment: Mapping[str, str]) -> bool:
+    """Whether a process was handed the login of a device (#1150): the token its dispatcher passed (`CLAUDE_CODE_OAUTH_TOKEN`) or the
+    path of the token file of the runner. A hosted VM and a runner without a login hold none: a turn on Claude Code runs on the
+    token of the workspace there. It says nothing about whether the login is usable."""
+    return bool(environment.get(OAUTH_VARIABLE)) or bool(environment.get(TOKEN_FILE_VARIABLE, "").strip())
+
+
 def login_source(environment: Mapping[str, str], home: Path) -> dict[str, str]:
     """What the job process of the runner needs to find the same login again (#856): the path of
     the token file (never its content), or, for a login that only the runner's environment holds,

@@ -111,18 +111,34 @@ def ready_harness(
     home: Path,
     *,
     agent_image: str = AGENT_IMAGE,
+    workspace_login: ClaudeLogin | None = None,
 ) -> ReadyHarness | HarnessNotReady:
     """The readiness of the manifest, looked at again for **this job** (#856): the login is read
     and the layer is looked for, nothing is built. A device that cannot run Claude Code refuses the
-    job; it never runs it with another harness."""
+    job; it never runs it with another harness.
+
+    **The order of the logins (#1150).** The device's own login wins: when this machine has one (a
+    credential of the store, a token file, the variable), it is the login of the job, usable or not
+    (a login that cannot be used refuses the job; it is never swapped for the workspace's token
+    behind the owner's back). Only a machine that has **no login at all** (a hosted Sandbox VM, a
+    runner that never had one) runs the job on `workspace_login`, the Claude Code OAuth token of
+    the workspace that the app put into the job. Such a machine has not necessarily built the layer
+    (a hosted VM never did, it is not part of any image of ours: we do not ship Claude Code): this
+    one case builds a missing layer, in the way a starting runner builds it."""
     login = load_login(environment, home)
+    build = False
     if isinstance(login, LoginProblem):
-        return HarnessNotReady(login.text)
+        if workspace_login is None or login.configured:
+            return HarnessNotReady(login.text)
+        login = workspace_login
+        build = True
     spec = layer_spec(environment)
     if isinstance(spec, str):
         return HarnessNotReady(spec)
     try:
-        layer = find_layer(daemon, agent_image, spec)
+        layer = ensure_layer(daemon, agent_image, spec) if build else find_layer(
+            daemon, agent_image, spec
+        )
     except LayerError as error:
         return HarnessNotReady(str(error))
     if layer is None:
