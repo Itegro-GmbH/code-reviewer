@@ -1,0 +1,29 @@
+{
+  "name": "cr-sandbox",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The Cloudflare Worker cr-sandbox (#1159): one Durable Object and one Container per VM, the cf-sandbox API of contracts/cf-sandbox.v1.json. A standalone pnpm project, not a member of the root workspace (README.md).",
+  "packageManager": "pnpm@10.17.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify": "pnpm typecheck && pnpm test && pnpm format:check",
+    "types": "wrangler types",
+    "dry-run": "wrangler deploy --dry-run --outdir dist"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261025.1",
+    "@types/node": "^24.19.2",
+    "ajv": "^8.20.0",
+    "prettier": "^3.9.10",
+    "typescript": "^5",
+    "vitest": "^5.0.3",
+    "wrangler": "^4"
+  }
+}

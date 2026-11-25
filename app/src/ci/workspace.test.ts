@@ -83,6 +83,18 @@ describe("the pnpm workspace", () => {
     expect(own.packages).toEqual(["."]);
   });
 
+  // #1159-T31
+  it("keeps the Cloudflare Worker out as well: its own lockfile and workspace root, so the app's and the Dispatcher's installs never pull wrangler", () => {
+    expect(workspace.packages).not.toContain("cloudflare/sandbox");
+    expect(existsSync(`${repoRoot}cloudflare/sandbox/pnpm-lock.yaml`)).toBe(
+      true,
+    );
+    const own = parse(
+      readText("cloudflare/sandbox/pnpm-workspace.yaml"),
+    ) as Workspace;
+    expect(own.packages).toEqual(["."]);
+  });
+
   // #724-T02
   it("writes every version the projects share once, in the catalog, and the lockfile records the same catalog", () => {
     const catalog = workspace.catalog ?? {};
@@ -131,9 +143,10 @@ describe("the installs", () => {
       for (const line of text.split("\n")) {
         const command = line.trim().replace(/^run:\s*/, "");
         if (!command.startsWith("pnpm install")) continue;
-        // The landing page is its own pnpm project (website-workflow.test.ts).
+        // The landing page is its own pnpm project (website-workflow.test.ts), and so is the Cloudflare Worker (cloudflare/sandbox, #1159).
         if (
-          path.endsWith("ci.yml") &&
+          (path.endsWith("ci.yml") ||
+            path.endsWith("cloudflare-sandbox.yml")) &&
           command === "pnpm install --frozen-lockfile"
         )
           continue;
@@ -171,8 +184,12 @@ describe("the installs", () => {
     for (const [path, text] of allActionFiles()) {
       for (const match of text.matchAll(/cache-dependency-path: (\S+)/g)) {
         const value = match[1];
-        // The landing page keeps its own lockfile.
-        if (value === "website/pnpm-lock.yaml") continue;
+        // The landing page and the Cloudflare Worker keep their own lockfiles.
+        if (
+          value === "website/pnpm-lock.yaml" ||
+          value === "cloudflare/sandbox/pnpm-lock.yaml"
+        )
+          continue;
         expect(value, path).toBe("pnpm-lock.yaml");
       }
     }

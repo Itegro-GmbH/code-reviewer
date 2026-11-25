@@ -18,6 +18,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [The Incus launcher](#the-incus-launcher-1007): the one local backend (Runner v2, #1007): two unprivileged Incus instances per job, the inner wall in the trusted one, `narrow` as an unplug, the control channel over a unix socket, the quota, the clean-up by mark.
 - [Claude Code on the Incus backend](#claude-code-on-the-incus-backend-1023): the harness installed on the device into the golden image, announced from it, and the local credential of a job on Incus (#1023).
 - [The outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979): the static nft table (printed in full) and the proxy of the local Dispatcher that is the only way out of a job's VM (#979).
+- [Cloudflare placement: the Worker and the image](#cloudflare-placement-the-worker-and-the-image-1159): the Worker `cr-sandbox`, its Durable Objects and Container image, the outer wall, the deployment, and how a larger size becomes active (#1159, epic #1157).
 - [Spike: Cloudflare Containers](#spike-cloudflare-containers-1149): a microVM per job on Cloudflare as a third hosted placement, with dockerd, Sysbox and the outbound handler as the door, measured in a real Container (#1149).
 - [Spike: Incus (LXD) backend](#spike-incus-lxd-backend-1005): the same job on a machine without `/dev/kvm`, two unprivileged system containers instead of a microVM, measured on the DevBox (#1005).
 
@@ -3351,6 +3352,105 @@ At the end: no instance, no image (the two, `spike-docker` and the Ubuntu base),
 host proxy, the decoy and the control endpoint stopped, the downloads and the exported image (840 MB) deleted. The owner's `default` pool, the profile `default` and `incusbr0` were never changed. `/` is at 69 % as before. **A mistake of the spike:** a first timing loop that went to the background after its tool call timed out kept starting `incus init` jobs for a quarter of an hour; its two
 extra timings (16.7 and 18.4 s) overlapped another init and are not used for the headline; the quiet runs are.
 
+
+## Cloudflare placement: the Worker and the image (#1159)
+
+Epic #1157 makes a Cloudflare Container one more **hosted placement** next to Vercel Sandbox: the existing Dispatcher keeps claiming every hosted job, and its
+`SandboxService`/`SandboxFleet` for this placement (#1158) talk over HTTPS to a small Worker, **`cr-sandbox`**, that owns one Durable Object and one Container (a
+microVM) per VM. This section is the Worker's and the image's side: [`cloudflare/sandbox/`](../cloudflare/sandbox/README.md). It is built from the measured spike below
+(the code of [`spikes/cloudflare/`](../spikes/cloudflare/README.md): the Durable Object, the outbound handler, the Sysbox patch, the boot, the CA) and is **not** a second
+dispatcher: nothing in the claim, the queue or the VM steps changes.
+
+```
+ Dispatcher (Vercel) ── HTTPS, Bearer CF_SANDBOX_TOKEN ──▶ Worker cr-sandbox   (contracts/cf-sandbox.v1.json)
+   claim, per-job credential, VM steps,                      │  POST /v1/vms … exec … processes … network … DELETE, GET /v1/vms, GET /health
+   reaper, exit report (all unchanged)                       ├─ Durable Object CrSandboxVm   "<vm name>": one Container, policy, alarm
+                                                             ├─ Durable Object CrSandboxRegistry "global": listing, cap, sweep
+                                                             └─ Door (outbound handler): every HTTP/HTTPS request of a Container, rule read per request
+                                                                         ▼
+                                              Container (microVM, enableInternet: false), the image of cloudflare/sandbox/image/
+```
+
+### What was decided (the epic) and what it means
+
+- **Beta accepted**: the `durable_object` scheduling policy of Cloudflare Containers (public beta). The Worker is written for its failures: a Container can be stopped by the
+  platform, a Durable Object can restart and lose its in-memory process handles (a process it lost is reported as ended with exit code 255; the lease and the heartbeat of the
+  App already cover a lost job).
+- **Layout P1**: the hosted VM's content (Control, the doors, the agent under Sysbox) runs inside **one** Container. **What that means for isolation**: the walls are the
+  microVM towards everything else (the hypervisor, per job, like Vercel's and Firecracker's), **Sysbox (patched) between the agent and the control side**, the container hardening
+  of the Worker/door/agent specs as on Vercel, and the **outbound handler** as the outer network wall. Root in the Container itself is not confined from the VM (spike, Q2): whatever
+  is secret and shares the Container with the agent is the agent's unless Sysbox stands between them, exactly as on the hosted VM. **P2** (nothing secret in the microVM: the handler
+  would hold the per-job credential, the git token and the model key) stays the target for later and needs a rewrite of how Control gets its secrets.
+- **Outer wall = the outbound handler.** The Container starts with `enableInternet: false`; all its HTTP and HTTPS arrives at `Door` (`src/door.ts`), which terminates TLS and reads the
+  VM's policy from its Durable Object **on every request**: `PUT /v1/vms/{name}/network` is effective for the next request (no connection is closed, no `ack` is waited for). A VM starts
+  with `allow-all`; the Dispatcher's VM steps narrow it with `policyFor` exactly as on Vercel ("no outer wall, no token" holds). The matching rule is the one of
+  [`contracts/network-rule-examples.json`](../contracts/network-rule-examples.json) (a name matches an entry that is exactly it, or `*.suffix` when strictly below it; ports 80 and 443
+  only; an IP address in any spelling is never a name) and the Worker's test runs its verdicts. On top of any policy the wall refuses private, loopback, link-local and metadata addresses,
+  local names, and the reserved `.door` names (the spike's `model.door`; layout P1 serves none, so nothing a Container sends is ever given a credential here). A redirect is never followed
+  (`redirect: "manual"`): the Container asks again and the wall judges the next name.
+- **Sizes are configuration.** `INSTANCE_TYPES` (wrangler `vars`) lists what the Worker accepts: `standard-4` now (4 vCPU, 12 GiB, 20 GB, the account default). `GET /health` publishes
+  the list; a `create` with another type is a 400. The Dispatcher's `CF_SANDBOX_INSTANCE_TYPES` maps vCPU counts to these names.
+
+### The image
+
+`cloudflare/sandbox/image/Dockerfile` is the golden snapshot's recipe run unchanged on the same Ubuntu Base 26.04.1 as the local VM's root file system
+(`docker/vm/rootfs/build.sh`): `image/prepare-context.sh` writes the recipe with the Dispatcher's own code (`dispatcher/src/vm-artifacts/recipe-main.ts`: Docker, buildx, the pinned
+Sysbox 0.7.1 package checked by sha256, `daemon.json`, `vm-prepare.sh` and `sysbox-prepare.sh` at their golden-snapshot paths), so **no version is written a second time**.
+What is added for a Container, and nothing else:
+
+| What | Where | Why |
+|---|---|---|
+| **Patched `sysbox-mgr`** | `/usr/bin/sysbox-mgr`, `/var/modules` (empty, read-only) | The Container's kernel has no module support, so stock `sysbox-mgr` dies on `open /proc/modules`. `image/files/patch-sysbox-mgr.sh` swaps that one string for `/var//modules` (same length: a longer one crashed the binary in the spike), after checking the sha256 of the original and of the result, and fails the build otherwise |
+| Boot script | `/usr/local/sbin/cr-sandbox-boot.sh` | Run once by the Worker at `create` (below) |
+| The Worker and agent images | `/opt/cr-sandbox/inner/{worker,agent}.tar.zst` (deleted after the load) | `docker save` of the two targets of `runner/Dockerfile` with the golden snapshot's tags (`code-reviewer-worker:golden`, `code-reviewer-agent:golden`), built in CI by `image/build-inner.sh`. **No Docker Hub pull at run time** (429 for the platform's addresses) |
+| `tini` as init | `/usr/bin/tini` | The Container's entrypoint (`tini -- sleep infinity`); everything else starts with `exec` |
+
+**The boot** (`POST /v1/vms` answers when it ends, up to 300 s): (1) the **intercept CA**: the handler terminates TLS, Cloudflare writes its CA to
+`/etc/cloudflare/certs/cloudflare-containers-ca.crt` when the handlers are registered before the start; it goes into the system store and three files are made for the VM steps:
+`/etc/cr-sandbox/ca-bundle.crt` (system bundle plus the CA), `intercept-ca.crt` (the CA alone) and `ca.env` (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`,
+`REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`). The VM steps mount the bundle read-only into the Worker container, the door containers and the agent container and set those variables
+(without the CA a tool with its own trust store fails on every host: spike, Q3). (2) the **images**: `vm-prepare.sh` (the cgroup fix and `dockerd`) starts the daemon, both archives are
+loaded in parallel, the tags are checked, the archives are deleted (1.4 GB of the 20 GB disk) and the daemon is stopped cleanly. **The daemon is not running when `create` answers**: the
+Dispatcher's steps run as on Vercel (run directories on tmpfs, `vm-prepare.sh`, the image check, `sysbox-prepare.sh`, the work volume). The load costs about two minutes of a
+turn's start (spike: 19.6 s per 511 MB on 2 vCPU; 4 vCPU here); a Cloudflare container snapshot per image version would remove it and is a follow-up, not a change of the API.
+
+`GET /health` is `{ ok, imageVersion, workerFeatures, instanceTypes, workerImageId?, agentImageId? }`: `imageVersion` is the git SHA of the build; **`workerFeatures` and the two image ids are
+read from the images by the build** (`image/self-check.sh` runs the Container image privileged on the CI runner, loads both archives with the real boot script and asks the Worker image for
+its `WORKER_FEATURES` as the golden snapshot's `worker_features` step does) and handed to the deployment as `--var`s. The Dispatcher gates the claim features that depend on the image by
+`workerFeatures` and can compare `docker image inspect` in the VM with the ids.
+
+### Lifecycle of a VM
+
+`create` (registry: reserve a place, refused with 429 above `MAX_VMS` (8) and with 400 for a name that exists; the Durable Object registers the handlers, starts the Container, runs the boot) →
+`exec` (to its end; stdout and stderr keep their last 262144 bytes; a timeout kills the command and answers 124) and **processes** (`start`, `writeStdin`, `closeStdin`, `wait` with a
+long poll of at most 25 s; the Durable Object holds them) → `DELETE` (destroys the Container and forgets everything; a VM that is gone is not an error). Three clocks end a VM that nobody
+stops: the Durable Object's **alarm every 45 s** (code inside the Container is not activity for the platform; an alarm that runs more often than the **120 s inactivity timeout** is, and
+the timeout is **set again in the constructor** because it does not survive a restart: spike finding) destroys the Container at `timeoutMs`; the **registry's sweep** (every 5 minutes)
+destroys a VM that is 5 minutes past its deadline or was `pending` for 10 minutes; and the Dispatcher's reaper lists with `GET /v1/vms?namePrefix=&tag=k:v` and stops what is not
+its own. Everything is in `src/` as small modules (`vm-controller.ts`, `registry-controller.ts`, `handler.ts`, the pure `policy.ts`, `lifecycle.ts`, `validate.ts`) that the
+Durable Object classes only adapt, so that the logic is unit-tested without Cloudflare.
+
+### Deployment
+
+`.github/workflows/cloudflare-sandbox.yml`: for a pull request that changes what the image is made of (`ci.yml`, the `cloudflare` filter) it runs the Worker's tests and builds **and runs**
+the image once on the runner (no push, no deploy, no secret) and dry-runs the deployment; on a **push to main** (part of the release) and by hand on main it then runs `wrangler deploy`
+(wrangler builds the Container image from the same Dockerfile and pushes it to Cloudflare's registry) and sets the Worker secret with `wrangler secret put CF_SANDBOX_TOKEN` (stdin).
+Only in this repository (the old repository name must not deploy). **The owner sets three repository secrets**: `CLOUDFLARE_API_TOKEN` (a token of the account "Itegro GmbH" that may deploy
+Workers, Durable Objects and Containers), `CLOUDFLARE_ACCOUNT_ID` and `CF_SANDBOX_TOKEN` (at least 32 random characters; the Dispatcher's `CF_SANDBOX_TOKEN` is the same value). A deployment
+whose secrets are missing fails in its first step, naming them, before anything is built. **Account guard** (a test holds it): every resource is named `cr-sandbox*` (the Worker, the
+`CrSandbox*` classes, the container application and the image repository that wrangler derives from them); nothing touches the spike's `cr-spike-*` (the lead deletes it when Cloudflare
+Support has closed its case), `reserwirt-preview-*`, `office-preview`, billing or plans; the workflow calls wrangler for `deploy` and `secret` only.
+
+**How to enable a larger size** once Cloudflare grants it (a support case for 8 vCPU / 32 GiB / 100 GB is open): add its name to `INSTANCE_TYPES` in `cloudflare/sandbox/wrangler.jsonc`
+(`"standard-4,custom-8"`), and, if it is not one of Cloudflare's own type names, its resources to `CUSTOM_INSTANCE_TYPES` (`{"custom-8":{"vcpu":8,"memoryMib":32768,"diskMb":100000}}`);
+deploy; then add `8=custom-8` to the Dispatcher's `CF_SANDBOX_INSTANCE_TYPES` and `8` to the App's `CLOUDFLARE_RUNNER_SIZES`. No code changes.
+
+**Re-deriving the Sysbox patch** (a Sysbox bump fails the build in `patch-sysbox-mgr.sh` on purpose): download the pinned package, `dpkg-deb -x` it, `sha256sum usr/bin/sysbox-mgr` is the
+new `original_sha256`; replace the one `/proc/modules` with `/var//modules` in a copy and hash that for `patched_sha256`; update the two hashes in the script and in `image/self-check.sh`.
+
+**Not proven yet** (needs the first deployment, by the lead): a real run of the Dispatcher's VM steps in this image (the first run is the live test of the epic), the CA in every tool of a real
+repository, a job longer than the spike's, and the time of the first image load on a loaded host. Follow-ups: a container snapshot per image version to remove the two-minute load, P2,
+and the work volume's reserve disk on btrfs (the Dispatcher's slice).
 
 ## Spike: Cloudflare Containers (#1149)
 

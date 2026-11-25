@@ -41,6 +41,7 @@ jobs:
       workflows: ${{ steps.filter.outputs.workflows }}
       licenses: ${{ steps.filter.outputs.licenses }}
       website: ${{ steps.filter.outputs.website }}
+      cloudflare: ${{ steps.filter.outputs.cloudflare }}
       vm: ${{ steps.filter.outputs.vm }}
       program: ${{ steps.filter.outputs.program }}
     steps:
@@ -59,6 +60,7 @@ jobs:
               - '**'
               - '!runner/**'
               - '!website/**'
+              - '!cloudflare/**'
               - '!*.md'
               - '!fakes/**/*.md'
             # The Dispatcher (#327) also reads contracts/ and fakes/, so those count; the app and the
@@ -68,12 +70,14 @@ jobs:
               - '!app/**'
               - '!runner/**'
               - '!website/**'
+              - '!cloudflare/**'
               - '!*.md'
               - '!fakes/**/*.md'
             runner:
               - '**'
               - '!app/**'
               - '!website/**'
+              - '!cloudflare/**'
               - '!**/*.md'
             # What the engine suite (runner/tests/engine, 3 jobs of engine.yml) tests: the runner, the
             # fakes and the contracts it runs against, and its own workflow. One brace pattern, because
@@ -90,6 +94,11 @@ jobs:
             # The landing page (#696): its own job, and the repository-wide checks of the licenses job.
             website:
               - 'website/**'
+            # The Cloudflare Worker cr-sandbox and its Container image (#1159, cloudflare/sandbox/, a pnpm project of its own like website/): the
+            # image holds the golden snapshot's recipe, the two prepare scripts, the Worker's Dockerfile and the Worker and agent images built from
+            # the runner, so a change to any of them is a change of the image. One brace pattern, because the quantifier "every" would read a list as "and".
+            cloudflare:
+              - '{cloudflare/**,contracts/cf-sandbox.v1.json,contracts/network-rule-examples.json,docker/sandbox/**,docker/vm/pins.env,docker/vm/rootfs/packages.txt,dispatcher/src/vm-artifacts/recipe*.ts,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,dispatcher/src/snapshot/worker-features.ts,runner/Dockerfile,.github/workflows/cloudflare-sandbox.yml}'
             # What the Linux VM artifacts (#976) are made from: their own files, the golden snapshot's recipe they run unchanged (the pins
             # and scripts of the pipeline, the two prepare scripts) and their workflow. This is the one job on a KVM runner and takes
             # about half an hour, so nothing else starts it. The four files that render the rulesets the guest loads (the model door's, the network door's, the Setup
@@ -850,6 +859,18 @@ jobs:
     with:
       release: ${{ fromJSON(github.run_number) }}
 
+  # The Cloudflare Worker cr-sandbox and its Container image (#1159, epic #1157): the Worker's types and tests, and the image built AND run once on
+  # the runner (the Worker and agent images, the boot with the real `docker load`, a dry run of the deployment). Only for a pull request that changes
+  # what the image is made of (the `cloudflare` filter); the deployment is a push to main in the same workflow, never from here. No secret, the
+  # read-only token.
+  cloudflare-sandbox:
+    name: "Cloudflare sandbox: Worker tests, image build and run"
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.cloudflare == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cloudflare-sandbox.yml
+
   actionlint:
     name: Lint workflow files
     needs: changes
@@ -866,7 +887,7 @@ jobs:
   # fails on any failed or cancelled job and accepts skipped jobs (path filter).
   ci-passed:
     name: All checks passed?
-    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, vm-artifacts, runner-program, actionlint]
+    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, vm-artifacts, runner-program, cloudflare-sandbox, actionlint]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

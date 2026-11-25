@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/cf-sandbox.v1.json",
+  "title": "Code Reviewer cf-sandbox HTTP API, version 1",
+  "description": "The API of the Cloudflare Worker `cr-sandbox` (cloudflare/sandbox/, #1159) that the Dispatcher's Cloudflare `SandboxService` and `SandboxFleet` (dispatcher/src/launchers/cf-sandbox.ts, #1158) talk to (epic #1157, docs/runner.md, section \"Cloudflare placement\"). One VM is one Durable Object and one Cloudflare Container (a microVM). Base URL `CF_SANDBOX_URL`; every request but `GET /health` carries `Authorization: Bearer <CF_SANDBOX_TOKEN>` (at least 32 characters, compared in constant time); a wrong or missing one is `401` with `{\"error\":\"auth_failed\"}` and nothing else. JSON in and out. A failure is `{ \"error\": <kind> }` (`ErrorResponse`, the kinds of `SANDBOX_FAILURE_KINDS` of dispatcher/src/launchers/sandbox-service.ts) with the matching status: 400 `rejected` (a body or a name that is not valid, a name that exists already), 401 `auth_failed`, 404 `not_ready` (no such VM or process, or the VM is not running), 429 `rate_limited` (the Worker's cap of VMs is reached), 503 `unavailable` (anything else, also the platform's own failures). No body ever carries a text of the platform, a path or a secret. Routes and bodies: POST /v1/vms (CreateRequest, 201 CreateResponse; answers after the Container runs, the intercept CA is installed and the Worker and agent images are loaded: up to 300 s, so the caller's timeout for this one call is at least 300000 ms), POST /v1/vms/{name}/exec (ExecRequest, 200 ExecResponse), POST /v1/vms/{name}/processes (StartProcessRequest, 201 StartProcessResponse), POST /v1/vms/{name}/processes/{id}/stdin (StdinRequest, 204), POST /v1/vms/{name}/processes/{id}/stdin/close (204), GET /v1/vms/{name}/processes/{id}?waitMs=0..25000 (200 ProcessStatus), PUT /v1/vms/{name}/network (NetworkRequest, 204, effective for the next request of the Container), DELETE /v1/vms/{name} (204, a VM that is gone or never existed is not an error), GET /v1/vms?namePrefix=&tag=k:v (200 ListResponse), GET /health (no credential, 200 HealthResponse). The VM ends by itself at its `timeoutMs`. Everything in the Container runs as root, so `sudo` only keeps parity with the Vercel port. A reader ignores fields it does not know. The image's layout that the Dispatcher's VM steps rely on is in `x-vm-image`.",
+  "version": 1,
+  "x-vm-image": {
+    "description": "What the Container image holds, for the VM steps (docs/runner.md, \"Cloudflare placement\"). Everything that exists on the Vercel golden snapshot exists here at the same path and tag: the two prepare scripts, the daemon configuration, the Worker and agent images in the Docker store (loaded before `POST /v1/vms` answers; the daemon is NOT running when it answers, `vm-prepare.sh` starts it). What differs: the outbound handler terminates TLS, so every container of the VM needs the intercept CA (`caBundle`: the system bundle plus the CA, `interceptCa`: the CA alone; `caEnvFile`: KEY=VALUE lines that set SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, GIT_SSL_CAINFO, REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE to the bundle's path). The VM steps bind-mount `caBundle` read-only into the Worker container, the door containers and the agent container at the same path and set those variables there. The root file system is 20 GB on the standard-4 type (btrfs, the Worker and agent images take about 3.5 GB of it); the work volume's reserve disk of the Implementer is the Dispatcher's to size against that.",
+    "caBundle": "/etc/cr-sandbox/ca-bundle.crt",
+    "interceptCa": "/etc/cr-sandbox/intercept-ca.crt",
+    "caEnvFile": "/etc/cr-sandbox/ca.env",
+    "vmPrepare": "/usr/local/sbin/vm-prepare.sh",
+    "sysboxPrepare": "/usr/local/sbin/sysbox-prepare.sh",
+    "workerImage": "code-reviewer-worker:golden",
+    "agentImage": "code-reviewer-agent:golden",
+    "user": "root",
+    "sysbox": "patched: the one check of /proc/modules in sysbox-mgr reads an empty file (the Container's kernel has no module support), see cloudflare/sandbox/README.md"
+  },
+  "$defs": {
+    "VmName": {
+      "description": "Unique for one launch, never reused. The Durable Object is named by it.",
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,63}$"
+    },
+    "InstanceType": {
+      "description": "One of the types the Worker is configured with (`HealthResponse.instanceTypes`): `standard-4` at first. A type the Worker does not list is a 400.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "Tags": {
+      "description": "At most 16 tags; the reaper lists by one of them.",
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]{1,64}$" },
+      "additionalProperties": { "type": "string", "maxLength": 256 }
+    },
+    "Label": {
+      "description": "A stable name of the step, for logs; never the command text.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "NetworkPolicy": {
+      "description": "`NetworkPolicy` of dispatcher/src/network/rule.ts. `allow-all` is the policy a VM starts with; `deny-all` refuses everything; a list allows the names it holds: exactly the name, or a `*.suffix` entry for the names strictly below the suffix (`*.pythonhosted.org` matches `files.pythonhosted.org`, never `pythonhosted.org`), on the ports 80 and 443 only, never an IP address, never a private address. Names are lower-case ASCII. contracts/network-rule-examples.json is the shared set of verdicts.",
+      "oneOf": [
+        { "const": "allow-all" },
+        { "const": "deny-all" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allow"],
+          "properties": {
+            "allow": {
+              "type": "array",
+              "maxItems": 200,
+              "items": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^(\\*\\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "instanceType", "timeoutMs", "tags"],
+      "properties": {
+        "name": { "$ref": "#/$defs/VmName" },
+        "instanceType": { "$ref": "#/$defs/InstanceType" },
+        "timeoutMs": {
+          "description": "The VM's own lifetime: it is destroyed this long after it was created (the backstop that ends it when nobody stops it).",
+          "type": "integer",
+          "minimum": 60000,
+          "maximum": 21600000
+        },
+        "tags": { "$ref": "#/$defs/Tags" }
+      }
+    },
+    "CreateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "instanceType"],
+      "properties": {
+        "name": { "$ref": "#/$defs/VmName" },
+        "instanceType": { "$ref": "#/$defs/InstanceType" }
+      }
+    },
+    "ExecRequest": {
+      "description": "A command as an argument vector, never shell text. Runs to its end (or `timeoutMs`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "cmd", "args"],
+      "properties": {
+        "label": { "$ref": "#/$defs/Label" },
+        "cmd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "args": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "type": "string", "maxLength": 65536 }
+        },
+        "sudo": { "type": "boolean" },
+        "timeoutMs": {
+          "description": "Default 120000. When it runs out the command is killed and the answer is 200 with exitCode 124.",
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000
+        }
+      }
+    },
+    "ExecResponse": {
+      "description": "stdout and stderr each keep their LAST 262144 bytes (decoded as UTF-8, invalid bytes replaced); `truncated` is true when either was cut.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exitCode", "stdout", "stderr"],
+      "properties": {
+        "exitCode": { "type": "integer" },
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "StartProcessRequest": {
+      "description": "A command with its stdin open that outlives the HTTP request: the Durable Object holds it and keeps the Container alive.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "cmd", "args"],
+      "properties": {
+        "label": { "$ref": "#/$defs/Label" },
+        "cmd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "args": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "type": "string", "maxLength": 65536 }
+        },
+        "sudo": { "type": "boolean" }
+      }
+    },
+    "StartProcessResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["processId"],
+      "properties": {
+        "processId": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" }
+      }
+    },
+    "StdinRequest": {
+      "description": "At most 1 MiB per call (UTF-8 text).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data"],
+      "properties": { "data": { "type": "string", "maxLength": 1048576 } }
+    },
+    "ProcessStatus": {
+      "description": "`running: true` after `waitMs` (at most 25000, default 0) with the process still running; `running: false` with its exit code once it ended. A process whose Durable Object lost it (a restart of the object) is reported as ended with exitCode 255.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["running"],
+          "properties": { "running": { "const": true } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["running", "exitCode"],
+          "properties": {
+            "running": { "const": false },
+            "exitCode": { "type": "integer" }
+          }
+        }
+      ]
+    },
+    "NetworkRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy"],
+      "properties": { "policy": { "$ref": "#/$defs/NetworkPolicy" } }
+    },
+    "ListedVm": {
+      "description": "A VM as the registry lists it, for the reaper (`ListedVm` of dispatcher/src/launchers/sandbox-service.ts). `status` is `pending` (being created) or `running`; a destroyed VM is not listed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "createdAtMs", "status", "timeoutMs", "tags"],
+      "properties": {
+        "name": { "$ref": "#/$defs/VmName" },
+        "createdAtMs": { "type": "integer", "minimum": 0 },
+        "status": { "type": "string", "enum": ["pending", "running"] },
+        "timeoutMs": { "type": "integer", "minimum": 0 },
+        "tags": { "$ref": "#/$defs/Tags" }
+      }
+    },
+    "ListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vms"],
+      "properties": {
+        "vms": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ListedVm" }
+        }
+      }
+    },
+    "HealthResponse": {
+      "description": "`imageVersion` is the git SHA of the build (the Dispatcher logs it). `workerFeatures` are the features the Worker image inside the Container image lists (`WORKER_FEATURES` of the runner), read from the image at build time like the golden snapshot's manifest; the Dispatcher gates the claim features that depend on the image by them. `workerImageId` and `agentImageId` are the Docker ids (`sha256:...`) of the two inner images, the value `docker image inspect --format {{.Id}}` answers in the VM (what the Dispatcher's image check compares with); they are absent only for a build without inner images.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "imageVersion", "workerFeatures", "instanceTypes"],
+      "properties": {
+        "ok": { "const": true },
+        "imageVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "workerFeatures": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+        },
+        "instanceTypes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/InstanceType" }
+        },
+        "workerImageId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "agentImageId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "rate_limited",
+            "quota_exceeded",
+            "network",
+            "unavailable",
+            "snapshot_missing",
+            "region_mismatch",
+            "not_ready",
+            "rejected",
+            "auth_failed"
+          ]
+        }
+      }
+    }
+  }
+}
