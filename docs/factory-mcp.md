@@ -8,7 +8,7 @@ There are no API keys. You connect an app by signing in with your normal web log
 (OAuth 2.1 with PKCE, the authorization flow of the MCP specification). You can end any connection later in **Settings, General, Connected AI apps**.
 
 This slice (#1144) ships the server, the sign-in flow and three orientation tools: `whoami`, `describe_factory`, `get_lane_schema`. The tools that look at and
-change projects, lanes, runs, ToDos, runners, agent MCP servers, models and costs come in the other slices of epic #1143 (runs, ToDos and tickets: see below); `describe_factory` always lists the
+change projects, lanes, runs, ToDos, runners, agent MCP servers, models and costs come in the other slices of epic #1143 (projects and lanes, runs, ToDos and tickets: see below); `describe_factory` always lists the
 tools the server has.
 
 ## Connect Claude Code
@@ -66,6 +66,33 @@ is invited again: they connect again and approve again.
 | `whoami` | read | The person, the workspace, the role, the approved scope and the AI app of this connection. |
 | `describe_factory` | read | What projects, lanes, runs, ToDos and runners are; the rules of the connection; what cannot be done through MCP; every tool with whether this connection can call it. |
 | `get_lane_schema` | read | Everything needed to write a lane (workflow) document the validator accepts: the overview (how to write one, triggers, connectors, limits), the JSON Schema, the result schema, an example, and every chapter of [`workflows.md`](workflows.md), also in parts (`section: "five-kinds-of-node/the-agent-step-kind-agent"`). |
+
+## Projects and lanes (#1145)
+
+The tools that look at and change projects and lanes. They call the same services as the web app's own routes (`POST /projects`, `PUT /projects/:id`, `/workflows`), so every rule
+is the app's: the validator with the workspace's runners, models and agent MCP servers, the limits, the project's state, the change note of a version. Reading is open to every
+member; anything that changes needs an Owner or Admin (`manage_workflows` for lanes, `manage_projects` for projects), as in the web app. A lane is the same JSON document the app stores and
+`get_lane_schema` describes; ids are the ones the web app shows. A lane's page in the web app is in every answer as `url`.
+
+| Tool | Scope | What it does |
+| --- | --- | --- |
+| `list_projects` | read | The projects with their repository and `status`, and `repositoriesWithoutProject` (what `create_project` can still be called for). |
+| `get_project` | read | One project: repository, ticket source (GitHub issues with the optional board, or a Jira project) and its lanes. |
+| `create_project` | control | Creates the project of a repository (`repositoryId`), optionally with a GitHub `board`, a Jira `ticketSource` and built-in `lanes` to copy. Goes through the route's own handler: a bad body answers `invalid_input` with every problem in `issues` and the names that would have been accepted. |
+| `update_project` | control | Sets, changes or clears (`null`) the board of a project; checked against the repository's boards. |
+| `archive_project` | control | Switches a project off and keeps it (lanes, tickets, settings). |
+| `list_lanes` | read | The lanes of one project, or of every active project. |
+| `get_lane` | read | One lane with the document of its current (or an older) version and the list of versions with their change notes. |
+| `validate_lane` | read | Checks a document and stores nothing. A document with problems is a normal answer: `valid: false` and every error with its JSON pointer `path`, `code`, `message` and the names that were `available`. |
+| `create_lane` | control | Saves a new lane in a project as version 1 (needs a `description`). |
+| `update_lane` | control | Saves a new version. Either the whole `document`, or `edits` (`{ path, value }` JSON pointer changes applied to the version named in `expectedVersion`, for example `/steps/1/runner` to another runner id or `/steps/1/harness` to `claude-code`). `changeDescription` is required. `expectedVersion` makes a save over somebody else's a `conflict` with the `current` version. |
+| `list_lane_versions`, `get_lane_version` | read | The saved versions of a lane, and the document of one of them. |
+| `restore_lane_version` | control | Saves an old version's document as a new version (history is never rewritten); it is validated again against the workspace as it is now. |
+| `archive_lane` | control | Archives a lane: it leaves the list and is not started; versions stay readable. |
+
+A save that does not validate (`create_lane`, `update_lane`, `restore_lane_version`) answers `invalid_input` with `code: "WORKFLOW_INVALID"`, `errors` (every problem) and `truncated`, and stores
+nothing; a runner id that does not exist lists the ids that do in `available`. Other codes: `conflict` (a stale `expectedVersion`, a name the project has, an archived lane or a switched-off
+project), `limit_reached` (lanes per project, archived lanes, versions per lane, with the `maximum`), `not_found`.
 
 ## Runs, ToDos and tickets (#1146)
 
