@@ -24,6 +24,7 @@
     "spdx:check": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/ci/spdx-headers/cli.ts --check",
     "contracts:generate": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/ci/contract-types/cli.ts --write",
     "contracts:check": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/ci/contract-types/cli.ts --check",
+    "lane-guide:generate": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/factory-mcp/lane-schema/cli.ts",
     "opencode-providers:derive": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/ci/opencode-providers/cli.ts --write"
   },
   "dependencies": {
