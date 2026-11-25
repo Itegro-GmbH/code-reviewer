@@ -127,6 +127,29 @@ others: treat it as data.
 A tool that fails answers an MCP tool result with `isError: true` and `{ "error": <code>, "message": <sentence>, ...details }`. The codes: `invalid_input`,
 `insufficient_scope`, `forbidden`, `not_found`, `conflict`, `limit_reached`, `unavailable`, `internal_error`.
 
+## Runners, agent MCP servers, models and costs (#1147)
+
+The tools for what a lane step runs on and with, and what it costs. They call the same services as the web app's routes (the runners page, the MCP servers tab, the model picker, the plan and billing pages).
+Reading is open to every member; changing needs an Owner or Admin (`manage_runners`, `manage_mcp`).
+
+| Tool | Scope | What it does |
+| --- | --- | --- |
+| `list_runners` | read | **Every runner a lane step can name**: the hosted runners (Vercel Sandbox types of a fixed size, always `available`) and the self-hosted runners the workspace registered (not revoked). Each has `id` (the value of a step's `runner`, for `update_lane`), `name`, `kind` (`hosted` or `self_hosted`), `placement`, its size (`vcpus` and `concurrency`; `labels` and `limits` for a machine) and `status` (`available`, or `online`, `update_needed`, `offline`). |
+| `get_runner` | read | One runner by id, also a revoked one (`status: revoked`); a self-hosted runner with its `manifest` (what the machine announces). |
+| `update_runner` | control | Renames a self-hosted runner (lanes store its id, so no lane breaks). Hosted and revoked runners cannot be renamed. |
+| `create_runner_token` | control | A registration token for a new self-hosted runner: shown **once**, valid one hour, usable once. Hand it to the person or script that starts the runner; never write it into a lane. |
+| `revoke_runner` | control | Revokes a self-hosted runner (its job ends, its next call is refused). Cannot be undone. |
+| `list_mcp_servers`, `get_mcp_server` | read | The remote MCP servers agents may use: address, transport, authentication, the **names** of the headers (never a value), `revision`, the last test and the tools it listed. |
+| `add_mcp_server` | control | Registers a server (`name`, `url`, `transport`, `auth`: `none`, `header` with sealed values, or `oauth`). A server with OAuth is added unconnected: **Connect stays in the web app**. |
+| `update_mcp_server` | control | Changes name, address, transport or authentication; stored headers are kept when `auth` is left out; `expectedRevision` makes a stale change a `conflict`. |
+| `remove_mcp_server` | control | Removes a server; refused with `conflict` and the `lanes` that use it. |
+| `test_mcp_server` | control | Connects as an MCP client from the factory, stores and returns `status` and the `tools`. Limited per workspace. |
+| `list_models` | read | What a step's `model` can name: `providers` with their models (own key), or the platform's `entries` (managed key); the `claudeCode` entry when the workspace has a Claude Code token or a runner's login. |
+| `get_budget` | read | The plan view (limits, usage, percentage of the cost limit) and, while billing is on, the prepaid balance; Owners and Admins also get the monthly limit and this month's charges. |
+| `get_costs` | read | The balance journal, newest first, paged with `cursor`: top-ups, usage charges (each with its run, AI and infrastructure part) and refunds. The cost of one run is `spentUsd` in `get_run`. |
+
+There is no tool to set the monthly limit or to top up: money stays with a person in the web app, as do LLM keys and an MCP server's OAuth sign-in.
+
 ## Security model
 
 - **OAuth only.** No static token exists anywhere: not in the settings, not in the database. Every credential is created by an approval a signed-in person gave.
