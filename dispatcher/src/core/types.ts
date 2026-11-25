@@ -99,6 +99,11 @@ export type LaunchSpec = {
    */
   vcpus?: number;
   /**
+   * #1158 (epic #1157): where the job's VM runs, from the App's authenticated claim answer (an Implementer job only, like `vcpus`; no review is ever placed
+   * elsewhere). `cloudflare`: a Cloudflare Container. Absent: the Vercel Sandbox, as before. The core only checks that the value is one it knows.
+   */
+  placement?: "cloudflare";
+  /**
    * #745, step 7: the environment's rule for the agent's network, from the App's authenticated claim answer (an Implementer job
    * only, like `vcpus`). The Launcher gives it, with a token, to the Control container so that it can narrow the VM's network
    * policy after the setup. Absent: the App did not say (the release before), and the policy is not narrowed.

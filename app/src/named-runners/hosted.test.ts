@@ -40,12 +40,14 @@ describe("the hosted runner types", () => {
 
   // #1105-R61
   it("are named by their size", () => {
-    expect(HOSTED_RUNNER_VCPUS.map(hostedRunnerName)).toEqual([
-      "Vercel Sandbox 2 vCPU",
-      "Vercel Sandbox 4 vCPU",
-      "Vercel Sandbox 6 vCPU",
-      "Vercel Sandbox 8 vCPU",
-    ]);
+    expect(HOSTED_RUNNER_VCPUS.map((vcpus) => hostedRunnerName(vcpus))).toEqual(
+      [
+        "Vercel Sandbox 2 vCPU",
+        "Vercel Sandbox 4 vCPU",
+        "Vercel Sandbox 6 vCPU",
+        "Vercel Sandbox 8 vCPU",
+      ],
+    );
   });
 
   // #1105-R62

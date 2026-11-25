@@ -27,6 +27,9 @@ const { app } = composeDispatcher({
   launcher: sandbox.launcher,
   secrets: sandbox.secrets,
   reaper: sandbox.reaper,
+  ...(sandbox.claimFeatures === undefined
+    ? {}
+    : { claimFeatures: sandbox.claimFeatures }),
   background: (work) => waitUntil(work),
 });
 

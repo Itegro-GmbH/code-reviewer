@@ -35,12 +35,21 @@ export class SandboxServiceError extends Error {
   }
 }
 
+/**
+ * #1158 (epic #1157): where a hosted VM runs. The Vercel Sandbox is the platform as it always was; `cloudflare` is a Cloudflare Container behind the
+ * cf-sandbox API (`cf-sandbox.ts`). A job names it by the claim answer (`placement`); the VM's name carries it (`placement.ts`), so a stop, a policy
+ * change and the reaper reach the right fleet.
+ */
+export type Placement = "vercel" | "cloudflare";
+
 export type SandboxCreateOptions = {
   /** Unique for this launch: a name is never reused, not even for a second attempt of the same job. */
   name: string;
-  /** The golden snapshot the VM starts from. */
+  /** Where the VM runs: absent is `vercel`. */
+  placement?: Placement;
+  /** The golden snapshot the VM starts from. On Cloudflare there is none (the image is the snapshot) and the value is not read. */
   snapshotId: string;
-  /** Always `fra1`: snapshots are region-bound and there is no failover region. */
+  /** Always `fra1`: snapshots are region-bound and there is no failover region. Not read on Cloudflare. */
   region: string;
   vcpus: number;
   /** The backstop that ends the VM when nobody stops it: the job timeout plus a margin. */

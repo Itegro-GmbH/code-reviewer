@@ -8,6 +8,7 @@ import {
   WORK_VOLUME_PATH,
   applyOverrides,
   renderDockerRunArguments,
+  CLOUDFLARE_RESERVE_DISK_GIB,
   RESERVE_DISK_GIB,
   workVolumeCommands,
   workVolumeName,
@@ -468,6 +469,31 @@ describe("the commands that make the work volume", () => {
     // Programs may run on the volume: no noexec anywhere, and no shell.
     expect(JSON.stringify(commands)).not.toContain("noexec");
     expect(commands.map((command) => command.cmd)).not.toContain("sh");
+  });
+
+  // #1158-K10
+  it("sizes the reserve disk as asked: 2 GiB on the Cloudflare placement, whose root is 20 GB, and 8 GiB without a size", () => {
+    const sizeOf = (reserveGib?: number) =>
+      workVolumeCommands(IMPLEMENTER_CONTAINER_SPEC, {
+        name: VOLUME,
+        root: ROOT,
+        ...(reserveGib === undefined ? {} : { reserveGib }),
+      }).find((command) => command.label === "work-volume-reserve-image")
+        ?.args[1];
+
+    expect(sizeOf()).toBe("8G");
+    expect(sizeOf(CLOUDFLARE_RESERVE_DISK_GIB)).toBe("2G");
+    expect(CLOUDFLARE_RESERVE_DISK_GIB).toBe(2);
+    for (const bad of [0, -1, 1.5, 64, Number.NaN])
+      expect(
+        codeOf(() =>
+          workVolumeCommands(IMPLEMENTER_CONTAINER_SPEC, {
+            name: VOLUME,
+            root: ROOT,
+            reserveGib: bad,
+          }),
+        ),
+      ).toBe("option_invalid");
   });
 
   // #760-T09

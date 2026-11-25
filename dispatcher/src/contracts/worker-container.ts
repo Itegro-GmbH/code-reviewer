@@ -278,4 +278,10 @@ export interface WorkerContainerLauncherAdditions {
     "net.ipv6.conf.all.disable_ipv6": "1";
     "net.ipv6.conf.default.disable_ipv6": "1";
   };
+  /**
+   * #1158 (epic #1157): the Cloudflare placement only. Cloudflare's outbound handler terminates TLS for every request the VM makes, so a container of the VM trusts the certificate authority of that handler or it cannot reach anything over https. The VM holds one file, `/etc/cr-sandbox/ca-bundle.crt` (the system's roots plus that authority, made by the image's boot, `contracts/cf-sandbox.v1.json` `x-vm-image`); the launcher bind-mounts exactly that file, read-only, at the same path and sets `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO` to it. The path is the only value there is: no other host path can be mounted this way.
+   */
+  interceptCa?: {
+    bundle: "/etc/cr-sandbox/ca-bundle.crt";
+  };
 }

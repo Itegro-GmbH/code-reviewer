@@ -16,6 +16,7 @@
 // | RUNNER_DYNAMIC_CAPABILITIES, RUNNER_DYNAMIC_MAX_COST_USD | The operator's Dynamic configuration, given to the container of a Dynamic job and to the canary (a JSON object; a plain positive decimal) | none |
 // | DISPATCHER_PUBLIC_URL                              | #745 step 7: the https address this Dispatcher is reached at, the base of the network switch call a VM makes (`POST /network`) | `https://$VERCEL_PROJECT_PRODUCTION_URL`; neither: no switch, the VM's policy is not narrowed |
 // | VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID    | Platform access by token. Without a token the OIDC token is used   | OIDC |
+// | CF_SANDBOX_URL, CF_SANDBOX_TOKEN, CF_SANDBOX_INSTANCE_TYPES | #1158: the Cloudflare placement (`cloudflare-env.ts`): all three or none; the Vercel configuration stays needed. `CF_SANDBOX_SYSBOX_PROOF` is its Sysbox verdict | none: no Cloudflare placement |
 //
 // VM size and container memory per Worker kind are part of DISPATCHER_WORKER_CONFIG (`launcher.vcpus`,
 // `container.memory`), validated here at start.
@@ -37,6 +38,9 @@ import { switchToken } from "../network/switch-token.ts";
 import { createCapabilityProbe } from "../probe/capability-probe.ts";
 import { withProbeEndpoint } from "../probe/probe-endpoint.ts";
 import type { SandboxFleet, SandboxService } from "./sandbox-service.ts";
+import { cloudflareFromEnvironment } from "./cloudflare-env.ts";
+import { createPlacementPlatform } from "./placement.ts";
+import type { KnownClaimFeature } from "../contracts/runner-api.ts";
 import { noLauncher } from "./none.ts";
 import {
   IMPLEMENTER_PROBE_EXTRA_SECONDS,
@@ -86,6 +90,13 @@ export type SandboxFromEnvironment = {
   secrets: string[];
   /** The reaper's platform side; undefined when no snapshot is configured, so there is nothing to reap and no route. */
   reaper?: (settings: Settings) => ReaperSetup;
+  /**
+   * #1158: the claim features for every claim, given those of the golden snapshot. Only with the Cloudflare placement configured: the placement is named while
+   * its Worker answers usably, and an image-gated feature only when both images list it. Undefined: the snapshot's features are the claim's, as before.
+   */
+  claimFeatures?: (
+    vercel: readonly KnownClaimFeature[],
+  ) => () => Promise<readonly KnownClaimFeature[]>;
 };
 
 function credentials(env: Environment): VercelCredentials | undefined {
@@ -147,8 +158,14 @@ export function sandboxFromEnvironment(
 ): SandboxFromEnvironment {
   const snapshotId = read(env, "SANDBOX_SNAPSHOT_ID");
   const imageDigest = read(env, "SANDBOX_IMAGE_DIGEST");
-  if (snapshotId === undefined && imageDigest === undefined)
+  // #1158: the Cloudflare placement is one more platform of this Dispatcher, never the only one: it needs the Vercel configuration too, and a
+  // Dispatcher that has only the Cloudflare variables would start and claim nothing. Read first, so a wrong value is refused whatever else is set.
+  const cloudflare = cloudflareFromEnvironment(env);
+  if (snapshotId === undefined && imageDigest === undefined) {
+    if (cloudflare !== undefined)
+      throw new ConfigError("SANDBOX_SNAPSHOT_ID", "required");
     return { launcher: () => noLauncher, secrets: [] };
+  }
 
   // One without the other is a mistake, not "off": a Dispatcher that claims nothing would look healthy.
   if (snapshotId === undefined)
@@ -193,14 +210,31 @@ export function sandboxFromEnvironment(
     (servesImplementer ? IMPLEMENTER_PROBE_EXTRA_SECONDS : 0);
   const publicUrl = publicUrlOf(env);
   const access = credentials(env);
-  const secrets = [access?.token, read(env, "VERCEL_OIDC_TOKEN")].filter(
-    (secret): secret is string => secret !== undefined,
-  );
-  // One service for the launcher and the reaper: the platform's access is configured once.
-  const platform = service ?? createVercelSandboxService(loadSdk, access);
+  const secrets = [
+    access?.token,
+    read(env, "VERCEL_OIDC_TOKEN"),
+    ...(cloudflare?.secrets ?? []),
+  ].filter((secret): secret is string => secret !== undefined);
+  // The log of the router is the launcher's (set when the composition makes the launcher, before the reaper reads the platform).
+  let platformLogger: Logger | undefined;
+  const lateLogger: Logger = {
+    info: (event, fields) => platformLogger?.info(event, fields),
+    warn: (event, fields) => platformLogger?.warn(event, fields),
+    error: (event, fields) => platformLogger?.error(event, fields),
+  };
+  // One service for the launcher and the reaper: the platform's access is configured once. With the Cloudflare placement it is the router of both
+  // platforms (`placement.ts`); without it, the Vercel platform itself, as it was.
+  const platform = createPlacementPlatform({
+    vercel: service ?? createVercelSandboxService(loadSdk, access),
+    ...(cloudflare === undefined ? {} : { cloudflare: cloudflare.client }),
+    logger: lateLogger,
+  });
 
   return {
     secrets,
+    ...(cloudflare === undefined
+      ? {}
+      : { claimFeatures: cloudflare.claimFeatures }),
     reaper: (settings) => ({
       fleet: platform,
       jobLifetimeSeconds:
@@ -211,6 +245,7 @@ export function sandboxFromEnvironment(
         vmTimeoutMarginSeconds,
     }),
     launcher({ settings, logger }) {
+      platformLogger = logger;
       if (probeTtlSet)
         logger.warn("deprecated_setting", {
           variable: "DISPATCHER_PROBE_TTL_SECONDS",
@@ -259,6 +294,9 @@ export function sandboxFromEnvironment(
       const dynamic = serversDynamic ? dynamicEnvironment(env) : {};
       const launcher = createSandboxLauncher({
         service: platform,
+        ...(cloudflare === undefined
+          ? {}
+          : { cloudflare: cloudflare.placement }),
         snapshotId,
         imageDigest,
         sysboxProof,
