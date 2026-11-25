@@ -110,7 +110,7 @@ async function worldOf(
   const environments = await repositories.environments.list();
   const runners = await repositories.runners.list();
   const hosted = runners.flatMap((runner) =>
-    runner.kind === "hosted"
+    runner.kind === "hosted" && runner.placement === "vercel"
       ? [{ id: runner.id, name: runner.name, vcpus: runner.vcpus }]
       : [],
   );

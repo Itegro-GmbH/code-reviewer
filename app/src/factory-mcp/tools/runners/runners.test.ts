@@ -14,6 +14,8 @@ const hosted = (over: Partial<HostedRunner> = {}): HostedRunner => ({
   id: "h4",
   name: "Vercel Sandbox 4 vCPU",
   vcpus: 4,
+  placement: "vercel",
+  available: true,
   concurrency: 2,
   ...over,
 });
@@ -102,14 +104,37 @@ describe("list_runners", () => {
 
   // #1147-T2
   it("shows the placement a hosted runner carries (a later placement needs no change here)", async () => {
-    const withPlacement = { ...hosted({ id: "c2" }), placement: "cloudflare" };
+    const withPlacement = hosted({
+      id: "c2",
+      name: "Cloudflare Container 4 vCPU",
+      placement: "cloudflare",
+    });
     const answer = await data(
       "list_runners",
-      setup({ list: async () => [withPlacement as never] }),
+      setup({ list: async () => [withPlacement] }),
       {},
     );
     expect(answer.runners).toMatchObject([
-      { id: "c2", placement: "cloudflare" },
+      {
+        id: "c2",
+        name: "Cloudflare Container 4 vCPU",
+        placement: "cloudflare",
+        status: "available",
+      },
+    ]);
+  });
+
+  // #1158
+  it("says `unavailable` for a Cloudflare runner whose size the operator switched off", async () => {
+    const off = hosted({ id: "c8", placement: "cloudflare", available: false });
+    const answer = await data(
+      "list_runners",
+      setup({ list: async () => [hosted(), off] }),
+      {},
+    );
+    expect(answer.runners).toMatchObject([
+      { id: "h4", status: "available" },
+      { id: "c8", placement: "cloudflare", status: "unavailable" },
     ]);
   });
 

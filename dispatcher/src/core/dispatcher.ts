@@ -104,7 +104,9 @@ export type CoreDependencies = {
    */
   liveVms?: LiveVmCounter;
   /** #1098: the claim features of the Worker image of the golden snapshot (`imageClaimFeatures`), for every app's claim. */
-  imageFeatures?: readonly KnownClaimFeature[];
+  imageFeatures?:
+    | readonly KnownClaimFeature[]
+    | (() => Promise<readonly KnownClaimFeature[]>);
   /** Milliseconds, for the memory of the version answer. */
   now?: () => number;
   requestTimeoutMs?: number;
@@ -461,6 +463,20 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         await release(state, claimed.job, "launch_failed");
         return { outcome: "not_capable" };
       }
+      // #1158: where the App says the VM runs. This core knows `cloudflare` and the Vercel default; a value that is none of them is a job it cannot
+      // place, given back unlaunched, so a newer App never costs a claim that is lost.
+      if (
+        claimed.job.placement !== undefined &&
+        claimed.job.placement !== "cloudflare"
+      ) {
+        logger.error("placement_not_offered", {
+          app: appId,
+          jobId: claimed.job.id,
+          stage: "claim",
+        });
+        await release(state, claimed.job, "launch_failed");
+        return { outcome: "not_capable" };
+      }
       // The slot is given back when the launch phase ends, by the background work.
       handedOver = true;
       return {
@@ -636,6 +652,10 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         // label of the job is for matching and checking above; the size of the VM stays the environment's, or the Launcher's configured one.
         ...(job.reviewKind === "implementer" && job.vcpus !== undefined
           ? { vcpus: job.vcpus }
+          : {}),
+        // #1158: the placement is believed for a turn of the Implementer and for no other kind: a review can never be placed on Cloudflare.
+        ...(job.reviewKind === "implementer" && job.placement === "cloudflare"
+          ? { placement: "cloudflare" as const }
           : {}),
         // #745, step 7: the same for the rule of the agent's network; a review never carries one.
         ...(job.reviewKind === "implementer" && job.network !== undefined

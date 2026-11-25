@@ -35,11 +35,13 @@ import {
   ContainerSpecError,
   WORK_VOLUME_PATH,
   WORK_VOLUME_STEP_COUNT,
+  CLOUDFLARE_RESERVE_DISK_GIB,
   applyOverrides,
   workVolumeCommands,
   workVolumeName,
 } from "./container.ts";
 import {
+  CLOUDFLARE_LAUNCHER_ADDITIONS,
   IMPLEMENTER_CONTAINER_SPEC,
   SANDBOX_LAUNCHER_ADDITIONS,
   WORKER_CONTAINER_SPEC,
@@ -60,9 +62,14 @@ import {
   type SandboxService,
   type SandboxVm,
 } from "./sandbox-service.ts";
+import type { CfHealth } from "./cf-sandbox.ts";
+import { cloudflareSuffix } from "./placement.ts";
 
 /** Snapshots are region-bound and there is no failover region: fixed, not an option. */
 export const SANDBOX_REGION = "fra1";
+/** #1158: the Cloudflare placement has no snapshot and no region (the image is the snapshot); the port wants values, and its client reads neither. */
+export const CLOUDFLARE_IMAGE = "cloudflare-image";
+export const CLOUDFLARE_REGION = "cloudflare";
 /**
  * How much longer than the job a VM may live if nobody stops it. The platform counts from the creation of the VM,
  * the Worker's own job timer from the start of the container, so the margin has to cover create, `vm-prepare.sh`, the
@@ -240,8 +247,26 @@ export const CONTAINER_ENVIRONMENT = {
   RUNNER_DIFF_JOB_USER: "10001:10001",
 } as const;
 
+/**
+ * #1158 (epic #1157): what the Launcher needs to place a job on a Cloudflare Container. The platform itself is the `service` of the options (the placement
+ * router sends a create with `placement: "cloudflare"` to the Cloudflare client); this is what only the launch knows about it.
+ */
+export type CloudflarePlacement = {
+  /**
+   * The Worker's health as of now (cached briefly by the caller): the image id the VM's Worker image must have, and what the image can do.
+   * Undefined when the Worker cannot be read or its answer cannot be used (no image id): the launch then fails, retryable, before a VM exists.
+   */
+  health(): Promise<CfHealth | undefined>;
+  /** The sizes in vCPUs the Dispatcher has an instance type for (`CF_SANDBOX_INSTANCE_TYPES`). */
+  sizes: readonly number[];
+  /** The Sysbox verdict for this placement (`CF_SANDBOX_SYSBOX_PROOF`): the image has no pipeline that records one. */
+  sysboxProof: SysboxProof;
+};
+
 export type SandboxLauncherOptions = {
   service: SandboxService;
+  /** Absent: the Cloudflare placement is off, and a job that names it is refused (`sandbox_placement_unavailable`). */
+  cloudflare?: CloudflarePlacement;
   /** The golden snapshot every VM starts from (#330). */
   snapshotId: string;
   /** The id of the Worker image in that snapshot; the image in the VM must be this one. */
@@ -563,12 +588,15 @@ export function createSandboxLauncher(
     name: string,
     signal: AbortSignal,
   ): Promise<SandboxVm> {
+    const cloudflare = spec.placement === "cloudflare";
     try {
       return await service.create(
         {
           name,
-          snapshotId: options.snapshotId,
-          region: SANDBOX_REGION,
+          // On Cloudflare there is no snapshot and no region: the image is the snapshot, and the client reads neither value.
+          ...(cloudflare ? { placement: "cloudflare" as const } : {}),
+          snapshotId: cloudflare ? CLOUDFLARE_IMAGE : options.snapshotId,
+          region: cloudflare ? CLOUDFLARE_REGION : SANDBOX_REGION,
           vcpus: plan.vcpus,
           timeoutMs: vmLifetimeSeconds(spec) * 1000,
           // `tenant` names the app that claimed the job (#730): a stop or a reap for one app never touches a VM of another.
@@ -636,10 +664,30 @@ export function createSandboxLauncher(
 
     async launch(spec, signal) {
       const plan = planOf(spec);
+      // #1158: the placement of the job. Vercel is everything that is not named; a Cloudflare job needs the configuration, the Implementer's kind
+      // (a review is never placed there), a size the Dispatcher has an instance type for and a Worker whose health says which image the VM has.
+      let cloudflareImage: string | undefined;
+      if (spec.placement === "cloudflare") {
+        if (options.cloudflare === undefined || spec.kind !== "implementer")
+          throw new LaunchError("sandbox_placement_unavailable");
+        if (!options.cloudflare.sizes.includes(plan.vcpus))
+          throw new LaunchError("sandbox_size_unsupported");
+        const health = await options.cloudflare.health().catch(() => undefined);
+        if (health?.workerImageId === undefined)
+          throw new LaunchError("sandbox_unavailable", { retryable: true });
+        cloudflareImage = health.workerImageId;
+        logger.info("cloudflare_image", {
+          jobId: spec.jobId,
+          imageVersion: health.imageVersion,
+        });
+      }
+      const imageDigest = cloudflareImage ?? options.imageDigest;
       const requested = jobVmName(
         spec.kind,
         spec.jobId,
-        (options.newSuffix ?? randomSuffix)(),
+        cloudflareImage === undefined
+          ? (options.newSuffix ?? randomSuffix)()
+          : cloudflareSuffix((options.newSuffix ?? randomSuffix)()),
       );
 
       const vm = await createVm(plan, spec, requested, signal);
@@ -666,7 +714,7 @@ export function createSandboxLauncher(
         logger,
         logFields: { jobId: spec.jobId },
         imageReference: options.imageReference ?? SANDBOX_IMAGE_REFERENCE,
-        imageDigest: options.imageDigest,
+        imageDigest,
         handoverSeconds,
       });
       try {
@@ -681,6 +729,10 @@ export function createSandboxLauncher(
             workVolumeCommands(IMPLEMENTER_CONTAINER_SPEC, {
               name: workVolumeName(spec.jobId),
               root: options.workVolumeRoot ?? WORK_VOLUME_ROOT,
+              // The root of a Cloudflare Container is 20 GB, not 64: the reserve is the placement's.
+              ...(cloudflareImage === undefined
+                ? {}
+                : { reserveGib: CLOUDFLARE_RESERVE_DISK_GIB }),
             }),
             signal,
           );
@@ -695,12 +747,14 @@ export function createSandboxLauncher(
           host,
           spec: profileOf(spec.kind),
           // By id: exactly the image that was just verified, and a reference that cannot be pulled.
-          image: options.imageDigest,
+          image: imageDigest,
           environment: environmentOf(
             spec.kind,
             options.dynamicEnvironment,
             plan,
-            options.sysboxProof ?? "unproven",
+            (cloudflareImage === undefined
+              ? options.sysboxProof
+              : options.cloudflare?.sysboxProof) ?? "unproven",
             spec.kind === "implementer" &&
               spec.network !== undefined &&
               spec.modelHost !== undefined
@@ -713,7 +767,10 @@ export function createSandboxLauncher(
                 })
               : undefined,
           ),
-          additions: SANDBOX_LAUNCHER_ADDITIONS,
+          additions:
+            cloudflareImage === undefined
+              ? SANDBOX_LAUNCHER_ADDITIONS
+              : CLOUDFLARE_LAUNCHER_ADDITIONS,
         });
         const running = containers.launch(
           { ...spec, config: { ...spec.config, container: plan.overrides } },

@@ -5,6 +5,7 @@ import type {
   WorkerContainerLauncherAdditions,
   WorkerContainerSpec,
 } from "../contracts/worker-container.ts";
+import { INTERCEPT_CA_BUNDLE_PATH } from "./container.ts";
 
 // The hardened container spec the launchers render (contracts/worker-container.v1.json, #316). It is the
 // example spec of the contract, value for value; container-spec.test.ts fails when the two differ. A change of
@@ -126,4 +127,14 @@ export const SANDBOX_LAUNCHER_ADDITIONS: WorkerContainerLauncherAdditions = {
     "net.ipv6.conf.all.disable_ipv6": "1",
     "net.ipv6.conf.default.disable_ipv6": "1",
   },
+};
+
+/**
+ * #1158 (epic #1157): what the Cloudflare variant adds: the Sandbox's own, and the intercept CA. Cloudflare's outbound handler terminates TLS for every
+ * request the VM makes, so the Worker container gets the VM's bundle (the system's roots and the handler's authority) read-only and the variables that make
+ * its tools read it (`WorkerContainerLauncherAdditions.interceptCa`).
+ */
+export const CLOUDFLARE_LAUNCHER_ADDITIONS: WorkerContainerLauncherAdditions = {
+  ...SANDBOX_LAUNCHER_ADDITIONS,
+  interceptCa: { bundle: INTERCEPT_CA_BUNDLE_PATH },
 };

@@ -11,6 +11,8 @@ const HOSTED: NamedRunner = {
   id: "h-4",
   name: "Vercel Sandbox 4 vCPU",
   vcpus: 4,
+  placement: "vercel",
+  available: true,
   concurrency: 2,
 };
 const DEVBOX: NamedRunner = {

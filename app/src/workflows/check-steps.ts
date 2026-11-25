@@ -353,14 +353,14 @@ function runnerOfStep(
 /** The ids of the runners a step may name (a revoked one is not offered). */
 function runnerIds(resolver: WorkflowResolver): string[] {
   return (resolver.runners?.() ?? [])
-    .filter((runner) => runner.revoked !== true)
+    .filter((runner) => runner.revoked !== true && runner.unavailable !== true)
     .map((runner) => runner.id);
 }
 
 /** "id (name)" for every runner a step may name, for a message: the `available` of the issue holds the ids alone, so they can be copied. */
 function runnersListed(resolver: WorkflowResolver): string {
   const pairs = (resolver.runners?.() ?? [])
-    .filter((runner) => runner.revoked !== true)
+    .filter((runner) => runner.revoked !== true && runner.unavailable !== true)
     .map((runner) => `${runner.id} (${runner.name})`);
   return listNames(pairs);
 }
@@ -1033,10 +1033,22 @@ function checkRunner(
     );
     return;
   }
+  if (found?.unavailable === true) {
+    c.report(
+      issue(
+        at,
+        "runner_unavailable",
+        `The runner ${shown(found.name)} is switched off on this server (the operator did not enable that size of the placement). Name another runner. Runners: ${runnersListed(c.resolver)}.`,
+        runnerIds(c.resolver),
+      ),
+    );
+    return;
+  }
   if (found !== undefined) return;
   const byName = (c.resolver.runners?.() ?? []).find(
     (runner) =>
       runner.revoked !== true &&
+      runner.unavailable !== true &&
       runner.name.toLowerCase() === literal.toLowerCase(),
   );
   c.report(

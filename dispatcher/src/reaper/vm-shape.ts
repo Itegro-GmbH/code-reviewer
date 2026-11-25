@@ -18,9 +18,10 @@ export const TENANT_TAG = "tenant";
 /** The name prefix of every VM of ours (job VMs and canaries); the listing is narrowed by it. */
 export const NAME_PREFIX = "cr-";
 
-// The kinds are the Dispatcher's own list, so a kind that is served can always be stopped and reaped (#759).
+// The kinds are the Dispatcher's own list, so a kind that is served can always be stopped and reaped (#759). A VM on a Cloudflare Container (#1158) has `cf-` before
+// its eight hex characters (`launchers/placement.ts`): it is a job VM of ours like any other, and the name says which fleet it is in.
 const JOB_NAME = new RegExp(
-  `^cr-(${KNOWN_KINDS.join("|")})-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9a-f]{8}$`,
+  `^cr-(${KNOWN_KINDS.join("|")})-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-(?:cf-)?[0-9a-f]{8}$`,
 );
 const CANARY_NAME = /^cr-canary-[0-9a-f]{8}$/;
 

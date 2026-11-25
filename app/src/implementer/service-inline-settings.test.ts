@@ -267,6 +267,8 @@ describe("a task of a step with settings of its own (#1105)", () => {
             id: "h-6",
             name: "Vercel Sandbox 6 vCPU",
             vcpus: 6,
+            placement: "vercel",
+            available: true,
             concurrency: 3,
           },
         },

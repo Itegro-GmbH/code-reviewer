@@ -135,6 +135,8 @@ import {
   DEFAULT_IMPLEMENTER_VCPUS,
   REVIEW_VCPUS,
   sizeLabel,
+  PLACEMENT_CLOUDFLARE_FEATURE,
+  placementOfRequiredLabels,
   sizeLabelOf,
 } from "../runner-identity/labels.ts";
 
@@ -2290,6 +2292,11 @@ async function prepare(
                     }),
               }
             : {
+                // #1158: where the Dispatcher launches the VM: named only for the Cloudflare placement, so every other answer is as before.
+                ...(placementOfRequiredLabels(job.requiredLabels) ===
+                "cloudflare"
+                  ? { placement: "cloudflare" as const }
+                  : {}),
                 sizeLabel:
                   sizeLabelOf(job.requiredLabels) ??
                   sizeLabel(
@@ -2508,6 +2515,10 @@ export async function handleClaim(
       // #1150: a hosted turn on the token of the workspace goes only to a claim whose Worker image reads it.
       ...(split && features.includes("implementer_workspace_token")
         ? { acceptsWorkspaceLogin: true }
+        : {}),
+      // #1158: only a Dispatcher that can launch on a Cloudflare Container names the feature; it alone has the platform label of that placement.
+      ...(split && features.includes(PLACEMENT_CLOUDFLARE_FEATURE)
+        ? { acceptsPlacementCloudflare: true }
         : {}),
       ...(target.customerRunner === undefined
         ? {}

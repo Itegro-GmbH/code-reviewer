@@ -441,8 +441,20 @@ const IPV6_SWITCHES = [
   "net.ipv6.conf.default.disable_ipv6",
 ] as const;
 
+/** The one file of the Cloudflare placement's VM that every container trusts (`x-vm-image.caBundle` of `contracts/cf-sandbox.v1.json`, #1158). */
+export const INTERCEPT_CA_BUNDLE_PATH = "/etc/cr-sandbox/ca-bundle.crt";
+
+/** The variables that make the tools of a container read the intercept CA's bundle (#1158). */
+const INTERCEPT_CA_VARIABLES = [
+  "CURL_CA_BUNDLE",
+  "GIT_SSL_CAINFO",
+  "NODE_EXTRA_CA_CERTS",
+  "REQUESTS_CA_BUNDLE",
+  "SSL_CERT_FILE",
+] as const;
+
 /**
- * Refuses additions other than the contract's: no key but `sysctls`, and in it exactly the two IPv6
+ * Refuses additions other than the contract's: no key but `sysctls` and `interceptCa`, and in `sysctls` exactly the two IPv6
  * switches with the value 1, together. A launcher variant cannot add a flag through this.
  */
 export function assertLauncherAdditions(
@@ -451,9 +463,21 @@ export function assertLauncherAdditions(
   if (!isRecord(additions))
     return refuse("additions_not_allowed", "the additions are not an object");
   for (const key of Object.keys(additions)) {
-    if (key !== "sysctls")
+    if (key !== "sysctls" && key !== "interceptCa")
       refuse("additions_not_allowed", `${key} cannot be added`);
   }
+  // #1158: the intercept CA is one fixed path, which is mounted read-only; nothing else can come in through it.
+  const interceptCa = additions.interceptCa;
+  if (
+    interceptCa !== undefined &&
+    (!isRecord(interceptCa) ||
+      Object.keys(interceptCa).length !== 1 ||
+      interceptCa.bundle !== INTERCEPT_CA_BUNDLE_PATH)
+  )
+    refuse(
+      "additions_not_allowed",
+      "the intercept CA is the one bundle of the Cloudflare placement",
+    );
   const sysctls = additions.sysctls;
   if (sysctls === undefined) return;
   if (
@@ -594,6 +618,13 @@ export function renderDockerRunArguments(
           `type=bind,source=${hardened.dockerSocket.source},target=${hardened.dockerSocket.target},readonly`,
         ]
       : []),
+    // #1158: the Cloudflare placement's one extra mount, a file that is the VM's own and never the job's: read-only, at the same path.
+    ...(options.additions?.interceptCa === undefined
+      ? []
+      : [
+          "--mount",
+          `type=bind,source=${options.additions.interceptCa.bundle},target=${options.additions.interceptCa.bundle},readonly`,
+        ]),
     ...("dockerSocket" in hardened
       ? ["--oom-score-adj", String(IMPLEMENTER_OOM_SCORE_ADJ)]
       : []),
@@ -615,6 +646,12 @@ export function renderDockerRunArguments(
         : ["--sysctl", `${name}=${options.additions.sysctls[name]}`],
     ),
     ...environment.flatMap(([name, value]) => ["--env", `${name}=${value}`]),
+    ...(options.additions?.interceptCa === undefined
+      ? []
+      : INTERCEPT_CA_VARIABLES.flatMap((name) => [
+          "--env",
+          `${name}=${options.additions?.interceptCa?.bundle ?? ""}`,
+        ])),
     options.image,
     ...command,
   ];
@@ -649,6 +686,12 @@ export const WORK_VOLUME_STEP_COUNT = 8;
  * take it. Control's mirror lives on it and nothing else.
  */
 export const RESERVE_DISK_GIB = 8;
+
+/**
+ * The reserve disk on a Cloudflare Container (#1158): an eighth of its 20 GB root, as 8 GiB is of the 64 GB of a Vercel VM, and what the 3.5 GB of images
+ * leave beside the work volume and the agent's own Docker. The size is the placement's, not a setting.
+ */
+export const CLOUDFLARE_RESERVE_DISK_GIB = 2;
 
 /**
  * Whether `mountinfo` (the text of `/proc/self/mountinfo`) shows a mount at `directory` that has all of `options` and no
@@ -692,7 +735,12 @@ export function mountHasOptions(
  */
 export function workVolumeCommands(
   spec: unknown,
-  options: { name: string; root: string },
+  options: {
+    name: string;
+    root: string;
+    /** The size of the reserve disk in GiB: `RESERVE_DISK_GIB` unless the placement says otherwise (`CLOUDFLARE_RESERVE_DISK_GIB`). */
+    reserveGib?: number;
+  },
 ): HostCommand[] {
   assertHardenedSpec(spec);
   if (!(WORK_VOLUME_KEY in spec))
@@ -702,6 +750,14 @@ export function workVolumeCommands(
     );
   checkOption(options.name, VOLUME_NAME, "the work volume");
   checkOption(options.root, HOST_ROOT, "the work volume root");
+  const reserveGib = options.reserveGib ?? RESERVE_DISK_GIB;
+  // A whole number of GiB of at least 1 and below the 8 of the largest disk's share: a typo here would fill a root or hold no reserve at all.
+  if (
+    !Number.isInteger(reserveGib) ||
+    reserveGib < 1 ||
+    reserveGib > RESERVE_DISK_GIB
+  )
+    refuse("option_invalid", "the reserve disk size is not valid");
   const directory = `${options.root}/${options.name}`;
   const reserveDirectory = `${directory}/reserve`;
   const reserveImage = `${options.root}/${options.name}.reserve.img`;
@@ -721,7 +777,7 @@ export function workVolumeCommands(
       "work-volume-reserve-image",
       "fallocate",
       "-l",
-      `${String(RESERVE_DISK_GIB)}G`,
+      `${String(reserveGib)}G`,
       reserveImage,
     ),
     step(

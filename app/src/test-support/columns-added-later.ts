@@ -56,6 +56,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "kind",
     "labels",
     "concurrency",
+    // #1158: where a hosted runner's VM runs; `vercel` for every row that exists.
+    "placement",
   ],
   // #818: the size of the VM where the Dispatcher reported it; null for every VM that exists.
   job_vm_runs: ["vcpus"],
@@ -129,6 +131,7 @@ const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
     network_hosts: "",
     kind: "hosted",
     labels: "",
+    placement: "vercel",
   },
   workflow_runs: { trigger_kind: "manual" },
   runners: { delivery_mode: "poll" },

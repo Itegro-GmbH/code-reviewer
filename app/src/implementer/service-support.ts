@@ -24,7 +24,11 @@ import {
 import type { Integration, RepoRef } from "../integrations/types.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { isEnvironmentVcpus } from "./environments/limits.ts";
-import { isRevoked, type NamedRunner } from "../named-runners/types.ts";
+import {
+  isRevoked,
+  isUnavailable,
+  type NamedRunner,
+} from "../named-runners/types.ts";
 import { runnerLabel } from "../runner-identity/labels.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import { readStoredResultSchema } from "./agent-result.ts";
@@ -187,7 +191,7 @@ export function copyRunner(
   environment: TurnEnvironment | null;
   runnerEnvironment: TurnRunnerEnvironment | null;
 } {
-  if (isRevoked(runner))
+  if (isRevoked(runner) || isUnavailable(runner))
     throw new ImplementerError(
       "IMPLEMENTER_ENVIRONMENT_NOT_FOUND",
       "There is no such runner in this workspace.",

@@ -54,18 +54,16 @@ export async function fleetService<T>(work: () => Promise<T>): Promise<T> {
 export const NO_SUCH_RUNNER = "There is no such runner in this workspace.";
 
 /**
- * Where a hosted runner runs. The type of a hosted runner is a size of one provided sandbox; the placement says which provider's. A runner
- * that carries its own `placement` (a later placement of the hosted runners) is shown as it is; until then every hosted runner is a Vercel Sandbox.
+ * Where a hosted runner runs. The type of a hosted runner is a size of one provided sandbox; the placement says which provider's. A hosted
+ * runner carries its own `placement` (`vercel` or, #1158, `cloudflare`), shown as it is.
  */
 export function placementOf(runner: NamedRunner): string {
-  if (runner.kind === "self_hosted") return "self_hosted";
-  const own = (runner as { placement?: unknown }).placement;
-  return typeof own === "string" ? own : "vercel";
+  return runner.kind === "self_hosted" ? "self_hosted" : runner.placement;
 }
 
 /**
  * One runner as the tools answer it. `id` is what a lane step's `runner` field takes (`update_lane`). A hosted runner has a fixed size
- * (`vcpus`) and a `concurrency`, and is always `available`; a self-hosted one has `status` (`online`, `update_needed`, `offline`, or `revoked`),
+ * (`vcpus`) and a `concurrency`, and is `available` (`unavailable` for a Cloudflare size the operator switched off); a self-hosted one has `status` (`online`, `update_needed`, `offline`, or `revoked`),
  * its `labels` and what it was last seen with. `detail` adds the manifest (what the machine announces: harnesses, logins, models).
  */
 export function runnerAnswer(
@@ -81,7 +79,8 @@ export function runnerAnswer(
       placement: placementOf(runner),
       vcpus: runner.vcpus,
       concurrency: runner.concurrency,
-      status: "available",
+      // #1158: a Cloudflare size the operator switched off keeps its runner (a lane may name it) but nothing may start on it.
+      status: runner.available ? "available" : "unavailable",
     };
   const view = status.get(runner.id);
   return {

@@ -11,7 +11,9 @@ import {
   HOSTED_VCPUS,
   isReservedLabel,
   MANAGED_LABEL,
+  PLACEMENT_CLOUDFLARE_LABEL,
   PLATFORM_LABELS,
+  placementOfRequiredLabels,
   requiredLabelsOfTurn,
   RESERVED_LABEL_PREFIX,
   RUNNER_LABEL_PREFIX,
@@ -142,6 +144,50 @@ describe("the labels a turn requires", () => {
       "cr:size-4",
     ]);
     expect(requiredLabelsOfTurn({})).toEqual(["cr:managed", "cr:size-2"]);
+  });
+
+  // #1158
+  it("add the placement label for an environment that runs on Cloudflare, and none for Vercel", () => {
+    expect(
+      requiredLabelsOfTurn({
+        environment: { vcpus: 4, placement: "cloudflare" },
+      }),
+    ).toEqual(["cr:managed", "cr:size-4", "cr:placement:cloudflare"]);
+    expect(
+      requiredLabelsOfTurn({ environment: { vcpus: 4, placement: "vercel" } }),
+    ).toEqual(["cr:managed", "cr:size-4"]);
+    expect(hostedLabels(4, "cloudflare")).toEqual(
+      requiredLabelsOfTurn({
+        environment: { vcpus: 4, placement: "cloudflare" },
+      }),
+    );
+  });
+});
+
+describe("the placement label (#1158)", () => {
+  it("is a reserved label that no platform identity has by default", () => {
+    expect(PLACEMENT_CLOUDFLARE_LABEL).toBe("cr:placement:cloudflare");
+    expect(isReservedLabel(PLACEMENT_CLOUDFLARE_LABEL)).toBe(true);
+    // Only a claim that names the feature `placement_cloudflare` adds it (jobs-claim.ts): never part of the fixed list.
+    expect(PLATFORM_LABELS).not.toContain(PLACEMENT_CLOUDFLARE_LABEL);
+  });
+
+  it("is read back from the labels a job requires; any other job is on Vercel", () => {
+    expect(
+      placementOfRequiredLabels([
+        "cr:managed",
+        "cr:size-4",
+        "cr:placement:cloudflare",
+      ]),
+    ).toBe("cloudflare");
+    expect(placementOfRequiredLabels(["cr:managed", "cr:size-4"])).toBe(
+      "vercel",
+    );
+    expect(placementOfRequiredLabels(null)).toBe("vercel");
+    // A label that merely looks like it (case, spacing) is none.
+    expect(placementOfRequiredLabels(["CR:placement:Cloudflare"])).toBe(
+      "vercel",
+    );
   });
 });
 

@@ -892,3 +892,74 @@ describe("the probe's configuration from the environment", () => {
     ).not.toThrow();
   });
 });
+
+describe("the Sandbox-Launcher with the Cloudflare placement (#1158)", () => {
+  const CLOUDFLARE = {
+    CF_SANDBOX_URL: "https://cr-sandbox.example.workers.dev",
+    CF_SANDBOX_TOKEN: "dummy-cloudflare-token-for-tests-0000000",
+    CF_SANDBOX_INSTANCE_TYPES: "4=standard-4",
+  };
+
+  // #1158-W01
+  it("is as it was without the three variables: no claim features of its own, the Vercel platform itself", () => {
+    const vercel = new FakeSandboxService();
+    const sandbox = sandboxFromEnvironment(configured(), never, vercel);
+
+    expect(sandbox.claimFeatures).toBeUndefined();
+    expect(sandbox.reaper?.(loadSettings(BASE)).fleet).toBe(vercel);
+    expect(sandbox.secrets).toStrictEqual([]);
+  });
+
+  // #1158-W02
+  it("has the claim features of the placement, the router as its platform and the token among its secrets with them", () => {
+    const vercel = new FakeSandboxService();
+    const sandbox = sandboxFromEnvironment(
+      configured(CLOUDFLARE),
+      never,
+      vercel,
+    );
+
+    expect(sandbox.claimFeatures).toBeTypeOf("function");
+    expect(sandbox.reaper?.(loadSettings(BASE)).fleet).not.toBe(vercel);
+    expect(sandbox.secrets).toContain(CLOUDFLARE.CF_SANDBOX_TOKEN);
+  });
+
+  // #1158-W03
+  it("refuses a Cloudflare variable without the other two, whatever else is configured", () => {
+    for (const missing of Object.keys(CLOUDFLARE)) {
+      const env: Record<string, string> = configured(CLOUDFLARE);
+      delete env[missing];
+      expect(refusal(env)).toMatchObject({
+        variable: missing,
+        reason: "required",
+      });
+    }
+  });
+
+  // #1158-W04
+  it("refuses the Cloudflare variables without a golden snapshot: it is one more platform, never the only one", () => {
+    expect(refusal(CLOUDFLARE)).toMatchObject({
+      variable: "SANDBOX_SNAPSHOT_ID",
+      reason: "required",
+    });
+  });
+
+  // #1158-W05
+  it("starts the launcher with the placement, which advertises the same engines", async () => {
+    const sandbox = sandboxFromEnvironment(
+      configured(CLOUDFLARE),
+      never,
+      new FakeSandboxService(),
+    );
+
+    const launcher = sandbox.launcher({
+      settings: loadSettings(BASE),
+      logger: recordingLogger(),
+      background: () => undefined,
+    });
+
+    expect(
+      await launcher.capabilities(new AbortController().signal),
+    ).toStrictEqual(["pr-agent", "opencode"]);
+  });
+});

@@ -264,6 +264,9 @@ async function runnerInfos(
     id: runner.id,
     name: runner.name,
     kind: runner.kind,
+    ...(runner.kind === "hosted" && !runner.available
+      ? { unavailable: true }
+      : {}),
   }));
   for (const id of runnerIdsIn(document, RUNNER_LOOKUPS_MAX)) {
     if (known.has(id)) continue;
@@ -320,7 +323,9 @@ async function builtInSettings(
     };
   const hosted = (await runners?.list())?.find(
     (runner) =>
-      runner.kind === "hosted" && runner.vcpus === BUILT_IN_RUNNER_VCPUS,
+      runner.kind === "hosted" &&
+      runner.placement === "vercel" &&
+      runner.vcpus === BUILT_IN_RUNNER_VCPUS,
   );
   if (hosted === undefined)
     return {
