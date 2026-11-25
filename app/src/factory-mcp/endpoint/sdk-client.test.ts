@@ -22,6 +22,9 @@ function clientFor(accessToken: string | null) {
     service: world.service,
     registry: createToolRegistry(ALL_TOOLS),
     baseUrl: ISSUER,
+    database: () => {
+      throw new Error("no database in this test");
+    },
     environment: {
       productName: "Software Factory",
       capabilities: ["implementer"],
@@ -51,6 +54,9 @@ describe("the official MCP client against /api/mcp", () => {
       service: world.service,
       registry: createToolRegistry(ALL_TOOLS),
       baseUrl: ISSUER,
+      database: () => {
+        throw new Error("no database in this test");
+      },
       environment: {
         productName: "Software Factory",
         capabilities: ["implementer"],
@@ -68,11 +74,11 @@ describe("the official MCP client against /api/mcp", () => {
     expect(client.getInstructions()).toContain("describe_factory");
 
     const listed = await client.listTools();
-    expect(listed.tools.map((tool) => tool.name)).toEqual([
-      "describe_factory",
-      "get_lane_schema",
-      "whoami",
-    ]);
+    // The connection approved control, so it lists every tool of the server (judged by the registry, not by a fixed list).
+    expect(listed.tools.map((tool) => tool.name).sort()).toEqual(
+      ALL_TOOLS.map((tool) => tool.name).sort(),
+    );
+    expect(listed.tools.map((tool) => tool.name)).toContain("whoami");
 
     const result = await client.callTool({ name: "whoami", arguments: {} });
     expect(result.isError).toBeFalsy();

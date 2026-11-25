@@ -4,11 +4,12 @@
 // `factory_oauth_requests`, `factory_oauth_codes`, `factory_oauth_tokens`). It takes no workspace, for the reasons the classification
 // in `scoping.test.ts` gives: an AI app registers itself before any workspace is known, a pending authorization request has not chosen a
 // workspace yet, and a code or a token arrives holding nothing but its secret (the database keeps its hash), so the workspace is the
-// ANSWER of the lookup, never the question. It never lists customer data; the rows of a grant that a workspace shows and revokes are
-// in the scoped `factory-oauth-repository.ts`, and every write that changes a grant goes through that one.
+// ANSWER of the lookup, never the question. It never lists customer data, and it never writes a grant: the rows of a grant, what a
+// workspace shows and revokes and every change of one (the consent, `markConnected`, `touch`, `revoke`) are in the scoped
+// `factory-oauth-repository.ts`. What it writes are the single-use marks of a code and of a refresh token, found by their own hash.
+// (`findToken` reads the grant's person for the caller's identity; it changes nothing.)
 import "server-only";
 import type { Kysely } from "kysely";
-import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
 import type {
   AuthorizationRequest,
@@ -321,30 +322,6 @@ export function createFactoryOAuthDirectoryRepository(
         .where("used_at", "is", null)
         .executeTakeFirst();
       return Number(result.numUpdatedRows) === 1;
-    },
-
-    async markGrantConnected(grantId, now) {
-      await db
-        .updateTable("factory_oauth_grants")
-        .set({ connected_at: now })
-        .where("id", "=", grantId)
-        .where("connected_at", "is", null)
-        .execute();
-    },
-
-    async touchGrant(grantId, now, minIntervalMs) {
-      const before = formatTimestamp(new Date(Date.parse(now) - minIntervalMs));
-      await db
-        .updateTable("factory_oauth_grants")
-        .set({ last_used_at: now })
-        .where("id", "=", grantId)
-        .where((eb) =>
-          eb.or([
-            eb("last_used_at", "is", null),
-            eb("last_used_at", "<=", before),
-          ]),
-        )
-        .execute();
     },
 
     async deleteExpired(cutoff) {

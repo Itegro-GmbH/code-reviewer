@@ -132,13 +132,6 @@ export type OAuthDirectory = {
   findToken(tokenHash: string): Promise<TokenLookup | null>;
   /** Marks a refresh token used; false when it already was (one statement, so two requests cannot both win). */
   markRefreshUsed(tokenHash: string, now: string): Promise<boolean>;
-  markGrantConnected(grantId: string, now: string): Promise<void>;
-  /** Records that the grant was used, at most once per `minIntervalMs`. */
-  touchGrant(
-    grantId: string,
-    now: string,
-    minIntervalMs: number,
-  ): Promise<void>;
 };
 
 export type ScopedGrants = {
@@ -154,6 +147,10 @@ export type ScopedGrants = {
   }): Promise<boolean>;
   /** The connected apps that are not revoked, newest first. */
   list(): Promise<GrantView[]>;
+  /** Marks the grant connected (its code was exchanged); a grant of another workspace is not touched. */
+  markConnected(grantId: string, now: string): Promise<void>;
+  /** Records that the grant was used, at most once per `minIntervalMs`; a grant of another workspace is not touched. */
+  touch(grantId: string, now: string, minIntervalMs: number): Promise<void>;
   /** Revokes the grant and deletes its codes and tokens. False for a grant of another workspace, one that is gone or revoked already. */
   revoke(grantId: string, now: string): Promise<boolean>;
 };

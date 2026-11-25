@@ -56,9 +56,10 @@ use code (T54), `invalid_target`, RFC 7009 revocation (T80), RFC 7591 registrati
      action: "view", // the workspace action the ROLE must allow (permissions.ts); view when left out
      input: { limit: z.number().int().min(1).max(100).optional() },
      async handler(context, args) {
-       // Build the SAME service the app's route builds, for `context.workspace.id`. Never SQL, never a workspace from the arguments.
-       // A write passes `context.user.id` where the app stores a user, and `context.actor.label` where it stores a name or a note.
-       return { projects: [] }; // a plain JSON object; or throw `new ToolError("not_found", "...", { details })`
+       // The SAME service the app's route uses, for the token's workspace and person (see "Services" below). Never SQL, never a workspace
+       // from the arguments. A write passes `context.user.id` where the app stores a user, and `context.actor.label` where it stores a note.
+       const projects = context.services.use(projectsService);
+       return { projects: await projects.list() }; // a plain JSON object; or throw `new ToolError("not_found", "...", { details })`
      },
    });
    ```
@@ -69,6 +70,37 @@ use code (T54), `invalid_target`, RFC 7009 revocation (T80), RFC 7591 registrati
    stale revision to `conflict`). Anything else that is thrown becomes `internal_error` with nothing shown and the details in the log.
 4. **Test it** with `tools/test-context.ts` (a context for a role and scope) through `createToolRegistry(ALL_TOOLS).call(...)`, and add the cases the issue lists.
    `registry.test.ts` already holds every tool to a unique snake_case name, a description and a scope.
+
+### Services: `context.services`
+
+A tool reaches the app's own code through `context.services.use(factory)` (`tools/services.ts`), and never opens the database itself. A **factory** is a plain function from a
+`ServiceScope` to a service, kept in your slice's folder, usually one line over the factory the app's routes already use:
+
+```ts
+// tools/projects/services.ts
+export const projectsService: ServiceFactory<ProjectsService> = ({
+  access,
+  database,
+}) =>
+  createProjectsService(
+    database(),
+    access.workspace.id /* , ... whatever the route's wiring passes */,
+  );
+```
+
+The scope is the token's, never the arguments': `access` is the same `WorkspaceAccess` a route gets from `withWorkspace` (the person, the workspace, the role the person has **now**), so you
+can hand it to the handlers and services the routes already use; the person is a session user **without instance rank** (`isInstanceAdmin: false`), whoever they are, so an AI app
+never acts as the instance admin. `actor` is the person and the AI app; `database()` opens the connection only when a factory calls it. `use` builds the service once per request. In a unit test,
+`testContext({ database })` (`tools/test-context.ts`) hands the same scope with a database of your choice; without one a test that touches the database fails by name.
+
+**Treat `actor.label` and `client.name` as untrusted text.** The app's name is what the app called itself at registration (control and direction characters are removed, nothing more). Store it
+where the app stores a note, show it escaped, never as markdown or HTML, and never decide anything by it. Decide by `client.id` and `user.id`.
+
+### The audit line
+
+Every call writes one line on the server's log, from the registry, so a tool does nothing for it: `[factory-mcp] TOOL_CALL {"tool","scope","workspaceId","userId","clientId","outcome","durationMs"}`.
+`outcome` is `ok` or the error code. A call the endpoint refused for its scope before the tool was looked at has its line too. **Arguments and results are never in it**, so a tool needs no care for secrets
+here, and must not log them either. The sink is `createToolRegistry(tools, { audit })`; tests pass their own.
 
 What the registry does for every call, so a tool cannot forget it: scope (`insufficient_scope`), role (`forbidden`), arguments (`invalid_input`, unknown fields
 refused), the handler, the failure mapping. The endpoint additionally answers `403` with the `scope` needed, which is how a client asks the person for more.

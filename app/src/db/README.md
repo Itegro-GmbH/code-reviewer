@@ -740,7 +740,9 @@ with the grant's `workspace_id` so that a lookup by hash answers the workspace. 
 `lock_timeout` of 5 s that rolls the batch back. **Classification:** `factory-oauth-repository.ts` is **customer data, workspace scoped** (grants: make, list, revoke;
 classified in `scoping.test.ts`, covered in `scoped-isolation.integration.test.ts`); `factory-oauth-directory-repository.ts` is **instance level**, for the reasons in
 `scoping.test.ts` (clients and pending requests have no workspace, a code or a token is looked up by its hash and the workspace is the answer, nothing is listed).
-The erasure of a workspace deletes its codes, tokens and grants; a user merge ends a retired user's grants (`USER_REFERENCES`); the nightly clean-up
+The erasure of a workspace deletes its codes, tokens and grants; a user merge ends a retired user's grants (`USER_REFERENCES`); removing a member, and a member leaving, revokes their grants of that workspace and deletes their codes and tokens
+(`workspace-members-repository.ts`, in the removal's transaction), so they leave the "Connected AI apps" list and cannot return with a new invitation; the directory repository never writes a grant:
+consent, `markConnected`, `touch` and revoke are the scoped repository's; the nightly clean-up
 (`maintenance/cleanup.ts`) removes what expired a day ago. The vocabulary and row types are `factory-oauth-types.ts`, so this layer imports nothing of `src/factory-mcp/`.
 See `src/factory-mcp/README.md`.
 

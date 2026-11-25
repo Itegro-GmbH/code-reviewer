@@ -15,7 +15,7 @@ import {
 import { ACCESS_TOKEN_TTL_MS } from "../oauth/service.ts";
 import { ALL_TOOLS } from "../tools/all.ts";
 import { defineTool } from "../tools/define.ts";
-import { createToolRegistry } from "../tools/registry.ts";
+import { createToolRegistry, type ToolAuditEntry } from "../tools/registry.ts";
 import { createMcpEndpoint } from "./handler.ts";
 
 /** A tool that changes something, which only a control token and an Admin may call. */
@@ -31,11 +31,37 @@ const saveThing = defineTool({
   },
 });
 
+/** A tool that shows what the services seam hands a tool: the token's workspace, person and role, and the actor. */
+const whereAmI = defineTool({
+  name: "where_am_i",
+  title: "Where am I",
+  description: "Test only: reads what context.services hands a tool.",
+  scope: "factory:read",
+  input: {},
+  async handler(context) {
+    const scope = context.services.use((s) => s);
+    return {
+      workspace: scope.access.workspace.slug,
+      workspaceId: scope.access.workspace.id,
+      user: scope.access.user.id,
+      instanceAdmin: scope.access.user.isInstanceAdmin,
+      role: scope.access.role,
+      actor: scope.actor.label,
+    };
+  },
+});
+
 function setup() {
   const world = createWorld();
+  const audit: ToolAuditEntry[] = [];
   const endpoint = createMcpEndpoint({
     service: world.service,
-    registry: createToolRegistry([...ALL_TOOLS, saveThing]),
+    database: () => {
+      throw new Error("no database in this test");
+    },
+    registry: createToolRegistry([...ALL_TOOLS, saveThing, whereAmI], {
+      audit: (entry) => audit.push(entry),
+    }),
     baseUrl: ISSUER,
     environment: {
       productName: "Software Factory",
@@ -43,7 +69,7 @@ function setup() {
     },
     now: () => world.clock.now,
   });
-  return { world, endpoint };
+  return { world, endpoint, audit };
 }
 
 const HEADERS = {
@@ -238,16 +264,21 @@ describe("the MCP protocol on /api/mcp", () => {
         )
       ).result.tools.map((t: { name: string }) => t.name);
     const read = await names(await connected(world, { scope: "factory:read" }));
-    expect(read).toEqual(["describe_factory", "get_lane_schema", "whoami"]);
+    // Judged by each tool's declared scope, so a slice that adds a tool (of either scope) changes nothing here.
+    const declared = [...ALL_TOOLS, saveThing, whereAmI];
+    const byScope = (scopes: string[]) =>
+      declared
+        .filter((tool) => scopes.includes(tool.scope))
+        .map((tool) => tool.name)
+        .sort((x, y) => x.localeCompare(y));
+    expect(read).toEqual(byScope(["factory:read"]));
+    expect(read).toContain("whoami");
+    expect(read).not.toContain("save_thing");
     const control = await names(
       await connected(world, { scope: "factory:control" }),
     );
-    expect(control).toEqual([
-      "describe_factory",
-      "get_lane_schema",
-      "save_thing",
-      "whoami",
-    ]);
+    expect(control).toEqual(byScope(["factory:read", "factory:control"]));
+    expect(control).toContain("save_thing");
   });
 
   // #1144-T172
@@ -416,5 +447,60 @@ describe("the MCP protocol on /api/mcp", () => {
     );
     expect(missing.result.isError).toBe(true);
     expect(missing.result.structuredContent.error).toBe("not_found");
+  });
+});
+
+describe("what a tool can reach and what is written about its call", () => {
+  // #1144-T280
+  it("gives a tool the services of the token's workspace and person, with no instance rank", async () => {
+    const { endpoint, world } = setup();
+    const token = (await connect(world, { scope: "factory:read" })).accessToken;
+    const body = await json(
+      await endpoint.handle(rpc(token, call(1, "where_am_i"))),
+    );
+    expect(body.result.structuredContent).toEqual({
+      workspace: "acme",
+      workspaceId: ACME.id,
+      user: ADA.id,
+      instanceAdmin: false,
+      role: "owner",
+      actor: "Ada via Claude Code",
+    });
+  });
+
+  // #1144-T281
+  it("writes one audit line for each call, including the one refused for its scope, and no argument", async () => {
+    const { endpoint, world, audit } = setup();
+    const read = (await connect(world, { scope: "factory:read" })).accessToken;
+    await endpoint.handle(rpc(read, call(1, "whoami")));
+    await endpoint.handle(
+      rpc(read, call(2, "save_thing", { name: "hunter2" })),
+    );
+    await endpoint.handle(
+      rpc(read, call(3, "get_lane_schema", { section: "nope" })),
+    );
+    expect(audit.map((line) => [line.tool, line.outcome])).toEqual([
+      ["whoami", "ok"],
+      ["save_thing", "insufficient_scope"],
+      ["get_lane_schema", "not_found"],
+    ]);
+    expect(audit[0]).toMatchObject({
+      workspaceId: ACME.id,
+      userId: ADA.id,
+      scope: "factory:read",
+    });
+    expect(audit[0]?.clientId).toMatch(/\S+/);
+    expect(JSON.stringify(audit)).not.toContain("hunter2");
+  });
+
+  // #1144-T282
+  it("writes no line for a request that is no tool call", async () => {
+    const { endpoint, world, audit } = setup();
+    const token = (await connect(world)).accessToken;
+    await endpoint.handle(
+      rpc(token, { jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    );
+    await endpoint.handle(rpc("garbage", call(2, "whoami")));
+    expect(audit).toEqual([]);
   });
 });

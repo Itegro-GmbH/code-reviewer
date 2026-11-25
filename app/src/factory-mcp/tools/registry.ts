@@ -10,11 +10,41 @@ import { can } from "../../workspaces/permissions.ts";
 import { scopeSatisfies, type FactoryScope } from "../scopes.ts";
 import type { ToolContext, ToolSummary } from "./context.ts";
 import { TOOL_NAME_PATTERN, type FactoryTool } from "./define.ts";
-import { ToolError, failureOf, type ToolFailure } from "./errors.ts";
+import {
+  ToolError,
+  failureOf,
+  type ToolErrorCode,
+  type ToolFailure,
+} from "./errors.ts";
 
 export type ToolOutcome =
   | { ok: true; data: Record<string, unknown> }
   | { ok: false; failure: ToolFailure };
+
+/** One line of the audit trail of the tool calls: who did what in which workspace, and how it ended. Never an argument. */
+export type ToolAuditEntry = {
+  tool: string;
+  scope: FactoryScope | null;
+  workspaceId: string;
+  userId: string;
+  clientId: string;
+  /** `ok`, or the error code the call ended with (`insufficient_scope`, `forbidden`, `not_found`, ...). */
+  outcome: "ok" | ToolErrorCode;
+  durationMs: number;
+};
+
+export type ToolRegistryOptions = {
+  /** Where an unexpected failure of a tool is logged (the name of the tool; never what the exception said). */
+  log?: (message: string, error: unknown) => void;
+  /** Where the audit line of every call goes; by default one searchable line on the server's log. */
+  audit?: (entry: ToolAuditEntry) => void;
+};
+
+const defaultLog: NonNullable<ToolRegistryOptions["log"]> = (message, error) =>
+  console.error(message, error instanceof Error ? error.name : "unknown");
+
+const defaultAudit: NonNullable<ToolRegistryOptions["audit"]> = (entry) =>
+  console.info(`[factory-mcp] TOOL_CALL ${JSON.stringify(entry)}`);
 
 export type ToolRegistry = {
   /** Every tool, in name order. */
@@ -24,12 +54,23 @@ export type ToolRegistry = {
   listFor(scopes: readonly FactoryScope[]): readonly FactoryTool[];
   summaries(): readonly ToolSummary[];
   call(name: string, context: ToolContext, args: unknown): Promise<ToolOutcome>;
+  /**
+   * Writes the audit line of a call that never reached `call` (the endpoint refused it for its scope before the tool was looked at), so
+   * every call has exactly one line.
+   */
+  audit(
+    context: ToolContext,
+    name: string,
+    outcome: ToolAuditEntry["outcome"],
+  ): void;
 };
 
 export function createToolRegistry(
   tools: readonly FactoryTool[],
-  log: (message: string, error: unknown) => void = (message, error) =>
-    console.error(message, error instanceof Error ? error.name : "unknown"),
+  {
+    log = defaultLog,
+    audit: writeAudit = defaultAudit,
+  }: ToolRegistryOptions = {},
 ): ToolRegistry {
   const byName = new Map<string, FactoryTool>();
   for (const tool of tools) {
@@ -44,6 +85,25 @@ export function createToolRegistry(
   const sorted = [...byName.values()].sort((a, b) =>
     a.name.localeCompare(b.name),
   );
+
+  /** One audit line: who did what where and how it ended. The name is the tool's, or `unknown` for anything that is none; no argument is ever in it. */
+  function record(
+    context: ToolContext,
+    name: string,
+    outcome: ToolAuditEntry["outcome"],
+    durationMs: number,
+  ): void {
+    const tool = byName.get(name);
+    writeAudit({
+      tool: tool === undefined ? "unknown" : tool.name,
+      scope: tool === undefined ? null : tool.scope,
+      workspaceId: context.workspace.id,
+      userId: context.user.id,
+      clientId: context.client.id,
+      outcome,
+      durationMs,
+    });
+  }
 
   const failure = (error: ToolError): ToolOutcome => ({
     ok: false,
@@ -63,7 +123,30 @@ export function createToolRegistry(
         scope,
       })),
 
+    audit(context, name, outcome) {
+      record(context, name, outcome, 0);
+    },
+
     async call(name, context, args) {
+      const started = Date.now();
+      const outcome = await execute(name, context, args);
+      record(
+        context,
+        name,
+        outcome.ok ? "ok" : outcome.failure.error,
+        Date.now() - started,
+      );
+      return outcome;
+    },
+  };
+
+  /** The call itself: the same steps for every tool, in this order. */
+  async function execute(
+    name: string,
+    context: ToolContext,
+    args: unknown,
+  ): Promise<ToolOutcome> {
+    {
       const tool = byName.get(name);
       if (tool === undefined)
         return failure(
@@ -110,6 +193,6 @@ export function createToolRegistry(
           ),
         );
       }
-    },
-  };
+    }
+  }
 }

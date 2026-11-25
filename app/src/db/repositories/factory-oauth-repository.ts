@@ -113,6 +113,32 @@ export function createFactoryOAuthRepository(
       }));
     },
 
+    async markConnected(grantId, now) {
+      await db
+        .updateTable("factory_oauth_grants")
+        .set({ connected_at: now })
+        .where("id", "=", grantId)
+        .where("workspace_id", "=", workspaceId)
+        .where("connected_at", "is", null)
+        .execute();
+    },
+
+    async touch(grantId, now, minIntervalMs) {
+      const before = formatTimestamp(new Date(Date.parse(now) - minIntervalMs));
+      await db
+        .updateTable("factory_oauth_grants")
+        .set({ last_used_at: now })
+        .where("id", "=", grantId)
+        .where("workspace_id", "=", workspaceId)
+        .where((eb) =>
+          eb.or([
+            eb("last_used_at", "is", null),
+            eb("last_used_at", "<=", before),
+          ]),
+        )
+        .execute();
+    },
+
     async revoke(grantId, now) {
       const run = async (executor: Kysely<Database>): Promise<boolean> => {
         const result = await executor

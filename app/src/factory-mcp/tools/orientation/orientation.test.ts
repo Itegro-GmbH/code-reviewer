@@ -83,19 +83,35 @@ describe("describe_factory", () => {
 
   // #1144-T144
   it("lists every tool and whether the scope lets this connection call it", async () => {
-    const answer = (await data(
+    type Listed = {
+      tools: { name: string; scope: string; callable: boolean }[];
+      you: { mayControl: boolean };
+    };
+    // Each tool is judged by the scope it declares, so a slice that adds a control tool changes nothing here.
+    const read = (await data(
       "describe_factory",
       {},
       { scopes: ["factory:read"] },
-    )) as {
-      tools: { name: string; callable: boolean }[];
-      you: { mayControl: boolean };
-    };
-    expect(answer.you.mayControl).toBe(false);
-    expect(answer.tools.map((t) => t.name)).toEqual(
+    )) as Listed;
+    expect(read.you.mayControl).toBe(false);
+    expect(read.tools.map((t) => t.name)).toEqual(
       expect.arrayContaining(["whoami", "describe_factory", "get_lane_schema"]),
     );
-    expect(answer.tools.every((t) => t.callable)).toBe(true);
+    expect(read.tools.map((t) => t.name).sort()).toEqual(
+      ALL_TOOLS.map((tool) => tool.name).sort(),
+    );
+    for (const tool of read.tools)
+      expect([tool.name, tool.callable]).toEqual([
+        tool.name,
+        tool.scope === "factory:read",
+      ]);
+    const control = (await data(
+      "describe_factory",
+      {},
+      { scopes: ["factory:control"] },
+    )) as Listed;
+    for (const tool of control.tools)
+      expect([tool.name, tool.callable]).toEqual([tool.name, true]);
   });
 
   // #1144-T145

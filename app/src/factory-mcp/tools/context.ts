@@ -5,17 +5,11 @@
 // reads a workspace or a user from its arguments.
 import type { WorkspaceRole } from "../../db/workspace-roles.ts";
 import type { FactoryScope } from "../scopes.ts";
+import type { WorkspaceAccess } from "../../workspaces/access.ts";
 import type { Principal } from "../oauth/service.ts";
+import type { ToolActor, ToolServices } from "./services.ts";
 
-/** Who did a write: the person, and the AI app that did it for them. */
-export type ToolActor = {
-  userId: string;
-  userName: string;
-  clientId: string;
-  clientName: string;
-  /** One line for a place that stores a name or a note: `Ada via Claude Code`. */
-  label: string;
-};
+export type { ToolActor };
 
 /** One tool as `describe_factory` lists it. */
 export type ToolSummary = {
@@ -33,6 +27,13 @@ export type ToolContext = {
   /** What the person approved. A tool needing `factory:read` is allowed by `factory:control` too. */
   scopes: readonly FactoryScope[];
   client: { id: string; name: string };
+  /**
+   * What a route of the web app gets from `withWorkspace`: the person (without instance rank), the workspace of the token and the role now.
+   * Hand it to the services and handlers the app already has.
+   */
+  access: WorkspaceAccess;
+  /** The app's own services for this workspace and person: `context.services.use(factory)` (see `services.ts`). */
+  services: ToolServices;
   /** The person and the app, for the field of a write that stores who did it. The app's own user id fields take `user.id`. */
   actor: ToolActor;
   connectedAt: string | null;

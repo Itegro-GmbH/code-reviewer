@@ -33,8 +33,8 @@ const CORS = {
 export type OAuthHttpDependencies = {
   service: OAuthService;
   baseUrl: string;
-  /** Whether one more registration is allowed now (a counter shared by the whole instance); false answers 429. */
-  allowRegistration: () => Promise<boolean>;
+  /** Whether one more registration from this request is allowed now (a counter per caller address, and one for the instance); false answers 429. */
+  allowRegistration: (request: Request) => Promise<boolean>;
   /** Whether the request comes with a session that may use the app; `null` sends the person to the sign in. */
   currentUser: () => Promise<SessionUser | null>;
 };
@@ -74,6 +74,7 @@ function errorPage(title: string, message: string): Response {
       "cache-control": "no-store",
       "content-security-policy":
         "default-src 'none'; style-src 'none'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
     },
@@ -136,7 +137,7 @@ export function createOAuthHandlers({
           "The body is not valid JSON.",
         );
       }
-      if (!(await allowRegistration()))
+      if (!(await allowRegistration(request)))
         return oauthError(
           429,
           "temporarily_unavailable",

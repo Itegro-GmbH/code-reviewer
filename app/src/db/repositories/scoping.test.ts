@@ -158,7 +158,7 @@ const SCOPED = [
  * - factory-oauth-directory: the OAuth server of the factory MCP (#1144) before a workspace is known: AI apps register themselves
  *   (clients, no secret), an authorization request has not chosen a workspace yet, and a code or a token arrives holding only its
  *   secret (the database keeps the hash), so the lookup answers the workspace and never takes one. It never lists customer data (no
- *   function lists grants), every answer names its own workspace, and every change of a grant (consent, revoking, listing) goes through
+ *   function lists grants), every answer names its own workspace, and every change of a grant (consent, marking it connected or used, revoking, listing) goes through
  *   the scoped factory OAuth repository; the clean-up deletes expired rows of every workspace and reads nothing;
  * - instance-settings-store: the generic key/value access to `instance_settings` (#715, cut 2), which the repository of the
  *   whole instance and the domains that own a key (billing, the setup wizard) build on. Instance level like the repository,

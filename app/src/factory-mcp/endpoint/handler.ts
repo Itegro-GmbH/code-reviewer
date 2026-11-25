@@ -20,11 +20,14 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { Kysely } from "kysely";
+import type { Database } from "../../db/schema.ts";
 import { readLimitedBody } from "../../webhooks/limited-body.ts";
 import { resourceMetadataUrl } from "../oauth/metadata.ts";
 import type { OAuthService, Principal } from "../oauth/service.ts";
 import { scopeSatisfies } from "../scopes.ts";
 import { actorOf, type ToolContext } from "../tools/context.ts";
+import { createToolServices, sessionUserOf } from "../tools/services.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 
 export const MCP_BODY_MAX_BYTES = 1024 * 1024;
@@ -38,6 +41,8 @@ export type McpEndpointDependencies = {
   registry: ToolRegistry;
   baseUrl: string;
   environment: { productName: string; capabilities: readonly string[] };
+  /** The database the services of a tool use, opened only when a tool asks (`context.services`). */
+  database: () => Kysely<Database>;
   now?: () => Date;
 };
 
@@ -78,6 +83,7 @@ export function createMcpEndpoint({
   registry,
   baseUrl,
   environment,
+  database,
   now = () => new Date(),
 }: McpEndpointDependencies) {
   const metadata = resourceMetadataUrl(baseUrl);
@@ -140,13 +146,21 @@ export function createMcpEndpoint({
   }
 
   function contextOf(principal: Principal): ToolContext {
+    const actor = actorOf(principal);
+    const access = {
+      user: sessionUserOf(principal.user),
+      workspace: principal.workspaceRecord,
+      role: principal.role,
+    };
     return {
       user: principal.user,
       workspace: principal.workspace,
       role: principal.role,
       scopes: principal.scopes,
       client: principal.client,
-      actor: actorOf(principal),
+      actor,
+      access,
+      services: createToolServices({ access, actor, database }),
       connectedAt: principal.connectedAt,
       accessTokenExpiresAt: principal.tokenExpiresAt,
       environment: { ...environment, baseUrl },
@@ -274,7 +288,14 @@ export function createMcpEndpoint({
       }
 
       const denied = deniedCall(parsed, authenticated.principal);
-      if (denied !== null) return insufficientScope(denied.scope, denied.name);
+      if (denied !== null) {
+        registry.audit(
+          contextOf(authenticated.principal),
+          denied.name,
+          "insufficient_scope",
+        );
+        return insufficientScope(denied.scope, denied.name);
+      }
 
       const server = serverFor(authenticated.principal);
       const transport = new WebStandardStreamableHTTPServerTransport({

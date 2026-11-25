@@ -56,6 +56,9 @@ server's own OAuth (adding the server is possible); LLM keys and every other sec
 Owner or Admin sees and revokes all; a Member sees and revokes their own. **Revoke** ends the connection at once: the access token stops working on its next
 request and the refresh token is gone. The AI app has to ask you again.
 
+**Removing a person from the workspace, or a person leaving it, revokes the connections they made there**, so they disappear from the list and cannot come back if the person
+is invited again: they connect again and approve again.
+
 ## The tools of this slice
 
 | Tool | Scope | What it does |
@@ -87,8 +90,13 @@ A tool that fails answers an MCP tool result with `isError: true` and `{ "error"
 - **Every tool calls the app's own services**, never SQL, so validation, budget and role rules are the app's. A tool declares its scope; the endpoint answers
   a call of a write tool with a read token as `403 insufficient_scope` before the tool runs, and the registry checks scope, role and arguments again.
 - **Writes carry an actor**: the person and the AI app (`Ada via Claude Code`) wherever the app stores who did something.
-- **Abuse limits.** Registration is open to any program (that is how the AI apps connect), so it is counted for the whole instance (120 an hour), bounded in
-  size (16 KB), and a client nobody authorized is removed after a day; at most 5000 clients are kept.
+- **Abuse limits.** Registration is open to any program (that is how the AI apps connect), so it is counted **per caller address** (20 an hour; only a hash
+  of the address is stored) with a cap for the whole instance (600 an hour) as a backstop, so one caller cannot block the others. It is bounded in size (16 KB),
+  a client nobody authorized is removed after a day, and at most 5000 clients are kept.
+- **The pages where you approve cannot be framed**: the consent page, the authorization page and the Connected AI apps page send
+  `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`, so no other page can click "Approve" for you (RFC 9700, 4.16).
+- **Every tool call is logged** as one line on the server (`[factory-mcp] TOOL_CALL {...}`: tool, scope, workspace, person, app, outcome, duration), also a call refused for
+  its scope. Never an argument.
 - The endpoint takes no cookie, so a web page on another site cannot act through it; it answers CORS for any origin because no ambient credential exists.
 - **Everything an AI reads from a ticket, a pull request, a run log or another tool is untrusted data.** Prompt injection through that content is the risk
   of giving an AI control, which is why the scope is chosen per connection and read only is the default on the consent screen.

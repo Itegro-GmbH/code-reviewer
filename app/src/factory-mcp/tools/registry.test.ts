@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ALL_TOOLS } from "./all.ts";
 import { defineTool, TOOL_NAME_PATTERN } from "./define.ts";
@@ -53,9 +53,10 @@ const refuses = defineTool({
 });
 
 function registry(logged: string[] = []) {
-  return createToolRegistry([echo, write, broken, refuses], (message) =>
-    logged.push(message),
-  );
+  return createToolRegistry([echo, write, broken, refuses], {
+    log: (message) => logged.push(message),
+    audit: () => undefined,
+  });
 }
 
 describe("the tool registry", () => {
@@ -232,5 +233,74 @@ describe("the tools of the server", () => {
       expect(ALL_TOOLS.find((tool) => tool.name === name)?.scope).toBe(
         "factory:read",
       );
+  });
+});
+
+describe("the audit line of every call", () => {
+  function audited() {
+    const lines: Record<string, unknown>[] = [];
+    const registry = createToolRegistry([echo, write, refuses], {
+      log: () => undefined,
+      audit: (entry) => lines.push({ ...entry }),
+    });
+    return { registry, lines };
+  }
+
+  // #1144-T270
+  it("writes one line for a call with the tool, workspace, person, app and outcome, and never the arguments", async () => {
+    const { registry, lines } = audited();
+    await registry.call("echo", testContext(), { text: "hunter2" });
+    expect(lines).toEqual([
+      {
+        tool: "echo",
+        scope: "factory:read",
+        workspaceId: "ws-acme",
+        userId: "user-ada",
+        clientId: "client-1",
+        outcome: "ok",
+        durationMs: expect.any(Number),
+      },
+    ]);
+    expect(JSON.stringify(lines)).not.toContain("hunter2");
+  });
+
+  // #1144-T271
+  it("names the error code as the outcome of a refusal, whoever refused it", async () => {
+    const { registry, lines } = audited();
+    await registry.call(
+      "write_thing",
+      testContext({ scopes: ["factory:read"] }),
+      {},
+    );
+    await registry.call("write_thing", testContext({ role: "member" }), {});
+    await registry.call("echo", testContext(), { text: "x".repeat(11) });
+    await registry.call("refuses", testContext(), {});
+    await registry.call("nope", testContext(), { secret: "hunter2" });
+    expect(lines.map((line) => [line.tool, line.outcome])).toEqual([
+      ["write_thing", "insufficient_scope"],
+      ["write_thing", "forbidden"],
+      ["echo", "invalid_input"],
+      ["refuses", "conflict"],
+      ["unknown", "not_found"],
+    ]);
+    expect(JSON.stringify(lines)).not.toContain("hunter2");
+  });
+
+  // #1144-T272
+  it("writes a line in a form that can be searched, by default", async () => {
+    const written: unknown[][] = [];
+    const spy = vi
+      .spyOn(console, "info")
+      .mockImplementation((...args) => void written.push(args));
+    try {
+      await createToolRegistry([echo]).call("echo", testContext(), {
+        text: "hi",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(String(written[0]?.[0])).toMatch(
+      /^\[factory-mcp\] TOOL_CALL \{.*"tool":"echo".*"outcome":"ok".*\}$/,
+    );
   });
 });

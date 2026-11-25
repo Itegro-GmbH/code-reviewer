@@ -409,3 +409,34 @@ describe("consent and token endpoints, end to end", () => {
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
   });
 });
+
+describe("registration limit by caller", () => {
+  // #1144-T295
+  it("asks the limit about the request itself, so it can tell callers apart", async () => {
+    const world = createWorld();
+    const seen: (string | null)[] = [];
+    const handlers = createOAuthHandlers({
+      service: world.service,
+      baseUrl: ISSUER,
+      allowRegistration: async (request) => {
+        seen.push(request.headers.get("x-forwarded-for"));
+        return request.headers.get("x-forwarded-for") !== "203.0.113.7";
+      },
+      currentUser: async () => null,
+    });
+    const register = (address: string) =>
+      handlers.register(
+        new Request(`${ISSUER}/api/oauth/register`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": address,
+          },
+          body: JSON.stringify({ redirect_uris: [REDIRECT] }),
+        }),
+      );
+    expect((await register("203.0.113.7")).status).toBe(429);
+    expect((await register("198.51.100.9")).status).toBe(201);
+    expect(seen).toEqual(["203.0.113.7", "198.51.100.9"]);
+  });
+});

@@ -137,19 +137,6 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
         state.tokens.set(tokenHash, { ...token, usedAt: now });
         return true;
       },
-      async markGrantConnected(grantId, now) {
-        const grant = state.grants.get(grantId);
-        if (grant !== undefined && grant.connectedAt === null)
-          state.grants.set(grantId, { ...grant, connectedAt: now });
-      },
-      async touchGrant(grantId, now, minIntervalMs) {
-        const grant = state.grants.get(grantId);
-        if (grant === undefined) return;
-        const last =
-          grant.lastUsedAt === null ? 0 : Date.parse(grant.lastUsedAt);
-        if (Date.parse(now) - last >= minIntervalMs)
-          state.grants.set(grantId, { ...grant, lastUsedAt: now });
-      },
     },
     scoped(workspaceId) {
       return {
@@ -197,6 +184,23 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
               connectedAt: grant.connectedAt as string,
               lastUsedAt: grant.lastUsedAt,
             }));
+        },
+        async markConnected(grantId, now) {
+          const grant = state.grants.get(grantId);
+          if (
+            grant !== undefined &&
+            grant.workspaceId === workspaceId &&
+            grant.connectedAt === null
+          )
+            state.grants.set(grantId, { ...grant, connectedAt: now });
+        },
+        async touch(grantId, now, minIntervalMs) {
+          const grant = state.grants.get(grantId);
+          if (grant === undefined || grant.workspaceId !== workspaceId) return;
+          const last =
+            grant.lastUsedAt === null ? 0 : Date.parse(grant.lastUsedAt);
+          if (Date.parse(now) - last >= minIntervalMs)
+            state.grants.set(grantId, { ...grant, lastUsedAt: now });
         },
         async revoke(grantId, now) {
           const grant = state.grants.get(grantId);

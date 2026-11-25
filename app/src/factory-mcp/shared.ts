@@ -18,15 +18,11 @@ import { createConnectedAppsService } from "./apps/service.ts";
 import { createMcpEndpoint } from "./endpoint/handler.ts";
 import { createOAuthHandlers } from "./oauth/http.ts";
 import { resourceOf } from "./oauth/metadata.ts";
+import { createRegistrationLimiter } from "./oauth/registration-limit.ts";
 import { createOAuthService, type OAuthService } from "./oauth/service.ts";
 import type { OAuthStore } from "./oauth/store.ts";
 import { ALL_TOOLS } from "./tools/all.ts";
 import { createToolRegistry } from "./tools/registry.ts";
-
-/** Registrations the whole instance allows per hour: anybody may register, so the endpoint is counted like the sign in. */
-export const REGISTRATIONS_PER_HOUR = 120;
-const REGISTRATION_WINDOW_MS = 60 * 60 * 1000;
-const REGISTRATION_KEY = "factory-oauth-register";
 
 const registry = createToolRegistry(ALL_TOOLS);
 
@@ -56,13 +52,9 @@ export function getOAuthHandlers() {
   return createOAuthHandlers({
     service: getOAuthService(),
     baseUrl: address,
-    allowRegistration: async () =>
-      (
-        await createRateLimitsRepository(getDatabase()).hit(
-          REGISTRATION_KEY,
-          REGISTRATION_WINDOW_MS,
-        )
-      ).count <= REGISTRATIONS_PER_HOUR,
+    allowRegistration: createRegistrationLimiter(
+      createRateLimitsRepository(getDatabase()),
+    ),
     currentUser: async () => {
       const lookup = await currentLookup();
       return lookup.kind === "user" ? lookup.user : null;
@@ -75,6 +67,7 @@ export function getMcpEndpoint() {
     service: getOAuthService(),
     registry,
     baseUrl: baseUrl(),
+    database: getDatabase,
     environment: {
       productName: getProductIdentity().name,
       capabilities: getCapabilities().list(),

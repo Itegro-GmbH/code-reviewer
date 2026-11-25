@@ -165,6 +165,8 @@ export type Principal = {
   grantId: string;
   user: { id: string; name: string; email: string };
   workspace: { id: string; slug: string; name: string };
+  /** The workspace as the app's own code has it (`WorkspaceAccess.workspace`). */
+  workspaceRecord: Membership["workspace"];
   /** The role the person has NOW in the workspace. */
   role: WorkspaceRole;
   /** What the person approved. */
@@ -732,7 +734,9 @@ export function createOAuthService({
           return invalidGrant;
         if ((await stillMember(found.grant)) === undefined) return invalidGrant;
         const body = await issueTokens(found.grant);
-        await directory.markGrantConnected(found.grant.id, at());
+        await store
+          .scoped(found.grant.workspaceId)
+          .markConnected(found.grant.id, at());
         return { kind: "ok", body };
       }
 
@@ -787,7 +791,9 @@ export function createOAuthService({
         if ((await stillMember(found.grant)) === undefined) return invalidGrant;
         if (!(await directory.markRefreshUsed(hash, at()))) return invalidGrant;
         const body = await issueTokens(found.grant);
-        await directory.touchGrant(found.grant.id, at(), 0);
+        await store
+          .scoped(found.grant.workspaceId)
+          .touch(found.grant.id, at(), 0);
         return { kind: "ok", body };
       }
 
@@ -838,11 +844,9 @@ export function createOAuthService({
       const membership = await stillMember(found.grant);
       if (membership === undefined)
         return invalid("The access to the workspace ended.");
-      await directory.touchGrant(
-        found.grant.id,
-        at(),
-        LAST_USED_WRITE_INTERVAL_MS,
-      );
+      await store
+        .scoped(found.grant.workspaceId)
+        .touch(found.grant.id, at(), LAST_USED_WRITE_INTERVAL_MS);
       return {
         kind: "ok",
         principal: {
@@ -853,6 +857,7 @@ export function createOAuthService({
             slug: membership.workspace.slug,
             name: membership.workspace.name,
           },
+          workspaceRecord: membership.workspace,
           role: membership.role,
           scopes: found.grant.scopes,
           client: found.client,

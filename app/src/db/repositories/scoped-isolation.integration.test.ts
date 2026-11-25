@@ -796,7 +796,7 @@ async function seed(
     },
     now: factoryAt,
   });
-  await factoryDirectory.markGrantConnected(`factory-grant-${tag}`, factoryAt);
+  await repos.factoryOAuth.markConnected(`factory-grant-${tag}`, factoryAt);
   await factoryDirectory.insertTokens([
     {
       tokenHash: `factory-token-${tag}`,
@@ -3366,6 +3366,22 @@ const CASES: Case[] = [
       expect(answer).toEqual([
         expect.objectContaining({ id: a.factoryGrantId, userName: a.userId }),
       ]),
+  },
+  {
+    // #1144-T243: B's grant is not A's to mark as connected or as used.
+    name: "factoryOAuth.markConnected",
+    run: (a, b) =>
+      a.factoryOAuth.markConnected(
+        b.factoryGrantId,
+        "2026-11-25T12:00:00.000Z",
+      ),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "factoryOAuth.touch",
+    run: (a, b) =>
+      a.factoryOAuth.touch(b.factoryGrantId, "2026-11-25T12:00:00.000Z", 0),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
     name: "factoryOAuth.revoke",
