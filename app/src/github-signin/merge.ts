@@ -52,6 +52,7 @@ export const USER_REFERENCES: ReadonlyArray<{
   { table: "email_verification_tokens", column: "user_id", handling: "ends" },
   { table: "signed_states", column: "user_id", handling: "ends" },
   { table: "plan_handoff_tokens", column: "user_id", handling: "ends" },
+  { table: "factory_oauth_grants", column: "user_id", handling: "ends" },
   { table: "workspace_members", column: "user_id", handling: "membership" },
   { table: "workspaces", column: "created_by", handling: "move" },
   { table: "instance_settings", column: "updated_by", handling: "move" },

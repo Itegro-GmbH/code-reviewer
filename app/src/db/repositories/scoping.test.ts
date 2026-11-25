@@ -36,6 +36,7 @@ const SCOPED = [
   "jira-connections-repository.ts",
   "jira-webhooks-repository.ts",
   "mcp-oauth-repository.ts",
+  "factory-oauth-repository.ts",
   "mcp-servers-repository.ts",
   "job-check-runs-repository.ts",
   "job-vm-runs-repository.ts",
@@ -154,6 +155,11 @@ const SCOPED = [
  *   (the database keeps its hash), so there is no workspace to scope to before the secret is looked up; it never lists, and every
  *   answer names its own workspace, which is where everything that follows goes. Making a token, the list and revoking a runner go
  *   through the scoped runners repository;
+ * - factory-oauth-directory: the OAuth server of the factory MCP (#1144) before a workspace is known: AI apps register themselves
+ *   (clients, no secret), an authorization request has not chosen a workspace yet, and a code or a token arrives holding only its
+ *   secret (the database keeps the hash), so the lookup answers the workspace and never takes one. It never lists customer data (no
+ *   function lists grants), every answer names its own workspace, and every change of a grant (consent, revoking, listing) goes through
+ *   the scoped factory OAuth repository; the clean-up deletes expired rows of every workspace and reads nothing;
  * - instance-settings-store: the generic key/value access to `instance_settings` (#715, cut 2), which the repository of the
  *   whole instance and the domains that own a key (billing, the setup wizard) build on. Instance level like the repository,
  *   and it knows no setting;
@@ -173,6 +179,7 @@ const INSTANCE_LEVEL = [
   "claim-admission.ts",
   "implementer-sessions-sweep.ts",
   "installation-link-request-directory-repository.ts",
+  "factory-oauth-directory-repository.ts",
   "instance-setting-types.ts",
   "instance-settings-repository.ts",
   "instance-settings-store.ts",
