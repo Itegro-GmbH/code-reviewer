@@ -1,0 +1,15 @@
+AF_VSOCK socket: created by root in the container
+local CID: 3
+--- sysctls/features the agent can change as root:
+net.ipv4.ip_forward = 1
+vm.overcommit_memory = 0
+--- can root load a module / touch /sys/kernel / mount block devs:
+modprobe: FATAL: Module dummy not found in directory /lib/modules/6.18.64-cloudflare-microvm-2026.11.44
+/dev/vda /dev/vdb 
+mount: /mnt/x: /dev/vda already mounted or mount point busy.
+bin
+bin.usr-is-merged
+boot
+
+ERR: 
+exit 0 ms 84

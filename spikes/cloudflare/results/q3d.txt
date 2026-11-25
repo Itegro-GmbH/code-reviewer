@@ -1,0 +1,23 @@
+--- git clone over HTTPS through the door (CA in system store)
+   [0.86 s rc=0] git clone -q --depth 1 https://github.com/octocat/Hello-World.git /tmp/hw
+README
+--- git over ssh (port 22)
+and the repository exists.
+   [0.03 s rc=128] git ls-remote git@github.com:octocat/Hello-World.git
+--- tool with its own trust store: python certifi/requests-like (urllib uses system), go-like not available; curl with explicit --cacert none:
+200
+   [0.12 s rc=0] curl -sS -m 8 -o /dev/null -w %{http_code}\n --cacert /etc/ssl/certs/ca-certificates.crt https://example.com
+000
+   [0.05 s rc=0] sh -c curl -sS -m 8 -o /dev/null -w "%{http_code}\n" --capath /nonexistent --cacert /dev/null https://example.com 2>&1 | tail -1
+--- registry / big body (npm registry GET)
+200 22573B
+   [0.35 s rc=0] curl -sS -m 10 -o /dev/null -w %{http_code} %{size_download}B\n https://registry.npmjs.org/left-pad
+--- POST through the door to a listed host (registry write is the handler's call)
+404
+   [0.33 s rc=0] curl -sS -m 10 -o /dev/null -w %{http_code}\n -X PUT -d {} https://registry.npmjs.org/spike-fake-pkg
+--- throughput through the door: 20 MB from a listed host?
+302 0B 0 B/s
+   [0.39 s rc=0] curl -sS -m 40 -o /dev/null -w %{http_code} %{size_download}B %{speed_download} B/s\n https://github.com/octocat/Hello-World/archive/refs/heads/master.zi
+
+ERR: 
+exit 0 ms 2208

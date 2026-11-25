@@ -1,0 +1,6 @@
+lite: {"started_ms":0,"ready_ms":159,"exec_ms":159} :: nproc=1 mem_total_mb=414 root=1908M avail 1580M cpu.max=max 100000 memory.max=268435456 uptime_s=33366
+basic: {"started_ms":0,"ready_ms":184,"exec_ms":184} :: nproc=1 mem_total_mb=1196 root=3815M avail 3487M cpu.max=max 100000 memory.max=1073741824 uptime_s=29693
+standard-1: {"started_ms":0,"ready_ms":293,"exec_ms":293} :: nproc=1 mem_total_mb=4320 root=7630M avail 7302M cpu.max=max 100000 memory.max=4294967296 uptime_s=6033
+standard-2: {"started_ms":0,"ready_ms":277,"exec_ms":277} :: nproc=1 mem_total_mb=6402 root=11445M avail 11117M cpu.max=max 100000 memory.max=6442450944 uptime_s=33471
+standard-3: {"started_ms":0,"ready_ms":118,"exec_ms":118} :: nproc=2 mem_total_mb=8484 root=15259M avail 14931M cpu.max=max 100000 memory.max=8589934592 uptime_s=33005
+standard-4: {"started_ms":0,"ready_ms":111,"exec_ms":111} :: nproc=4 mem_total_mb=12650 root=19074M avail 18746M cpu.max=max 100000 memory.max=12884901888 uptime_s=33006

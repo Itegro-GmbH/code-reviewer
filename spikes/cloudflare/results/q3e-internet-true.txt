@@ -1,0 +1,23 @@
+ip: cfeth0           UP             10.0.0.1/24 fd00::11/8 fe80::211:22ff:fe33:4466/64 
+default via 10.0.0.254 dev cfeth0 proto static 
+10.0.0.0/24 dev cfeth0 proto kernel scope link src 10.0.0.1 
+nameserver 1.1.1.1 nameserver 9.9.9.9 nameserver 2606:4700:4700::1111 
+  dns example.com -> 2606:4700:10::ac42:93f3 example.com 2606:4700:10::6814:179a example.com 
+  dns github.com -> 140.82.121.4    STREAM github.com 140.82.121.4    DGRAM   140.82.121.4    RAW     
+  dig @1.1.1.1 example.com -> ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 2251 example.com.		144	IN	A	104.20.23.154 example.com.		144	IN	A	172.66.147.243 
+  http example.com (intercepted?) -> 200 remote=104.20.23.154 
+  https example.com (CA of the door?) -> issuer=CN = Cloudflare TLS proxy-everything Intercept CA 
+  https www.facebook.com (not on list) -> 403 remote=57.144.110.1 
+  tcp github.com:22 -> Connection to github.com (140.82.121.4) 22 port [tcp/ssh] succeeded! 
+  ssh banner github.com:22 -> SSH-2.0-6c05662b 
+  tcp 8.8.8.8:853 -> Connection to 8.8.8.8 853 port [tcp/domain-s] succeeded! 
+  http example.com:8080 (other HTTP port) -> curl: (28) Operation timed out after 6001 milliseconds with 0 bytes received 000 remote=104.20.23.154 
+  https on 8443 -> curl: (28) Operation timed out after 6002 milliseconds with 0 bytes received 000 remote=172.66.147.243 
+  icmp 1.1.1.1 -> PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data. From 10.0.0.2 icmp_seq=1 Destination Net Unreachable  --- 1.1.1.1 ping statistics --- 1 packets transmitted, 0 received, +1 errors, 100% packet loss, time 
+  metadata 169.254.169.254 -> 403 
+  private 10.0.0.2 HTTP -> 403 
+  gateway ping 10.0.0.254 -> PING 10.0.0.254 (10.0.0.254) 56(84) bytes of data.  --- 10.0.0.254 ping statistics --- 1 packets transmitted, 0 received, 100% packet loss, time 0ms  
+  egress IP -> door: api.ipify.org not allowed
+
+ERR: 
+exit 0 ms 20059

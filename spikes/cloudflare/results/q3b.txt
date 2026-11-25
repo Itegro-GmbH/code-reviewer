@@ -1,0 +1,26 @@
+--- the model door (hostname only in the Worker; key lives in the Worker)
+  http model.door -> {"door":"model","saw_authorization_header_from_container":false,"key_digest_added_by_door":"80694a2adcdc","method":"POST","path":"/v1/chat","body_bytes":15}
+  http model.door + forged Authorization -> {"door":"model","saw_authorization_header_from_container":true,"key_digest_added_by_door":"80694a2adcdc","method":"GET","path":"/v1/x","body_bytes":0}
+  https model.door -> {"door":"model","saw_authorization_header_from_container":false,"key_digest_added_by_door":"80694a2adcdc","method":"GET","path":"/v1/x","body_bytes":0}
+  container env/files mention the key? -> scan-done 
+--- dig details (UDP :53 to 1.1.1.1 with enableInternet=false)
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 26574
+;; ANSWER SECTION:
+example.com.		1	IN	A	11.9.0.1
+;; SERVER: 1.1.1.1#53(1.1.1.1) (UDP)
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 9546
+;; ANSWER SECTION:
+anything.invalid.	1	IN	AAAA	fd00::119:1
+;; SERVER: 8.8.8.8#53(8.8.8.8) (UDP)
+  tcp 1.1.1.1:443 then raw bytes (not TLS) -> 
+  tcp 1.1.1.1:80 raw HTTP -> HTTP/1.1 200 OK Accept-Ranges: bytes Age: 8820 Allow: GET
+  ssh-like tcp 22 to 140.82.112.3 (github) -> 
+  tcp 8.8.8.8:853 -> 
+--- Host header vs TLS SNI: ask for example.com on the wire but send Host: www.facebook.com (docs: URL comes from Host!)
+  https example.com, Host: www.facebook.com -> 403 
+  http example.com, Host: www.facebook.com -> 403 
+  https example.com, SNI example.com, Host: github.com -> 200 
+  --connect-to: SNI www.facebook.com to the placeholder of example.com -> 403 
+
+ERR: 
+exit 0 ms 13887

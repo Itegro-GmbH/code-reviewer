@@ -1,0 +1,80 @@
+   [66.9 s rc=0] sh -c apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq bzip2 >/dev/null 2>&1
+   [3.45 s rc=0] curl -fsSL -o gv.tar.bz2 https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/gvisor.tar.bz2
+gv:
+containerd-shim-runsc-v1
+gvisor-bin
+runsc
+
+gv/gvisor-bin:
+checkpointgofer
+gvisor-proc-umounter
+gvisor-sentry-prewarmer
+gvisor_sentry
+runsc version release-20261123.0
+spec: 1.2.1
+--- platform systrap
+   [2.17 s rc=127] docker run --rm --runtime=runsc public.ecr.aws/docker/library/busybox:1.37 sh -c uname -a; id; cat /proc/self/status | grep -E "Cap(Eff)"; ip -br a; wg
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: creating container: cannot create sandbox: cannot create sandbox process: sidecar "gvisor_sentry" not usable: stat /usr/local/bin/gvisor-bin/gvisor_sentry: no such file or directory
+
+Run 'docker run --help' for more information
+--- platform kvm
+   [0.37 s rc=127] docker run --rm --runtime=runsc public.ecr.aws/docker/library/busybox:1.37 sh -c uname -a; id; cat /proc/self/status | grep -E "Cap(Eff)"; ip -br a; wg
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: creating container: cannot create sandbox: cannot create sandbox process: sidecar "gvisor_sentry" not usable: stat /usr/local/bin/gvisor-bin/gvisor_sentry: no such file or directory
+
+Run 'docker run --help' for more information
+
+ERR: docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: creating container: cannot create sandbox: cannot create sandbox process: sidecar "gvisor_sentry" not usable: stat /usr/local/bin/gvisor-bin/gvisor_sentry: no such file or directory
+
+Run 'docker run --help' for more information
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: creating container: cannot create sandbox: cannot create sandbox process: sidecar "gvisor_sentry" not usable: stat /usr/local/bin/gvisor-bin/gvisor_sentry: no such file or directory
+
+Run 'docker run --help' for more information
+
+--- platform systrap
+Linux 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+uid=0(root) gid=0(root) groups=0(root),10(wheel)
+CapEff:	00000000a80405fb
+<!doctype html><html lang=en><head><meta
+   [1.13 s rc=0] docker run --rm --runtime=runsc public.ecr.aws/docker/library/busybox:1.37 sh -c uname -srv; id; grep CapEff /proc/self/status; ip -br a | head -3; wget 
+--- platform kvm
+Linux 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016
+uid=0(root) gid=0(root) groups=0(root),10(wheel)
+CapEff:	00000000a80405fb
+<!doctype html><html lang=en><head><meta
+   [1.06 s rc=0] docker run --rm --runtime=runsc public.ecr.aws/docker/library/busybox:1.37 sh -c uname -srv; id; grep CapEff /proc/self/status; ip -br a | head -3; wget 
+
+ERR: BusyBox v1.37.0 (2024-09-26 21:31:42 UTC) multi-call binary.
+
+Usage: ip [OPTIONS] address|route|link|tunnel|neigh|rule [ARGS]
+
+OPTIONS := -f[amily] inet|inet6|link | -o[neline]
+
+ip addr add|del IFADDR dev IFACE | show|flush [dev IFACE] [to PREFIX]
+ip route list|flush|add|del|change|append|replace|test ROUTE
+ip link set IFACE [up|down] [arp on|off] [multicast on|off]
+	[promisc on|off] [mtu NUM] [name NAME] [qlen NUM] [address MAC]
+	[master IFACE | nomaster] [netns PID] [type TYPE ARGS]
+ip tunnel add|change|del|show [NAME]
+	[mode ipip|gre|sit] [remote ADDR] [local ADDR] [ttl TTL]
+ip neigh show|flush [to PREFIX] [dev DEV] [nud STATE]
+ip rule [list] | add|del SELECTOR ACTION
+BusyBox v1.37.0 (2024-09-26 21:31:42 UTC) multi-call binary.
+
+Usage: ip [OPTIONS] address|route|link|tunnel|neigh|rule [ARGS]
+
+OPTIONS := -f[amily] inet|inet6|link | -o[neline]
+
+ip addr add|del IFADDR dev IFACE | show|flush [dev IFACE] [to PREFIX]
+ip route list|flush|add|del|change|append|replace|test ROUTE
+ip link set IFACE [up|down] [arp on|off] [multicast on|off]
+	[promisc on|off] [mtu NUM] [name NAME] [qlen NUM] [address MAC]
+	[master IFACE | nomaster] [netns PID] [type TYPE ARGS]
+ip tunnel add|change|del|show [NAME]
+	[mode ipip|gre|sit] [remote ADDR] [local ADDR] [ttl TTL]
+ip neigh show|flush [to PREFIX] [dev DEV] [nud STATE]
+ip rule [list] | add|del SELECTOR ACTION
+
+run rc=125
+--- inner log:
+
+ERR: 
