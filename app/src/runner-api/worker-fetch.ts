@@ -97,7 +97,14 @@ export async function handleFetch(
     }
     // #856, #974: a turn on the harness claude-code runs on the login of the customer's device: no model, no key and no price are
     // chosen, only the git token of exactly this repository is made. Any other job takes the road of `checkJob` and `buildJobInput`.
-    const subscription = await buildSubscriptionJob(deps, job, features);
+    // #1150: `login=workspace` says the Worker holds no login of its own device (its dispatcher handed it none): the turn runs on the Claude Code
+    // token of the workspace. A hosted Worker needs no word for it; a Worker that says nothing keeps the login of its device, as before.
+    const subscription = await buildSubscriptionJob(
+      deps,
+      job,
+      features,
+      url.searchParams.get("login") === "workspace",
+    );
     // #424, #432: the providers this Worker can run, from its own details call. The Dispatcher's claim cannot say, so
     // the decision is made here; a Worker that names none can run the default provider only.
     const checked =

@@ -350,3 +350,29 @@ def test_the_exit_codes_of_the_worker_are_the_verdicts() -> None:
     assert verdict_of_exit(int(WorkerExit.SUBSCRIPTION_MODEL_REFUSED)) is Verdict.MODEL
     for other in (0, 1, 2, 137, -9):
         assert verdict_of_exit(other) is None
+
+
+# #1150-P01
+def test_only_a_device_with_no_login_at_all_may_run_on_the_token_of_the_workspace(
+    tmp_path: Path,
+) -> None:
+    none = Rig(tmp_path / "none")
+    assert none.pool.holds_no_login()
+    assert none.pool.offer() is None
+
+    with_credential = Rig(tmp_path / "one")
+    with_credential.store.add("a", ONE)
+    assert not with_credential.pool.holds_no_login()
+
+    # Every credential rate limited: withdrawn, and never swapped for the workspace's token.
+    limited = Rig(tmp_path / "limited")
+    limited.store.add("a", ONE)
+    limited.pool.report("a", Verdict.LIMIT, None)
+    assert limited.pool.offer() is None and not limited.pool.holds_no_login()
+
+    # An older source that is set but cannot be used is a login too.
+    broken = Rig(tmp_path / "broken", legacy=LoginProblem("the token file is loose"))
+    assert not broken.pool.holds_no_login()
+
+    older = Rig(tmp_path / "older", legacy=ClaudeLogin.oauth_token(ONE))
+    assert not older.pool.holds_no_login()

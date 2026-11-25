@@ -7,7 +7,10 @@ import type { ProductIdentity } from "../../product-identity/identity.ts";
 import { SettingsScreen } from "../../workspaces/ui/settings-shell.tsx";
 import type { WorkspaceLlmSummary } from "../assemble.ts";
 import type { ProviderKeyStatus } from "../workspace-key.ts";
+import type { ClaudeCodeTokenStatus } from "../claude-code-token.ts";
 import type { LlmKeyApi } from "./api.ts";
+import type { ClaudeCodeTokenApi } from "./claude-code-token-api.ts";
+import { ClaudeCodeTokenCard } from "./claude-code-token-card.tsx";
 import type { InstanceAccess } from "../access.ts";
 import {
   RemoveWorkspaceKeys,
@@ -32,6 +35,8 @@ export function LlmSettingsPageContent({
   showPlan = false,
   showBilling = false,
   setup = false,
+  claudeCodeToken,
+  claudeCodeTokenApi,
   api,
 }: {
   product: ProductIdentity;
@@ -55,7 +60,13 @@ export function LlmSettingsPageContent({
   showBilling?: boolean;
   /** The page is a place of Setup (the factory's "LLM keys", #1108): its own header, without the settings tabs. */
   setup?: boolean;
-  /** Only tests pass this. */
+  /**
+   * The state of the Claude Code OAuth token of the workspace (#1150): given in the factory, where runs on the harness `claude-code` exist;
+   * left out, the page has no card for it.
+   */
+  claudeCodeToken?: ClaudeCodeTokenStatus;
+  /** Only tests pass these. */
+  claudeCodeTokenApi?: ClaudeCodeTokenApi;
   api?: LlmKeyApi;
 }) {
   return (
@@ -77,6 +88,18 @@ export function LlmSettingsPageContent({
           {...(keyChoice === undefined ? {} : { keyChoice })}
           {...(api === undefined ? {} : { api })}
         />
+        {claudeCodeToken === undefined ? null : (
+          <div className="mt-6">
+            <ClaudeCodeTokenCard
+              workspaceSlug={workspaceSlug}
+              canManage={canManage}
+              status={claudeCodeToken}
+              {...(claudeCodeTokenApi === undefined
+                ? {}
+                : { api: claudeCodeTokenApi })}
+            />
+          </div>
+        )}
       </div>
       {canManage ? (
         <div className="flex max-w-[64rem] flex-col gap-6 empty:hidden">

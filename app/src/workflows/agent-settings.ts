@@ -166,7 +166,7 @@ export function checkModelFitsHarness(
         issue(
           at,
           "invalid_value",
-          `A ${subject} on the harness ${shown(CLAUDE_CODE_HARNESS)} takes {"provider": "${CLAUDE_CODE_PROVIDER}", "model": "<name>"} with the name Claude Code reads (for example "sonnet" or "claude-sonnet-5-5"); its login is the runner's, so no catalog entry and no key of the workspace is used.`,
+          `A ${subject} on the harness ${shown(CLAUDE_CODE_HARNESS)} takes {"provider": "${CLAUDE_CODE_PROVIDER}", "model": "<name>"} with the name Claude Code reads (for example "sonnet" or "claude-sonnet-5-5"); its login is the runner's own or the Claude Code OAuth token of the workspace (LLM keys), so no catalog entry and no LLM key of the workspace is used.`,
         ),
       );
     return;

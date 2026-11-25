@@ -428,8 +428,8 @@ describe("a task with a profile on the harness claude-code", () => {
     harness: "claude-code" as const,
   };
 
-  async function claudeSetup() {
-    const app = await startImplementerHarness();
+  async function claudeSetup(options: { claudeCodeToken?: boolean } = {}) {
+    const app = await startImplementerHarness(options);
     const made = await app.profiles.create(
       { name: "claude", content: CLAUDE, createdBy: USER.id },
       100,
@@ -475,6 +475,44 @@ describe("a task with a profile on the harness claude-code", () => {
       profile_harness: "claude-code",
       environment_kind: "runner",
     });
+  });
+
+  // #1150-T17
+  it("starts in a hosted environment and in none once the workspace has a Claude Code OAuth token, with the harness copied into the turn", async () => {
+    const app = await claudeSetup({ claudeCodeToken: true });
+
+    for (const [index, environmentId] of [app.hosted.id, null].entries()) {
+      const started = await app.service.startTask(USER, {
+        // Each task has its own branch and request id: the same body twice would be one task.
+        ...withProfile(app as never, "claude", {
+          branch: `implementer/token-${String(index)}`,
+          clientRequestId: `request-token-${String(index)}`,
+        }),
+        environmentId,
+      });
+
+      expect(await turnOf(app as never, started.sessionId)).toMatchObject({
+        model_choice: JSON.stringify({
+          provider: "claude-code",
+          model: "claude-sonnet-5-5",
+        }),
+        profile_harness: "claude-code",
+      });
+    }
+  });
+
+  // #1150-T17
+  it("is still refused in a hosted environment when the workspace has no token (the code says what is missing)", async () => {
+    const app = await claudeSetup({ claudeCodeToken: false });
+
+    const refusal = await failureOf(
+      app.service.startTask(USER, {
+        ...withProfile(app as never, "claude"),
+        environmentId: app.hosted.id,
+      }),
+    );
+
+    expect(refusal).toMatchObject({ code: "IMPLEMENTER_HARNESS_NEEDS_RUNNER" });
   });
 
   // #856-T60

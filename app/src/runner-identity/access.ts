@@ -12,6 +12,7 @@
 // tests) and `accessRule` for the database (the claim and the pairing of the rings, which both use this fragment and nothing else). The integration test of
 // this rule runs a table of cases through both and demands the same answer.
 import { sql, type RawBuilder } from "kysely";
+import { CLAUDE_CODE_TOKEN_SECRET_NAME as WORKSPACE_TOKEN_SECRET_NAME } from "../secret-names/names.ts";
 import { CLAUDE_CODE_HARNESS, OPENCODE_HARNESS } from "./harness.ts";
 import { CLAUDE_MODEL_ALIASES, modelsAllow } from "./model-aliases.ts";
 
@@ -34,6 +35,15 @@ export const MANAGED_AUTH: AccessAuth = "managed";
 
 /** The harnesses that run on a login of the device, never on a key of the app: their access is a subscription. */
 export const SUBSCRIPTION_HARNESSES: readonly string[] = [CLAUDE_CODE_HARNESS];
+
+/**
+ * #1150: how a harness on a login can also run where there is no login of the device: on the Claude Code OAuth token the workspace keeps in the
+ * app. It is the same source as `app-key` says for OpenCode (a credential the workspace keeps in the app and the app hands to the Worker), so an
+ * entry `{ harness: claude-code, auth: app-key }` means "I can run Claude Code on the token of the workspace". A demand for such a harness
+ * (`subscription`: the login of the device, the runner's own wins) is also met by that entry, and then the claim hands the Worker the token.
+ * The entry allows any model (the token is the user's own subscription, and `models` is for a login of a device).
+ */
+export const TOKEN_FALLBACK_AUTH: AccessAuth = "app-key";
 
 export const MODELS_MAX = 64;
 /** A model as a harness reads it (`sonnet`, `claude-sonnet-5-5`, `vendor/model-name`). */
@@ -60,6 +70,8 @@ export const PLATFORM_ACCESS: readonly HarnessAccess[] = [
   // The version is the one the platform's image pins (`runner/opencode-pin.json`); the app does not read it.
   { harness: OPENCODE_HARNESS, version: "pinned", auth: "managed" },
   { harness: OPENCODE_HARNESS, version: "pinned", auth: "app-key" },
+  // #1150: the platform has no login of a device. Claude Code runs on its Sandbox VMs on the token of the workspace, when the workspace has one.
+  { harness: CLAUDE_CODE_HARNESS, version: "pinned", auth: "app-key" },
 ];
 
 export type ReservedAccessIssue = { field: string; code: "reserved" };
@@ -161,15 +173,30 @@ export function runnerCanServe(demand: AccessDemand): boolean {
   return demand.auth !== MANAGED_AUTH;
 }
 
-/** The rule in memory: one entry has the harness, the auth and, when the demand names a model, allows it (an alias allows the ids it stands for, #980). */
+/**
+ * The rule in memory: one entry has the harness, the auth and, when the demand names a model, allows it (an alias allows the ids it stands for,
+ * #980). #1150: a demand for the login of a device (`subscription`, a harness that runs on one) is also met by the entry of the same harness that
+ * says it runs on the token of the workspace (`TOKEN_FALLBACK_AUTH`); that entry has no list of models.
+ */
 export function accessMatches(
   entries: readonly HarnessAccess[],
   demand: AccessDemand,
+  /**
+   * #1150: `workspaceToken: false` says the workspace has no Claude Code OAuth token, so the entry that can only run on it does not meet the demand.
+   * Left out, the token is not asked about (the validator and every caller that does not route a job).
+   */
+  options: { workspaceToken?: boolean } = {},
 ): boolean {
+  const tokenToo =
+    demand.auth === "subscription" &&
+    SUBSCRIPTION_HARNESSES.includes(demand.harness) &&
+    options.workspaceToken !== false;
   return entries.some(
     (entry) =>
       entry.harness === demand.harness &&
-      (demand.auth === null || entry.auth === demand.auth) &&
+      (demand.auth === null ||
+        entry.auth === demand.auth ||
+        (tokenToo && entry.auth === TOKEN_FALLBACK_AUTH)) &&
       (demand.model === null || modelsAllow(entry.models, demand.model)),
   );
 }
@@ -225,13 +252,28 @@ function aliasOfSql(name: RawBuilder<unknown>): RawBuilder<string | null> {
 export function accessRule(
   entries: RawBuilder<unknown>,
   turn: string,
+  /**
+   * #1150: `requireToken` makes the entry that can only run on the token of the workspace (`TOKEN_FALLBACK_AUTH`) meet a demand for the login of a
+   * device only when the workspace of the turn (`<turn>.workspace_id`) holds that token. A customer's runner without a login of its own is then
+   * not a candidate for a turn of a workspace that has none, and the turn stays queued for a runner that has a login, as it did before the
+   * token existed. The platform's claim leaves it off: for a hosted turn there is no other taker, and the claim says what is missing.
+   */
+  options: { requireToken?: boolean } = {},
 ): RawBuilder<boolean> {
   const demand = turnDemand(turn);
+  const tokenHeld =
+    options.requireToken === true
+      ? sql`exists (
+          select 1 from workspace_secrets as held
+          where held.workspace_id = ${sql.ref(`${turn}.workspace_id`)}
+            and held.name = ${WORKSPACE_TOKEN_SECRET_NAME}::text)`
+      : sql`true`;
   return sql<boolean>`exists (
     select 1 from jsonb_array_elements(${entries}) as announced
     where jsonb_typeof(${demand.choice}) = 'object'
       and announced ->> 'harness' = ${demand.harness}
-      and announced ->> 'auth' = ${demand.auth}
+      and (announced ->> 'auth' = ${demand.auth}
+        or (${demand.auth} = 'subscription' and announced ->> 'auth' = ${TOKEN_FALLBACK_AUTH}::text and ${tokenHeld}))
       and (${demand.model} is null
         or announced -> 'models' is null
         or exists (

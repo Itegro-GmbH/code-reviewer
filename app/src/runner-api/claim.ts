@@ -30,6 +30,7 @@
 // credentials and the model key) runs when the Worker fetches the job (`worker-fetch.ts`), by the same
 // code, so the Dispatcher never sees a secret of the job.
 import "server-only";
+import type { ClaudeCodeTokenForJob } from "../llm/claude-code-token.ts";
 import type { StoredResultSchema } from "../db/agent-result.ts";
 import type { AttemptedShas } from "../db/repositories/jobs-repository.ts";
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
@@ -125,7 +126,11 @@ import { mcpBlockOf } from "./mcp-block.ts";
 import type { JobMcp } from "../mcp/job-proxy.ts";
 import { errorResponse, jsonResponse, noContent } from "./responses.ts";
 import type { ClaimOptions } from "../db/repositories/runner-jobs-repository.ts";
-import type { HarnessAccess } from "../runner-identity/access.ts";
+import {
+  customerAccess,
+  type HarnessAccess,
+} from "../runner-identity/access.ts";
+import { modelsAllow } from "../runner-identity/model-aliases.ts";
 import {
   DEFAULT_IMPLEMENTER_VCPUS,
   REVIEW_VCPUS,
@@ -295,6 +300,16 @@ export type ClaimDeps = {
    * workspace). Only such a turn may be offered the question: a plain task or follow-up has nobody to answer it.
    */
   startedByWorkflow: (job: Job) => Promise<boolean>;
+  /**
+   * #1150: the Claude Code OAuth token of one workspace, for a turn on the harness `claude-code` that runs on it (a hosted Sandbox VM, or a
+   * self-hosted runner that has no login of its own). Asked for the claimed job's workspace only, and only for such a turn.
+   */
+  claudeCodeToken: (workspaceId: string) => Promise<ClaudeCodeTokenForJob>;
+  /**
+   * #1150: what the runner that holds the job announces now (its manifest without any `managed` entry), so that the fetch can tell whether the
+   * claim chose the runner's own login or the token. Empty for a job that no longer has a runner of the workspace.
+   */
+  runnerAccess: (job: Job) => Promise<readonly HarnessAccess[]>;
   /**
    * #1053: the MCP runtime of one workspace (`mcp/job-proxy.ts`): which servers the agent step of a job may use, resolved in that workspace.
    * Left out where the deployment has none: no turn carries `mcp` then.
@@ -494,6 +509,23 @@ function runnerSetupOf(
   const network = runner.network ?? NETWORK_OFF;
   if (setupScript === "" && network.mode === "off") return null;
   return { name: runner.name, setupScript, network };
+}
+
+/**
+ * #1150: the script and the network rule of the hosted environment of a turn on `claude-code`, as `runnerSetupOf` gives them for a runner's, so that
+ * the Worker reads the same fields; null when the turn has no environment or the environment has neither.
+ */
+function hostedSetupOf(
+  environment: StoredImplementerTurn["environment"],
+): { name: string; setupScript: string; network: NetworkRule } | null {
+  if (environment === null) return null;
+  const network = environment.network ?? NETWORK_OFF;
+  if (environment.setupScript === "" && network.mode === "off") return null;
+  return {
+    name: environment.name,
+    setupScript: environment.setupScript,
+    network,
+  };
 }
 
 function refuse(errorCode: string, detail?: string): Refusal {
@@ -1687,19 +1719,80 @@ function modelHostOf(
   return host === null ? {} : { modelHost: host };
 }
 
+/** The host Claude Code talks to; the one host a turn on this harness needs of the outside, and so the model host of a hosted claim (#1150). */
+export const CLAUDE_API_HOST = "api.anthropic.com";
+
 /**
- * #856, #974: the claim of a turn on the harness `claude-code`, or `undefined` for every other job. The turn runs on the login of the
- * customer's device, so none of what makes a model run is done here: no selection, no key, no price, no catalog entry, no usage
- * selection, and nothing of the login is known to the app. A customer's dispatcher gets the split answer like any other (the job's
- * credential and no input); what is checked here needs no secret and is the claim's to refuse: the kind, that the caller is a customer's
- * runner and the turn one of its environments, the guard of the project and the model the turn names. The input, with the git token of
- * exactly this repository, is built when the Worker fetches the job (`buildSubscriptionJob`).
+ * #1150: whose login a turn on `claude-code` runs on. `device`: the login of the self-hosted runner's own device, which its dispatcher hands
+ * the Worker (the runner's own login wins, and nothing of the workspace's token leaves). `token`: the Claude Code OAuth token the workspace
+ * keeps in the app, for a hosted Sandbox VM and for a self-hosted runner that has no login of its own (it announces `app-key` for the harness).
+ */
+export type SubscriptionSource = "device" | "token";
+
+/** Whether the manifest of a self-hosted runner has a login of the device for this model: an entry for `claude-code` as a `subscription`. */
+function deviceLoginServes(
+  entries: readonly HarnessAccess[],
+  model: string,
+): boolean {
+  return entries.some(
+    (entry) =>
+      entry.harness === CLAUDE_CODE_HARNESS &&
+      entry.auth === "subscription" &&
+      modelsAllow(entry.models, model),
+  );
+}
+
+/**
+ * #1126: the refusal for a network rule the harness `claude-code` cannot honour: its login is inside the container, so an open network, or a
+ * wildcard on a domain anybody can get a subdomain of, would be a place to send it to. Free and early, before any VM or token exists.
+ */
+function subscriptionNetworkRefusal(
+  setup: { network: NetworkRule } | null,
+): Refusal | null {
+  if (setup === null) return null;
+  if (setup.network.mode === "open")
+    return refuse(
+      "implementer_config_invalid",
+      "reason=subscription_network_open",
+    );
+  if (setup.network.hosts.some(isSharedWildcard))
+    return refuse(
+      "implementer_config_invalid",
+      "reason=subscription_network_wildcard",
+    );
+  return null;
+}
+
+/** The refusal for a token that cannot be used: the turn would only fail later and cost a VM. */
+function tokenRefusal(token: ClaudeCodeTokenForJob): Refusal | null {
+  if (token.state === "token") return null;
+  return refuse(
+    "implementer_config_invalid",
+    token.state === "none"
+      ? "reason=claude_code_token_missing"
+      : "reason=claude_code_token_unreadable",
+  );
+}
+
+/**
+ * #856, #974, #1150: the claim of a turn on the harness `claude-code`, or `undefined` for every other job. The turn runs on a login of the
+ * user's own: the device's of a self-hosted runner (never known to the app), or the Claude Code OAuth token of the workspace (#1150: for a
+ * hosted Sandbox VM, and for a self-hosted runner without a login of its own). None of what makes a model run is done here: no selection,
+ * no key of ours, no price, no catalog entry, no usage selection. A dispatcher gets the split answer like any other (the job's credential
+ * and no input); what is checked here needs no secret and is the claim's to refuse: the kind, where the turn runs (a runner environment of
+ * the caller, or a hosted VM), that the workspace has a token when the turn needs one, the guard of the project and the model the turn names.
+ * The input, with the git token of exactly this repository and the workspace's token when the turn needs it, is built when the Worker fetches
+ * the job (`buildSubscriptionJob`).
  */
 async function prepareSubscription(
   deps: ClaimDeps,
   claimed: NonNullable<ClaimResult>,
   engines: readonly RunnerEngine[],
-  customer: boolean,
+  caller: {
+    customer: boolean;
+    split: boolean;
+    entries: readonly HarnessAccess[];
+  },
 ): Promise<Prepared | undefined> {
   const { job } = claimed;
   if (job.reviewKind !== "implementer") return undefined;
@@ -1708,8 +1801,10 @@ async function prepareSubscription(
     return undefined;
   const unbuilt = refusalForKind(job.reviewKind, engines);
   if (unbuilt !== null) return refuse(unbuilt);
-  // Only a customer's runner takes it: the platform's Dispatcher and a hosted Worker have no login of a device.
-  if (!customer || turn.turn.runnerEnvironment == null)
+  // A customer's dispatcher takes a turn of its own runner environments; the platform's Dispatcher a hosted one. Anything else (a hosted
+  // Worker that claims for itself, the other kind's caller) has no way to build the input at the fetch.
+  const onRunner = turn.turn.runnerEnvironment != null;
+  if (!caller.split || caller.customer !== onRunner)
     return refuse("implementer_config_invalid", "reason=harness_needs_runner");
   const decision = await deps.guard.check(job);
   if (!decision.allow)
@@ -1723,26 +1818,74 @@ async function prepareSubscription(
     !CLAUDE_CODE_MODEL_PATTERN.test(choice.model)
   )
     return refuse("implementer_config_invalid", "reason=subscription_model");
+  // The runner's own login wins; the token of the workspace is the fallback and the only login of a hosted VM.
+  const source: SubscriptionSource =
+    onRunner && deviceLoginServes(caller.entries, choice.model)
+      ? "device"
+      : "token";
+  if (source === "token") {
+    const token = await deps.claudeCodeToken(job.workspaceId);
+    // A self-hosted runner without a login is a candidate only while the workspace holds a token (the rule of the claim), so a token that is
+    // gone by now was removed a moment ago: the turn goes back to the queue for a runner that has a login, and nothing fails. A hosted turn has
+    // no other taker, so the claim says what is missing.
+    if (onRunner && token.state === "none")
+      return {
+        kind: "retry",
+        reason: "claude_code_token_missing",
+        retryAfterSeconds: DEFAULT_RETRY_AFTER_SECONDS,
+      };
+    const refused = tokenRefusal(token);
+    if (refused !== null) return refused;
+  }
   if (job.leaseExpiresAt === null)
     throw new Error(`Claimed job ${job.id} has no lease expiry.`);
   if (claimed.credential === undefined)
     throw new Error(`Claim of job ${job.id} has no credential.`);
+  const base = {
+    id: job.id,
+    credential: claimed.credential,
+    reviewKind: job.reviewKind,
+    leaseExpiresAt: job.leaseExpiresAt,
+    heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
+    access: {
+      harness: CLAUDE_CODE_HARNESS,
+      auth:
+        source === "device" ? ("subscription" as const) : ("app-key" as const),
+      model: choice.model,
+    },
+  };
+  if (!onRunner) {
+    // The rule the Worker would refuse at its fetch: refused now, before a VM is started for it.
+    const unfit = subscriptionNetworkRefusal(
+      hostedSetupOf(turn.turn.environment),
+    );
+    if (unfit !== null) return unfit;
+    // #1150: a hosted turn. The Dispatcher starts a Sandbox VM of the environment's size (the default size for a task without one) and
+    // narrows its network after the setup: the model host is the one of Claude Code, which the Dispatcher signs into the switch token.
+    const environment = turn.turn.environment;
+    return {
+      kind: "split",
+      response: {
+        version: RUNNER_API_VERSION,
+        job: {
+          ...base,
+          sizeLabel:
+            sizeLabelOf(job.requiredLabels) ??
+            sizeLabel(environment?.vcpus ?? DEFAULT_IMPLEMENTER_VCPUS),
+          ...(environment === null ? {} : { vcpus: environment.vcpus }),
+          network: environment?.network ?? NETWORK_OFF,
+          modelHost: CLAUDE_API_HOST,
+        },
+      },
+    };
+  }
   return {
     kind: "split",
     response: {
       version: RUNNER_API_VERSION,
       job: {
-        id: job.id,
-        credential: claimed.credential,
-        reviewKind: job.reviewKind,
-        leaseExpiresAt: job.leaseExpiresAt,
-        heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
+        ...base,
         ...(job.requiredLabels === null ? {} : { labels: job.requiredLabels }),
-        access: {
-          harness: CLAUDE_CODE_HARNESS,
-          auth: "subscription" as const,
-          model: choice.model,
-        },
         // The rule for the agent's network: a turn of a runner environment has none of its own (the runner decides how it works).
         network: NETWORK_OFF,
       },
@@ -1771,13 +1914,18 @@ export async function buildSubscriptionJob(
   deps: ClaimDeps,
   job: Job,
   features: readonly ClaimFeature[],
+  /**
+   * Whether the Worker asks for the login of the workspace (`login=workspace`: it holds none of its own device, because its dispatcher handed it
+   * none). A Worker that says nothing is one of an earlier release, which only ever ran on the login of its device, and it keeps it.
+   */
+  workspaceLogin = false,
 ): Promise<SubscriptionBuilt | Refusal | undefined> {
   if (job.reviewKind !== "implementer") return undefined;
   const turn = await deps.implementerTurn(job);
   if (turn === undefined || turn.turn.profile?.harness !== CLAUDE_CODE_HARNESS)
     return undefined;
-  if (turn.turn.runnerEnvironment == null)
-    return refuse("implementer_config_invalid", "reason=harness_needs_runner");
+  // #1150: a turn of a runner environment, or a hosted one (its Sandbox VM has no login of a device: the token of the workspace is its login).
+  const onRunner = turn.turn.runnerEnvironment != null;
   // #1092: the same as for a hosted turn (`checkJob`): unreadable stored repositories never become a single repository.
   if (turn.session.reposUnreadable === true)
     return refuse("implementer_config_invalid", "reason=repos_unreadable");
@@ -1793,26 +1941,38 @@ export async function buildSubscriptionJob(
     !CLAUDE_CODE_MODEL_PATTERN.test(choice.model)
   )
     return refuse("implementer_config_invalid", "reason=subscription_model");
+  // #1150: the login of the turn. A hosted VM has no login of a device: it runs on the token of the workspace, which is handed to it here in
+  // the input, with the job's credential and nowhere else. A self-hosted runner's Worker keeps the login of its device (the runner's own login
+  // wins and the token of the workspace is not even read) unless it says it holds none (`login=workspace`: the claim chose the token for it,
+  // because the runner announced no login of its own).
+  // The app holds the Worker to what the claim chose: when the runner's manifest has a login of its device for this model the claim said `device`, and
+  // a Worker that asks for the token anyway is not given it (it has no login to fall back on if it really has none, and the turn fails there, free).
+  const needsToken =
+    !onRunner ||
+    (workspaceLogin &&
+      !deviceLoginServes(await deps.runnerAccess(job), choice.model));
+  let oauthToken: string | undefined;
+  if (needsToken) {
+    // A Worker that does not read the field would refuse the job; one that does not say so is not sent the token at all, whatever its image is.
+    if (!features.includes("implementer_workspace_token"))
+      return refuse("implementer_engine_unavailable", "reason=workspace_token");
+    const token = await deps.claudeCodeToken(job.workspaceId);
+    const refused = tokenRefusal(token);
+    if (refused !== null) return refused;
+    if (token.state === "token") oauthToken = token.token;
+  }
   if (!features.includes("implementer_profile"))
     return refuse("implementer_engine_unavailable", "reason=profile");
   // #1126: a Worker that does not name `implementer_subscription_setup` would refuse the script (and read the network rule as the
   // old one-host rule): it ends here, free, with a reason, before any credential exists, as for the features above.
-  const setup = runnerSetupOf(turn.turn.runnerEnvironment);
+  const setup = onRunner
+    ? runnerSetupOf(turn.turn.runnerEnvironment)
+    : hostedSetupOf(turn.turn.environment);
   // #1126, defence in depth beside the validator (at save) and the runner (at start): the login lives in the container, so a rule the
   // runner would refuse is refused here, free, before the git token is minted. A lane saved before the validator knew it, or a row
   // written by hand, ends the same way.
-  if (setup !== null) {
-    if (setup.network.mode === "open")
-      return refuse(
-        "implementer_config_invalid",
-        "reason=subscription_network_open",
-      );
-    if (setup.network.hosts.some(isSharedWildcard))
-      return refuse(
-        "implementer_config_invalid",
-        "reason=subscription_network_wildcard",
-      );
-  }
+  const unfit = subscriptionNetworkRefusal(setup);
+  if (unfit !== null) return unfit;
   if (setup !== null && !features.includes("implementer_subscription_setup"))
     return refuse(
       "implementer_engine_unavailable",
@@ -1986,6 +2146,7 @@ export async function buildSubscriptionJob(
       subscription: {
         model: choice.model,
         maxBudgetUsd: (cents / 100).toFixed(2),
+        ...(oauthToken === undefined ? {} : { oauthToken }),
       },
       profile: {
         name: profile.name,
@@ -2042,8 +2203,9 @@ export async function buildSubscriptionJob(
       return refuse("implementer_config_invalid", `reason=job_rule:${broken}`);
     }
   }
+  // Never the token itself: where it came from.
   deps.logger.info(
-    `[runner-api] job=${job.id} selection harness=claude-code key=device`,
+    `[runner-api] job=${job.id} selection harness=claude-code login=${oauthToken === undefined ? "device" : "workspace-token"}`,
   );
   return {
     kind: "built-subscription",
@@ -2061,15 +2223,16 @@ async function prepare(
   split: boolean,
   llmProviders: readonly string[] | undefined,
   customer: boolean,
+  customerEntries: readonly HarnessAccess[] = [],
 ): Promise<Prepared> {
   const { job } = claimed;
-  // #856: a turn on the harness claude-code takes its own road: no model, no key and no price are chosen, the login is the device's.
-  const subscription = await prepareSubscription(
-    deps,
-    claimed,
-    engines,
-    customer && split,
-  );
+  // #856, #1150: a turn on the harness claude-code takes its own road: no model, no key of ours and no price are chosen, the login is the
+  // user's own (the device's, or the token of the workspace).
+  const subscription = await prepareSubscription(deps, claimed, engines, {
+    customer,
+    split,
+    entries: customerEntries,
+  });
   if (subscription !== undefined) return subscription;
   const checked = await checkJob(deps, job, {
     engines,
@@ -2342,6 +2505,10 @@ export async function handleClaim(
       ...(features.includes("implementer_multi_repo")
         ? { acceptsMultiRepo: true }
         : {}),
+      // #1150: a hosted turn on the token of the workspace goes only to a claim whose Worker image reads it.
+      ...(split && features.includes("implementer_workspace_token")
+        ? { acceptsWorkspaceLogin: true }
+        : {}),
       ...(target.customerRunner === undefined
         ? {}
         : { customerRunner: target.customerRunner }),
@@ -2369,6 +2536,9 @@ export async function handleClaim(
         split,
         target.llmProviders,
         target.customerRunner !== undefined,
+        target.customerRunner === undefined
+          ? []
+          : customerAccess(target.customerRunner.access),
       );
       if (prepared.kind === "ready") writeTokens = prepared.writeTokens;
 

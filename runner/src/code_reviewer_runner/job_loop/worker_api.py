@@ -122,6 +122,9 @@ WORKER_FEATURES: tuple[str, ...] = (
     # to the agent) and reads the step's network rule for it (the hosts besides the model's own are
     # read-only). Without it the app ends such a turn, free, instead of the Worker ignoring them.
     "implementer_subscription_setup",
+    # #1150: the Worker reads `implementer.subscription.oauthToken` (the Claude Code OAuth token of
+    # the workspace) and runs the turn on it when the machine has no login of its own.
+    "implementer_workspace_token",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"
@@ -192,9 +195,14 @@ class HttpWorkerApi:
         *,
         request_timeout: float = 30.0,
         proxy: OuterProxy | None = None,
+        workspace_login: bool = False,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._credential = credential
+        # #1150: this Worker holds no login of a device (its dispatcher handed it none, or it is
+        # a hosted VM): a turn on Claude Code runs on the Claude Code token of the workspace,
+        # which the app puts into the input of this fetch. A Worker with its own login says nothing.
+        self._workspace_login = workspace_login
         self._timeout = request_timeout
         # A VM on a customer's machine reaches the app through the host's outer-wall proxy only
         # (#994); hosted and every other Worker dial the app themselves, as before.
@@ -262,8 +270,12 @@ class HttpWorkerApi:
         # #424: and the providers of the registry, a comma separated list like the features. An app
         # from before ignores the parameter; a newer one reads its absence as `openrouter`.
         providers = ",".join(registered_provider_ids())
+        login = "&login=workspace" if self._workspace_login else ""
         reply = await asyncio.to_thread(
-            self._send, "GET", f"{path}?features={features}&llmProviders={providers}", None
+            self._send,
+            "GET",
+            f"{path}?features={features}&llmProviders={providers}{login}",
+            None,
         )
         if reply.status in (404, 405, 501) and error_code(reply) is None:
             # An answer of a Worker API route always has the contract's error body.

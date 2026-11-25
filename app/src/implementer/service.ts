@@ -576,7 +576,11 @@ export function createImplementerService(
                 task.environmentId,
                 model,
               );
-      requireRunnerForHarness(profile, copiedEnv.runnerEnvironment);
+      await requireRunnerForHarness(
+        profile,
+        copiedEnv.runnerEnvironment,
+        deps.claudeCodeTokenConfigured,
+      );
       // #1105: the script and the network rule are the step's (ADR 0007, decision 11); the hosted environment keeps its size.
       const environment =
         options.inline === undefined || copiedEnv.environment === null

@@ -69,6 +69,8 @@ const PROVIDERS = [
         "`anthropic-messages`, the name of a wire family (the Messages API format), which other providers speak too (#548)",
       "app/src/models-dev/generic-adapter.ts":
         "the `anthropic-version` header that the Messages wire family carries, for any provider that speaks it (#548)",
+      "app/src/runner-api/claim.ts":
+        "the API host Claude Code talks to, named as the model host of a hosted turn on the harness `claude-code`, which the Dispatcher signs into the VM's network policy (#1150): no key goes to it and it is no LLM provider of the registry",
     } as Readonly<Record<string, string>>,
   },
 ] as const;

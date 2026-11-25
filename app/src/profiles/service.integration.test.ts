@@ -68,6 +68,7 @@ async function setup() {
     options: {
       archivedMax?: number;
       onlineRunners?: () => Promise<readonly OnlineRunner[]>;
+      claudeCodeTokenConfigured?: () => Promise<boolean>;
     } = {},
   ) =>
     createProfileService({
@@ -288,6 +289,33 @@ describe("the profile service", () => {
         })
       ).valid,
     ).toBe(true);
+  });
+
+  // #1150-T16
+  it("accepts a harness of a runner in a hosted environment once the workspace has a Claude Code OAuth token", async () => {
+    const { serviceFor, idA } = await setup();
+    const withToken = serviceFor(idA, {
+      claudeCodeTokenConfigured: async () => true,
+    });
+    const body = {
+      ...REVIEWER,
+      harness: "claude-code",
+      model: { provider: "claude-code", model: "sonnet" },
+    };
+
+    expect((await withToken.validate(body)).valid).toBe(true);
+    expect(
+      (
+        await serviceFor(idA, {
+          claudeCodeTokenConfigured: async () => false,
+        }).validate(body)
+      ).errors,
+    ).toEqual([
+      expect.objectContaining({
+        path: "/environment",
+        code: "harness_needs_runner",
+      }),
+    ]);
   });
 
   // #973-T01

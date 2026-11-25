@@ -139,6 +139,26 @@ image's `probe` mode in a fresh VM from the snapshot, and fails unless `opencode
 image of this run (`dispatcher/README.md`, "The canary probe" and "The deploy canary"). The list of hosts of
 earlier versions (`DISPATCHER_CANARY_HOSTS`) is **retired**.
 
+## The Claude Code token needs a rebuilt snapshot (#1150)
+
+Hosted Workers come from the golden snapshot. The feature "a workspace stores a Claude Code OAuth token, and `claude-code` runs on it in a hosted VM"
+changes the Worker (`runner/src/code_reviewer_runner`: it reads `implementer.subscription.oauthToken`, builds the Claude Code layer in the VM and runs
+the turn on the token), so **a snapshot built before it cannot run such a turn**. What happens, and what to do:
+
+- **The normal release does it, by itself.** `runner/src` is in `IMAGE_INPUT_PATHS` (`dispatcher/src/snapshot/pair.ts`), and this change touches it, so the first
+  release that carries it makes _Deploy production_ build a new golden snapshot, prove it with the canary and wire it in, exactly as for any other change of the
+  Worker image (section "When it is rebuilt"). **No manual step**, no `rebuild_snapshot`. The two permissions the write to Infisical needs
+  (`SANDBOX_WORKER_FEATURES` and `SANDBOX_SYSBOX_PROOF`, above) must be in place as for any release that rebuilds the snapshot.
+- **Until the new snapshot is live, nothing fails.** The Worker image lists the feature `implementer_workspace_token` in `WORKER_FEATURES`; the build records
+  the list (`SANDBOX_WORKER_FEATURES`) and the Dispatcher names the claim feature only when the active snapshot has it (`core/claim-features.ts`). Without it the
+  App does not offer a hosted turn on the token to that Dispatcher: it **stays queued** (a hosted `claude-code` turn on an old snapshot waits, it does not start a VM
+  and does not fail), and a Worker that does not name the feature is never sent the token. Self-hosted runners of an earlier release are unaffected: they never
+  announce the `app-key` entry and never send `login=workspace`.
+- **Order inside a release.** The App and the Dispatcher deploy first; the snapshot is built, proven and wired in by the same pipeline; from the moment the Dispatcher
+  runs with the new pair, queued hosted turns on the token are claimed. Nothing has to be ordered by hand. The first live test of a hosted turn on the token is the
+  proof that a real VM can build the Claude Code layer (it needs the npm registry before its network is narrowed, and adds a minute or two to the turn).
+- **No Claude Code is baked into the snapshot** (we ship none, #981): the layer is built in the VM when a turn needs it.
+
 ## Roll back to the previous snapshot
 
 Roll the Dispatcher back (_Actions > Rollback production_, `deployment-vercel.md`, section 7): the previous Dispatcher

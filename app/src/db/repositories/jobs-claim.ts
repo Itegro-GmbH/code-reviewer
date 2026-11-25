@@ -21,6 +21,7 @@ import {
   PLATFORM_ACCESS,
   type HarnessAccess,
 } from "../../runner-identity/access.ts";
+import { CLAUDE_CODE_HARNESS } from "../../runner-identity/harness.ts";
 import {
   isReservedLabel,
   MANAGED_LABEL,
@@ -39,6 +40,12 @@ export type JobClaim = {
    * repositories is not a candidate: it stays queued, as a job for a runner with other labels does, and nothing fails.
    */
   acceptsMultiRepo?: boolean;
+  /**
+   * #1150: the claim names the feature `implementer_workspace_token`: the Dispatcher's Worker image reads `implementer.subscription.oauthToken`,
+   * which is where the Claude Code OAuth token of the workspace reaches a hosted turn. Without it a hosted turn on `claude-code` is not a
+   * candidate and stays queued for a Dispatcher whose image can run it (a snapshot built before this feature is the case).
+   */
+  acceptsWorkspaceLogin?: boolean;
   now: Date;
   leaseExpiresAt: Date;
 };
@@ -50,8 +57,9 @@ export type JobClaim = {
  * A customer's runner takes only the jobs of its own workspace that require labels it has; it has no reserved label, whatever it once
  * announced, so it never takes a hosted job. Both follow from the one rule: neither has a special case. What stays outside the labels
  * is the access (#856, #973): both take a turn only when an entry of their manifest has the harness, the auth and the model the turn asks for
- * (`accessRule`, the one rule the pairing of the rings uses too). The platform identity's manifest is `PLATFORM_ACCESS`, so a turn on a harness
- * that needs the login of a customer's device (`claude-code`, a subscription) is never its own: the rule needs no special case for it.
+ * (`accessRule`, the one rule the pairing of the rings uses too). The platform identity's manifest is `PLATFORM_ACCESS`: OpenCode, and (#1150) Claude Code
+ * on the Claude Code OAuth token of the workspace, which only a Dispatcher's claim (`worker_credential`) can run, since the token reaches the Worker
+ * with the job's input; a claim that is not a Dispatcher's has no such entry, so a turn on `claude-code` stays queued for it.
  */
 export type ClaimScope = {
   customerRunner: {
@@ -227,7 +235,11 @@ function claimQuery(
   // older release) is dropped before it is matched, so it is never handed a managed turn, and so never a key.
   const entries = entriesParam(
     scope === undefined
-      ? PLATFORM_ACCESS
+      ? claim.acceptsWorkspaceLogin === true
+        ? PLATFORM_ACCESS
+        : PLATFORM_ACCESS.filter(
+            (entry) => entry.harness !== CLAUDE_CODE_HARNESS,
+          )
       : customerAccess(scope.customerRunner.access),
   );
   const routing =
@@ -246,7 +258,7 @@ function claimQuery(
         and due.workspace_id = ${scope.customerRunner.workspaceId}
         and exists (
           select 1 from implementer_turns as routed
-          where routed.job_id = due.id and ${accessRule(entries, "routed")}
+          where routed.job_id = due.id and ${accessRule(entries, "routed", { requireToken: true })}
         )`;
   // #1092: a job whose session has `repos` goes only to a caller that reads them; for any other it is not a candidate (no error, no attempt).
   const multiRepoRule =

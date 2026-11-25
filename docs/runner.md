@@ -9,6 +9,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [The Factory-Runner](#the-factory-runner-r1b-854): the service, the `factory-runner` command, the image, installation for a
   developer and operation in a VM (R1b).
 - [Several repositories per turn](#several-repositories-per-turn-1090): what a runner reads and does for a job with `implementer.repos` (#1090).
+- [Claude Code on the token of the workspace](#claude-code-on-the-token-of-the-workspace-1150): the Claude Code OAuth token a workspace stores under LLM keys, the order of the logins, hosted VMs, what the agent can see (#1150).
 - [Claude Code, R3](#claude-code-r3-856): the first slice of the Claude Code harness (adapter core) and what is left.
 - [Spikes R0](#spikes-r0-853): what was measured on a real VM before the build.
 - [Spike: Firecracker sandbox](#spike-firecracker-sandbox-970): the Runner v2 sandbox on Linux (a Firecracker microVM with Docker and Sysbox), measured in CI (#970).
@@ -323,7 +324,7 @@ its model is managed and which harness it runs with. Since #919 the environment 
 | Code                   | When                                                                                                                                   |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `runner_needs_own_key` | A profile (or an agent step) runs a **managed model** in an environment of the kind `runner`. Managed models run on platform VMs only. |
-| `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's.                            |
+| `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's, **and the workspace has no Claude Code OAuth token** (#1150: with one, a hosted environment or runner is fine). |
 | `no_runner_announces`  | A profile (or an agent step) in a runner environment asks for a harness, auth and model that **no online runner of the workspace with the environment's labels announces** (#973). A **warning**, not an error (`severity: "warning"`, listed in `warnings`; the save goes through): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. With no such runner online nothing is said: the turn waits for one. |
 
 An agent step names its harness (`harness`: `opencode` or `claude-code`, [`workflows.md`](workflows.md#settings-in-the-step-1105); a profile of the old form did, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
@@ -1140,6 +1141,117 @@ tokens"; that is why subscriptions are only for a runner on your own machine and
 so that one does not hit its limit first: sharing one login among people, or reselling one, is against the terms and is not what this is for.
 Use of your own credentials on your own device is the design (we never hold or resell a login), but it does not replace reading the terms.
 
+## Claude Code on the token of the workspace (#1150)
+
+Owner decision 2026-11-25: the factory offers many models and harnesses, and Claude Code is one of them. Like the secrets of a repository
+in GitHub Actions, a workspace can store a **Claude Code OAuth token** (what `claude setup-token` prints, which Claude Code reads as
+`CLAUDE_CODE_OAUTH_TOKEN`) under **LLM keys**. Whether a user does that is their decision: **there is no further restriction** (no scope per
+person, no limit on who may start a run that uses it, no trigger limit). Whoever may manage the LLM keys (an Admin or an Owner,
+`manage_llm_key`) sets, replaces, tests and removes it. Whoever may start a run of the workspace on the harness `claude-code` spends that
+subscription; the card says so.
+
+### Where it is stored
+
+Exactly like the LLM keys (`app/src/llm/claude-code-token.ts`): a slot of the encrypted store of the workspace (`workspace_secrets`, AES-256-GCM,
+a key derived from `APP_SECRET`, the workspace and the slot name `claude_code_oauth_token` bound into the ciphertext, the binding `claude-code`
+compared again at every use). Write-only: no answer holds it but its last four characters, for those who manage it. It is **not an LLM
+provider** (it is not in the provider registry: no models, price or address of ours behind it), so no list of providers shows it. It is masked
+in every result of the workspace's jobs with the keys (`currentKeysFor`), is in no log line and no snapshot, and goes with its workspace. **No
+migration**: the slot is a row of the existing, workspace-scoped table. Routes: `GET|PUT|DELETE /api/w/:workspace/llm-keys/claude-code` and
+`POST .../llm-keys/claude-code/test`, static siblings of `[provider]`.
+
+**The test button checks the shape and nothing else**, and says so: there is no call that is free and stays within what the token is for (it is an
+inference-only credential of a subscription for Claude Code; the one thing it can do on its own is spend that subscription), so the app does not
+send it to Anthropic. The answer is `{ok: true, verified: false, format: "known" | "unknown"}`; whether Anthropic accepts the token shows with
+the first run (`subscription_auth`).
+
+### Which login a run gets (the order)
+
+1. **The runner's own login wins.** A self-hosted runner that has a login of its own announces `claude-code` as a `subscription` (with the
+   models of its credentials); a job it takes is run on **that**, its dispatcher hands the Worker the credential as before, and the token of
+   the workspace is **not sent to that Worker** (it does not even ask: the Worker says `login=workspace` on its fetch only when it holds no
+   device login).
+2. **The token of the workspace is the fallback.** A runner whose device has **no login at all** (no credential in the store, no token file, no
+   variable) announces `claude-code` as `app-key` ("I can run it on the token the workspace keeps in the app"), with no model list. A device
+   whose credentials are only rate limited or refused for now is **withdrawn**, never swapped for the workspace's token behind its owner's
+   back. A runner announces either the `subscription` entry or the `app-key` entry, never both, so a runner whose login does not cover the
+   model of a job is simply not a candidate for it (the job stays queued, as before). **The entry only matters while the workspace holds a token**:
+   the routing rule (`accessRule` with `requireToken`, the same rule in memory with `workspaceToken`) lets the `app-key` entry meet a demand for
+   Claude Code only when the workspace has a token. Without one, a runner with no login is not a candidate and the job **stays queued** for a runner
+   that has a login, exactly as before the token existed; nothing fails because of which runner polled first. (The claim re-reads the token as it
+   builds the answer; a token removed in that moment sends the job back to the queue instead of failing it.)
+3. **A hosted Sandbox VM has only the token.** The platform's Dispatcher has an `app-key` entry for `claude-code` (`PLATFORM_ACCESS`), so a
+   turn of a hosted environment (or of none) on `claude-code` is handed to it, and `claude-code` is selectable on hosted runners and
+   environments when the workspace has the token.
+4. **No login for a hosted turn**: the claim ends the job free with `implementer_config_invalid`, detail `reason=claude_code_token_missing` (or
+   `claude_code_token_unreadable` for a stored token that cannot be decrypted; the same word for a runner whose token cannot be read): a hosted turn has no
+   other taker, so it is the one place the claim says what is missing. The validator says so when the lane is saved (`harness_needs_runner` with the way
+   out), and the task form refuses it before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`). For a self-hosted runner there is no terminal
+   refusal: see 2.
+
+### How the token reaches a run, and what the agent can see
+
+- The claim answer to a dispatcher never holds the token. The **Worker's fetch** (`GET /api/workers/v1/jobs/:id`) is where it is put into the
+  input, as `implementer.subscription.oauthToken`, for a hosted turn and for a runner Worker that asked with `login=workspace`. It is the same
+  channel that carries the git token. The Worker's masker knows it from that moment; the job process reads the input on its standard input.
+  A Worker that does not send `login=workspace` is one of an earlier release and keeps the login of its device, so a runner of an older release
+  keeps working when the app is updated first. **The app holds the Worker to what the claim chose**: for a turn of a runner the fetch looks at the
+  manifest the runner announces now, and when it has a login of its device for the model (the claim said `subscription`) the token is not put
+  into the input even if the Worker says `login=workspace`.
+- **The feature `implementer_workspace_token`.** Reading `oauthToken` is a claim feature (`WORKER_FEATURES` of the runner, `KnownClaimFeature` of the
+  contract). The fetch hands the token only to a Worker that names it (else the job ends free, `implementer_engine_unavailable`,
+  `reason=workspace_token`), and a **hosted** turn on the token is a candidate only of a Dispatcher's claim that names it. The Dispatcher names it
+  only when the Worker image of its active golden snapshot lists it (`IMAGE_GATED_CLAIM_FEATURES`, as for `implementer_multi_repo`), so **while a
+  snapshot built before this feature is live, hosted turns on the token wait in the queue** instead of starting a VM that would refuse them; the
+  snapshot is rebuilt by the release (`golden-snapshot.md`, "The Claude Code token needs a rebuilt snapshot").
+- **No outer wall, no token on a hosted VM.** The token is in the agent's container, so a Worker that holds the workspace's token (not a device
+  login) must be able to narrow the VM's outer network policy. A hosted Dispatcher without a public URL (`DISPATCHER_PUBLIC_URL`, the base of the
+  network switch) gives the Worker no way to; the turn is then refused free before any container exists (`implementer_engine_unavailable`, detail
+  `network_switch_missing`) instead of running behind the inner door alone. A turn on a device login is unchanged.
+- **The agent can read it.** The token is handed to Claude Code as `CLAUDE_CODE_OAUTH_TOKEN` in the environment of the `exec` that starts it, and the
+  tools of the agent (Bash and the others) run in that environment: unlike an API key, which stays in the model door **outside** the container, a
+  subscription token has to be in the process that talks to Anthropic. Claude Code's own option that would scrub it from the tools' environment
+  (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`) forces the permission mode to `default` and is not used (see `claude_environment`). What stays true is what
+  the design of R3 already keeps: it is **not in the setup script's container or its definition** (the script ends, and what it left is ended,
+  before the token is handed over); the agent's network is forced to the rule `list` with `api.anthropic.com` on port 443 plus the hosts the step lists,
+  read-only (`gates.py`), and a step cannot have an open network (`subscription_network_open`, `subscription_network_wildcard`); it is taken
+  out of every step record, text, note, branch name, commit subject and log line of the turn (the agent's `Redactor` and the job's secrets), and out of
+  the result the app stores (`currentKeysFor`: the app masks the token that is current when the result arrives; a token replaced or removed during a run
+  is still caught by the runner's own redaction, which knows the token the run started with, and not by the app's second look, as for the LLM keys). **A run that is told to send the token somewhere it may reach (a host the lane lists) can send it**:
+  the lane's author chooses the hosts. Treat the token as the credential of the person who stored it.
+- **Hosted VMs have no Claude Code layer** (we do not ship Claude Code: it is in no image of ours). The Worker builds the layer in the VM's own
+  Docker the first time a turn needs it, exactly as a starting runner builds it (`ensure_layer`: the pinned version, each package accepted only with its own
+  pinned SHA-512), **before** the VM's network is narrowed for the agent, and only for this case (a machine with no login of its own and the token
+  from the job). The build needs the npm registry from the VM at that moment and takes a minute or two of the turn's time; a build that fails refuses the
+  job (`implementer_engine_unavailable`, `harness_not_ready`, the reason in words and never the token). The Dispatcher narrows the VM to the App, GitHub,
+  the rule's hosts and `api.anthropic.com` (the claim names it as the model host; the token of the switch signs it).
+
+### Cost
+
+A run on either login has no model door and no ledger: it carries `costBasis: subscription` and an estimate, shown as "≈ $0.42 through a subscription", never
+billed and never added to a budget or total. The basis is read from **our own record of the turn** (its profile has the harness `claude-code`), for a
+hosted turn as for a runner's, and never from the word of a report (`trustOfJob`). The brake is `--max-budget-usd` and the job's clock, as before.
+
+### Models
+
+`GET /api/w/:workspace/implementer/models` carries `claudeCode: {harness, models, source}` next to the providers when the workspace can log
+Claude Code in: `workspace_token` (the aliases `sonnet`, `opus`, `haiku`), `runner_login` (the models an online runner of the workspace announces for
+its own login) or `both`; otherwise it is left out. A step names its model as `{"provider": "claude-code", "model": "sonnet"}` with the harness
+`claude-code`, as before.
+
+### Tests
+
+App: `claude-code-token.test.ts` and `claude-code-token.integration.test.ts` (rule, encryption at rest, workspace isolation, masking, the handlers and
+the test button, which sends nothing), `ui/claude-code-token-card.test.tsx`, `runner-identity/access*.test.ts` (the rule in memory and in the database),
+`runner-api/runner-subscription.integration.test.ts` (the claim and fetch: hosted with and without the token, a runner without a login, the runner's own
+login winning, no token in the log), `runner-subscription-cost.integration.test.ts` (the hosted turn is a subscription), the validator tests
+(`workflows/check-runner.test.ts`, `runner-rules.test.ts`), the task and profile services. Runner: `test_claude_code_readiness.py` (the order of
+the logins, the layer build, a login that cannot be used is never swapped), `test_implementer_subscription_job.py`, `test_worker_outer_proxy.py`
+and the Worker API contract test (`login=workspace`), `test_factory_runner_service.py` and `test_factory_runner_credential_pool.py` (the `app-key` entry).
+
+**Not proven by any automated test:** a real hosted Sandbox VM building the layer and running a turn on the token (it needs the VM, the npm
+registry and a real token). That is the first live test after the release.
+
 ## Claude Code, R3 (#856)
 
 R3 adds Claude Code as a harness that a runner announces when its device has a login for it. **The first slice was the adapter core**:
@@ -1151,8 +1263,11 @@ The code is [`runner/src/code_reviewer_runner/implementer/claude_code/`](../runn
 ### Rules it keeps (owner, 2026-11-05)
 
 - Claude Code is used **unmodified, with each user's own credentials, on the customer's device** (our runner). No resale. The login is
-  a token the customer makes with `claude setup-token`; it is **never stored in our app or its database, never sent to the app, never
-  logged**, and there is no Claude login in our app. The operator key never goes to a runner.
+  a token the customer makes with `claude setup-token`; the one **on the device** is **never stored in our app or its database, never
+  sent to the app, never logged**, and there is no Claude login in our app. The operator key never goes to a runner.
+  **Amended 2026-11-25 (#1150, owner decision):** a workspace may also store such a token itself, as a secret next to its LLM keys,
+  and Claude Code then runs on it in a hosted Sandbox VM and on a runner that has no login of its own; see
+  [Claude Code on the token of the workspace](#claude-code-on-the-token-of-the-workspace-1150). Nothing else here changes.
 - **The agent is free inside the sandbox**: `--permission-mode bypassPermissions`, no `--allowedTools` (a closed list of tools). Only
   money, key and exits are guarded.
 - **Not as root, and not on `IS_SANDBOX=1`.** Bypass mode refuses to run as root unless `IS_SANDBOX=1`, which Anthropic does not
@@ -1204,12 +1319,12 @@ show is the lane (CI).
 only, null reads as `opencode`). The model of such a profile is `{"provider": "claude-code", "model": "<name Claude Code reads>"}` (for
 example `sonnet`, `claude-sonnet-5-5`): no catalog entry, no key of the workspace and no price stand behind it, so the model check of
 the catalog is skipped and the provider name `claude-code` is refused on any other harness. Starting a task with such a profile in an
-environment that is not a runner's is refused before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`, 422); the workflow check
-`harness_needs_runner` says the same for a workflow.
+environment that is not a runner's is refused before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`, 422) **unless the workspace has
+a Claude Code OAuth token** (#1150); the workflow check `harness_needs_runner` says the same for a workflow.
 
 **Routing.** The claim of a customer's runner takes a turn only when an entry of its manifest has the harness of the turn's profile, the auth (`claude-code` asks for
-`subscription`) and the model (#973: `accessRule` in `app/src/runner-identity/access.ts`, which replaced the harness test of #856); the platform's claim has no subscription entry, so
-it never takes a turn on `claude-code`. A runner that does not announce `claude-code` as a `subscription` (or whose entry does not list the model), because its login is gone or it
+`subscription`) and the model (#973: `accessRule` in `app/src/runner-identity/access.ts`, which replaced the harness test of #856); the platform's claim has no *subscription* entry (#1150: it has an
+`app-key` entry for `claude-code`, which only a Dispatcher's claim can use: the token of the workspace). A runner that does not announce `claude-code` as a `subscription` (or whose entry does not list the model), because its login is gone or it
 withdrew the entry, leaves the turn queued for one that does.
 
 **The job.** A turn on `claude-code` is handed to the runner as a job without `llm`, without `implementer.cost` and without

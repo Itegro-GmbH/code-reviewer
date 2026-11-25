@@ -39,6 +39,11 @@ import {
   type WorkspaceLlmKeyService,
 } from "./workspace-key.ts";
 import { withNativeProviders } from "../native-providers/lookup.ts";
+import {
+  createClaudeCodeTokenService,
+  type ClaudeCodeTokenSecretName,
+  type ClaudeCodeTokenService,
+} from "./claude-code-token.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -57,6 +62,11 @@ export function summarizeLlmAccess(
 
 export type WorkspaceLlmAssembly = {
   keyServiceFor(workspaceId: string): WorkspaceLlmKeyService;
+  /**
+   * The Claude Code OAuth token of the workspace (#1150): a slot of the same encrypted store as its keys, but no provider (it is not
+   * in the registry, and nothing that lists providers sees it). The runs of the harness `claude-code` read it.
+   */
+  claudeCodeTokenFor(workspaceId: string): ClaudeCodeTokenService;
   /**
    * The operator's own keys, one for each provider (the instance admin saves them; only the admin portal and this
    * assembly use them). They are the keys of a workspace whose key mode is `managed`, and of no other.
@@ -84,7 +94,7 @@ export type WorkspaceLlmAssembly = {
   ): Promise<WorkspaceLlmSummary>;
   /**
    * The LLM keys that are current for this workspace right now, to mask in the result of one of its jobs: its
-   * own key of every provider, and the operator's key of every provider while the workspace is `managed`. Fails
+   * own key of every provider, its Claude Code OAuth token (#1150), and the operator's key of every provider while the workspace is `managed`. Fails
    * closed: a key that exists but cannot be decrypted is left out (it cannot appear in a result), but a read that
    * fails throws, so a caller never masks with fewer keys than it should (src/runner-api/known-secrets.ts).
    */
@@ -123,6 +133,16 @@ export function createWorkspaceLlm({
         ...(now === undefined ? {} : { now }),
       }),
       providers: ownProviders,
+    });
+
+  const claudeCodeTokenFor = (workspaceId: string) =>
+    createClaudeCodeTokenService({
+      store: createWorkspaceSecretStore<ClaudeCodeTokenSecretName>({
+        db,
+        workspaceId,
+        appSecret: appSecret(),
+        ...(now === undefined ? {} : { now }),
+      }),
     });
 
   const operatorKey = () =>
@@ -200,6 +220,7 @@ export function createWorkspaceLlm({
 
   return {
     keyServiceFor,
+    claudeCodeTokenFor,
     operatorKey,
     accessFor,
     keyFor,
@@ -213,6 +234,9 @@ export function createWorkspaceLlm({
         const own = await service.keyFor(id);
         if (own.state === "key") keys.push(own.apiKey);
       }
+      // The Claude Code token (#1150) is a secret of the workspace like its keys: it never appears in a result.
+      const claude = await claudeCodeTokenFor(workspaceId).tokenForJob();
+      if (claude.state === "token") keys.push(claude.token);
       // The keys of the catalog providers (#555) are masked in a result as well.
       for (const { provider } of await service.nativeStatuses()) {
         const own = await service.keyFor(provider);

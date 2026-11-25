@@ -112,6 +112,11 @@ export type ProfileServiceDependencies = {
    * runner with its labels is online and none announces the harness, the auth and the model (`no_runner_announces`). Left out: not asked.
    */
   onlineRunners?: () => Promise<readonly OnlineRunner[]>;
+  /**
+   * #1150: whether the workspace has a Claude Code OAuth token it can use: then the harness `claude-code` is also fine in a hosted
+   * environment (its Sandbox VM runs on the token). Left out: the workspace has none.
+   */
+  claudeCodeTokenConfigured?: () => Promise<boolean>;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
   /** The most profiles a workspace may hold: `PROFILES_PER_WORKSPACE_MAX`. */
@@ -160,6 +165,7 @@ export function createProfileService({
   models,
   environments,
   onlineRunners,
+  claudeCodeTokenConfigured,
   operatorCostLimitCents,
   profilesMax = PROFILES_PER_WORKSPACE_MAX,
   archivedMax = ARCHIVED_PROFILES_PER_WORKSPACE_MAX,
@@ -241,13 +247,18 @@ export function createProfileService({
       }
       if (
         environment.kind === "hosted" &&
-        shape.profile.harness !== OPENCODE_HARNESS
+        shape.profile.harness !== OPENCODE_HARNESS &&
+        // #1150: a Claude Code OAuth token in the LLM keys is the login of a hosted VM.
+        !(
+          claudeCodeTokenConfigured !== undefined &&
+          (await claudeCodeTokenConfigured())
+        )
       )
         errors.push(
           issue(
             "/environment",
             "harness_needs_runner",
-            `The harness ${shown(shape.profile.harness)} exists only on a runner, and the environment ${shown(environment.name)} is one of the platform. Choose an environment that runs on a runner.`,
+            `The harness ${shown(shape.profile.harness)} needs a login of its own: the workspace has no Claude Code OAuth token (save one under LLM keys), and the environment ${shown(environment.name)} is one of the platform. Save the token, or choose an environment that runs on a runner.`,
           ),
         );
     }

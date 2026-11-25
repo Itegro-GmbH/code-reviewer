@@ -204,6 +204,19 @@ class CredentialPool:
                 models.extend(model for model in record.offered(now) if model not in models)
         return Offer(tuple(models)) if models else None
 
+    def holds_no_login(self) -> bool:
+        """Whether this device has no login of its own at all (#1150): the store holds no
+        credential and no older source (token file, variable) is set. Such a device announces
+        Claude Code as able to run on the token of the workspace (`app-key`) instead of not
+        announcing it. A device whose credentials are all rate limited or refused for now, or
+        whose store cannot be read, has a login: it is withdrawn, never swapped for the
+        workspace's token behind its owner's back."""
+        records = self._records()
+        if records is None or records:
+            return False
+        legacy = self._legacy_login()
+        return isinstance(legacy, LoginProblem) and not legacy.configured
+
     def _readable(self, record: CredentialRecord) -> bool:
         try:
             self._store.secret(record.name)
