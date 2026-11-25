@@ -54,7 +54,9 @@ describe("the Cloudflare sandbox workflow", () => {
 
   // #1159-T32
   it("deploys only for a push or a run by hand on main, in this repository, and never for the old repository name", () => {
-    const deploy = String(image.env?.DEPLOY);
+    const deploy = String(
+      (image.env as Record<string, string> | undefined)?.DEPLOY,
+    );
     expect(deploy).toContain("github.event_name == 'push'");
     expect(deploy).toContain("github.event_name == 'workflow_dispatch'");
     expect(deploy).toContain("github.ref == 'refs/heads/main'");

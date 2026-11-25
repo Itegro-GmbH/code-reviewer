@@ -49,7 +49,7 @@ RUN set -eux; \
     install -D -m 0755 /tmp/host/sysbox-prepare.sh "$(path sysboxPrepare)"; \
     bash /tmp/recipe/40-install-host-scripts.sh; \
     install -D -m 0644 /tmp/recipe/recipe.json /etc/code-reviewer-vm/recipe.json; \
-    ln -s tini /usr/bin/docker-init; \
+    [ -e /usr/bin/docker-init ] || ln -s tini /usr/bin/docker-init; \
     rm -rf /tmp/golden-* /tmp/recipe /tmp/host
 
 # The one patch (image/files/patch-sysbox-mgr.sh): verified before and after, a build fails when sysbox-mgr is not the pinned binary.
