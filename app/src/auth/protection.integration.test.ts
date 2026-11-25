@@ -275,6 +275,9 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/llm-key/test",
   "/api/w/[workspace]/llm-keys/[provider]",
   "/api/w/[workspace]/llm-keys/[provider]/test",
+  // The Claude Code OAuth token of the workspace (#1150): static siblings of `[provider]`.
+  "/api/w/[workspace]/llm-keys/claude-code",
+  "/api/w/[workspace]/llm-keys/claude-code/test",
   "/api/w/[workspace]/plan",
   "/api/w/[workspace]/plan-handoff",
   "/api/w/[workspace]/members/[userId]",

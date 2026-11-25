@@ -36,8 +36,26 @@ vi.mock("@/llm/http", () => {
     }),
   };
 });
+// #1150: the handlers of the Claude Code token, the same way.
+vi.mock("@/llm/claude-code-token-http", () => {
+  const answer = (name: string) => async () => {
+    reached.calls.push(name);
+    return Response.json({ reached: name });
+  };
+  return {
+    createClaudeCodeTokenRouteHandlers: () => ({
+      get: answer("get"),
+      put: answer("put"),
+      remove: answer("remove"),
+      test: answer("test"),
+    }),
+  };
+});
 vi.mock("@/llm/shared", () => ({
-  getWorkspaceLlm: () => ({ keyServiceFor: () => ({}) }),
+  getWorkspaceLlm: () => ({
+    keyServiceFor: () => ({}),
+    claudeCodeTokenFor: () => ({}),
+  }),
   getLlmKeyTester: () => ({}),
 }));
 
@@ -84,6 +102,10 @@ async function start() {
       (await import("../../src/app/api/w/[workspace]/llm-keys/[provider]/route.ts")) as unknown as RouteFile,
     "/llm-keys/openrouter/test":
       (await import("../../src/app/api/w/[workspace]/llm-keys/[provider]/test/route.ts")) as unknown as RouteFile,
+    "/llm-keys/claude-code":
+      (await import("../../src/app/api/w/[workspace]/llm-keys/claude-code/route.ts")) as unknown as RouteFile,
+    "/llm-keys/claude-code/test":
+      (await import("../../src/app/api/w/[workspace]/llm-keys/claude-code/test/route.ts")) as unknown as RouteFile,
     "/llm-key":
       (await import("../../src/app/api/w/[workspace]/llm-key/route.ts")) as unknown as RouteFile,
     "/llm-key/test":
@@ -113,6 +135,10 @@ describe("the role action of the LLM key route files", () => {
     ["/llm-keys/openrouter", "PUT"],
     ["/llm-keys/openrouter", "DELETE"],
     ["/llm-keys/openrouter/test", "POST"],
+    // #1150-T03
+    ["/llm-keys/claude-code", "PUT"],
+    ["/llm-keys/claude-code", "DELETE"],
+    ["/llm-keys/claude-code/test", "POST"],
     ["/llm-key", "PUT"],
     ["/llm-key", "DELETE"],
     ["/llm-key/test", "POST"],
@@ -132,7 +158,7 @@ describe("the role action of the LLM key route files", () => {
   );
 
   // #426-T04
-  it.each(["/llm-keys/openrouter", "/llm-key"] as const)(
+  it.each(["/llm-keys/openrouter", "/llm-keys/claude-code", "/llm-key"] as const)(
     "let a Member read %s (the action is view, not manage_llm_key)",
     async (path) => {
       const t = await start();
