@@ -48,6 +48,15 @@ const MANIFESTS: Record<string, readonly HarnessAccess[]> = {
     { ...OPENCODE, auth: "local-key", models: ["gpt-5"] },
   ],
   "claude code alone": [CLAUDE],
+  // #1150: a runner without a login of its own, and a login that is on the device, together.
+  "claude code on the token of the workspace": [
+    OPENCODE,
+    { ...CLAUDE, auth: "app-key" },
+  ],
+  "claude code, sonnet only, and the token of the workspace": [
+    { ...CLAUDE, models: ["sonnet"] },
+    { ...CLAUDE, auth: "app-key" },
+  ],
 };
 
 const TURNS: Record<
@@ -126,7 +135,7 @@ describe("the rule in the database and in memory", () => {
         if (inMemory) taken += 1;
       }
 
-    expect(compared).toBe(70);
+    expect(compared).toBe(84);
     // The table must not be one-sided: some pairs match and some do not.
     expect(taken).toBeGreaterThan(10);
     expect(taken).toBeLessThan(60);

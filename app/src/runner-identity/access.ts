@@ -35,6 +35,15 @@ export const MANAGED_AUTH: AccessAuth = "managed";
 /** The harnesses that run on a login of the device, never on a key of the app: their access is a subscription. */
 export const SUBSCRIPTION_HARNESSES: readonly string[] = [CLAUDE_CODE_HARNESS];
 
+/**
+ * #1150: how a harness on a login can also run where there is no login of the device: on the Claude Code OAuth token the workspace keeps in the
+ * app. It is the same source as `app-key` says for OpenCode (a credential the workspace keeps in the app and the app hands to the Worker), so an
+ * entry `{ harness: claude-code, auth: app-key }` means "I can run Claude Code on the token of the workspace". A demand for such a harness
+ * (`subscription`: the login of the device, the runner's own wins) is also met by that entry, and then the claim hands the Worker the token.
+ * The entry allows any model (the token is the user's own subscription, and `models` is for a login of a device).
+ */
+export const TOKEN_FALLBACK_AUTH: AccessAuth = "app-key";
+
 export const MODELS_MAX = 64;
 /** A model as a harness reads it (`sonnet`, `claude-sonnet-5-5`, `vendor/model-name`). */
 export const MODEL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,99}$/;
@@ -60,6 +69,8 @@ export const PLATFORM_ACCESS: readonly HarnessAccess[] = [
   // The version is the one the platform's image pins (`runner/opencode-pin.json`); the app does not read it.
   { harness: OPENCODE_HARNESS, version: "pinned", auth: "managed" },
   { harness: OPENCODE_HARNESS, version: "pinned", auth: "app-key" },
+  // #1150: the platform has no login of a device. Claude Code runs on its Sandbox VMs on the token of the workspace, when the workspace has one.
+  { harness: CLAUDE_CODE_HARNESS, version: "pinned", auth: "app-key" },
 ];
 
 export type ReservedAccessIssue = { field: string; code: "reserved" };
@@ -161,15 +172,24 @@ export function runnerCanServe(demand: AccessDemand): boolean {
   return demand.auth !== MANAGED_AUTH;
 }
 
-/** The rule in memory: one entry has the harness, the auth and, when the demand names a model, allows it (an alias allows the ids it stands for, #980). */
+/**
+ * The rule in memory: one entry has the harness, the auth and, when the demand names a model, allows it (an alias allows the ids it stands for,
+ * #980). #1150: a demand for the login of a device (`subscription`, a harness that runs on one) is also met by the entry of the same harness that
+ * says it runs on the token of the workspace (`TOKEN_FALLBACK_AUTH`); that entry has no list of models.
+ */
 export function accessMatches(
   entries: readonly HarnessAccess[],
   demand: AccessDemand,
 ): boolean {
+  const tokenToo =
+    demand.auth === "subscription" &&
+    SUBSCRIPTION_HARNESSES.includes(demand.harness);
   return entries.some(
     (entry) =>
       entry.harness === demand.harness &&
-      (demand.auth === null || entry.auth === demand.auth) &&
+      (demand.auth === null ||
+        entry.auth === demand.auth ||
+        (tokenToo && entry.auth === TOKEN_FALLBACK_AUTH)) &&
       (demand.model === null || modelsAllow(entry.models, demand.model)),
   );
 }
@@ -231,7 +251,8 @@ export function accessRule(
     select 1 from jsonb_array_elements(${entries}) as announced
     where jsonb_typeof(${demand.choice}) = 'object'
       and announced ->> 'harness' = ${demand.harness}
-      and announced ->> 'auth' = ${demand.auth}
+      and (announced ->> 'auth' = ${demand.auth}
+        or (${demand.auth} = 'subscription' and announced ->> 'auth' = ${TOKEN_FALLBACK_AUTH}::text))
       and (${demand.model} is null
         or announced -> 'models' is null
         or exists (
