@@ -4,7 +4,7 @@
 // The card "Claude Code OAuth token" next to the provider keys on the LLM keys page (#1150): set, replace, test and remove the token of the
 // workspace that runs of the harness `claude-code` use. Write-only like the keys: the page shows whether one is saved (and its last four
 // characters), an empty field keeps it, and the saved value never reaches the page. "Test token" checks the shape and says that it does
-// not ask Anthropic. Anyone who manages the LLM keys of the workspace (an Admin or an Owner) can do all of it; a Member sees whether
+// not ask the Claude API. Anyone who manages the LLM keys of the workspace (an Admin or an Owner) can do all of it; a Member sees whether
 // one is saved.
 import { useProductIdentity } from "../../product-identity/context.tsx";
 import { useRouter } from "next/navigation";
@@ -37,7 +37,7 @@ import {
 } from "./claude-code-token-messages.ts";
 
 export const CLAUDE_CODE_TOKEN_HOW_STORED =
-  "Runs of the harness claude-code use this token as CLAUDE_CODE_OAUTH_TOKEN (make one with `claude setup-token`); Anthropic bills it to your Claude subscription, not to this factory. The token is stored encrypted on this server and is never shown again. It is handed to the run that needs it and to nobody else, but inside that run the agent can read it: Claude Code needs it there. On a self-hosted runner that has a Claude login of its own, the runner's login is used and this token is not sent. Everyone who may start a run of this workspace on the harness claude-code spends this subscription.";
+  "Runs of the harness claude-code use this token as CLAUDE_CODE_OAUTH_TOKEN (make one with `claude setup-token`); it is billed to your Claude subscription, not to this factory. The token is stored encrypted on this server and is never shown again. It is handed to the run that needs it and to nobody else, but inside that run the agent can read it: Claude Code needs it there. On a self-hosted runner that has a Claude login of its own, the runner's login is used and this token is not sent. Everyone who may start a run of this workspace on the harness claude-code spends this subscription.";
 
 type Outcome =
   | { kind: "saved"; changed: boolean }
@@ -240,8 +240,9 @@ export function ClaudeCodeTokenCard({
                   {outcome.format === "known"
                     ? "The token has the shape that `claude setup-token` prints."
                     : "The token is usable text, but not the shape that `claude setup-token` prints (sk-ant-oat01-…)."}{" "}
-                  Only the shape was checked: nothing is sent to Anthropic.
-                  Whether Anthropic accepts the token shows with the first run.
+                  Only the shape was checked: nothing is sent to the Claude API.
+                  Whether the Claude API accepts the token shows with the first
+                  run.
                 </p>
               ) : null}
             </div>

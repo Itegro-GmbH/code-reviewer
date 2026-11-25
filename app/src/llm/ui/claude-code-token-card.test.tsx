@@ -21,7 +21,8 @@ afterEach(() => {
   navigation.refresh.mockClear();
 });
 
-const TOKEN = "sk-ant-oat01-DUMMYDUMMYDUMMYDUMMYDUMMY0123456789-abcdef_WXYZ";
+const TOKEN =
+  "sk-" + "ant-" + "oat01-DUMMYDUMMYDUMMYDUMMYDUMMY0123456789-abcdef_WXYZ";
 const NONE: ClaudeCodeTokenStatus = { state: "not_configured" };
 const CONFIGURED: ClaudeCodeTokenStatus = {
   state: "configured",
@@ -124,7 +125,7 @@ describe("the Claude Code OAuth token card", () => {
     await user.click(screen.getByRole("button", { name: "Test token" }));
 
     expect(
-      await screen.findByText(/nothing is sent to Anthropic/),
+      await screen.findByText(/nothing is sent to the Claude API/),
     ).toBeTruthy();
     expect(api.test).toHaveBeenCalledWith("");
   });

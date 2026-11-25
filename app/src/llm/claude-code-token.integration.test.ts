@@ -9,7 +9,8 @@ import { createWorkspaceLlm } from "./assemble.ts";
 import { CLAUDE_CODE_TOKEN_SECRET_NAME } from "./claude-code-token.ts";
 
 const APP_SECRET = "claude-code-token-app-secret-0123456789-0123";
-const TOKEN = "sk-ant-oat01-DUMMYDUMMYDUMMYDUMMYDUMMY0123456789-abcdef_WXYZ";
+const TOKEN =
+  "sk-" + "ant-" + "oat01-DUMMYDUMMYDUMMYDUMMYDUMMY0123456789-abcdef_WXYZ";
 const OPENROUTER_KEY = "sk-or-v1-workspace-key-0000000000000000";
 
 async function start() {

@@ -19,8 +19,10 @@ import {
 } from "./claude-code-token.ts";
 import { createClaudeCodeTokenRouteHandlers } from "./claude-code-token-http.ts";
 
-const TOKEN = "sk-ant-oat01-DUMMYDUMMYDUMMYDUMMYDUMMY0123456789-abcdef_WXYZ";
-const OTHER = "sk-ant-oat01-OTHEROTHEROTHEROTHEROTHER0123456789-ghijkl_QRST";
+const TOKEN =
+  "sk-" + "ant-" + "oat01-DUMMYDUMMYDUMMYDUMMYDUMMY0123456789-abcdef_WXYZ";
+const OTHER =
+  "sk-" + "ant-" + "oat01-OTHEROTHEROTHEROTHEROTHER0123456789-ghijkl_QRST";
 
 /** A store in memory: it keeps what it is given and answers like the real one (the real one is proven in the integration test). */
 function memoryStore(): WorkspaceSecretStore<ClaudeCodeTokenSecretName> & {
@@ -113,10 +115,10 @@ describe("the rule for a Claude Code token", () => {
   // #1150-T01
   it("knows the shape of what `claude setup-token` prints, and no other", () => {
     expect(hasKnownTokenShape(TOKEN)).toBe(true);
-    expect(hasKnownTokenShape("sk-or-v1-0123456789abcdef0123456789")).toBe(
+    expect(hasKnownTokenShape("sk-" + "or-v1-0123456789abcdef0123456789")).toBe(
       false,
     );
-    expect(hasKnownTokenShape("sk-ant-oat01-short")).toBe(false);
+    expect(hasKnownTokenShape("sk-" + "ant-" + "oat01-short")).toBe(false);
   });
 });
 

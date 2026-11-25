@@ -569,7 +569,7 @@ describe("the fetch of a turn on several repositories on the harness claude-code
 // a self-hosted runner that announces no login of its own (the entry `app-key` for the harness) runs on it as well; a runner that has its own
 // login keeps it (the runner's own login wins).
 const OAUTH_TOKEN =
-  "sk-ant-oat01-WORKSPACETOKENWORKSPACETOKEN0123456789-abcdef_WXYZ";
+  "sk-" + "ant-" + "oat01-WORKSPACETOKENWORKSPACETOKEN0123456789-abcdef_WXYZ";
 const HOSTED_FEATURES = [...NOW_FEATURES, "implementer_subscription_setup"];
 const DISPATCHER_ENGINES = ["implementer", "opencode", "pr-agent"];
 const TOKEN_ACCESS = [

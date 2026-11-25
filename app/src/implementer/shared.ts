@@ -110,6 +110,20 @@ export function implementerTurnPricer() {
   });
 }
 
+/**
+ * #1150: whether the workspace has a Claude Code OAuth token it can use (a readable one). The tasks, the profiles and the validator of lanes
+ * ask it to let the harness `claude-code` run outside a runner environment. Lives here, beside the other things they already take from this
+ * module, so that none of them imports the wiring of the LLM keys.
+ */
+export async function claudeCodeTokenConfigured(
+  workspaceId: string,
+): Promise<boolean> {
+  return (
+    (await getWorkspaceLlm().claudeCodeTokenFor(workspaceId).tokenForJob())
+      .state === "token"
+  );
+}
+
 /** The Implementer service of one workspace. */
 export function implementerServiceFor(workspaceId: string): ImplementerService {
   const db = getDatabase();
@@ -125,9 +139,7 @@ export function implementerServiceFor(workspaceId: string): ImplementerService {
     queue: jobQueueFor(workspaceId),
     operatorCostLimitCents: operatorCostLimitCentsFrom(db),
     // #1150: a task on the harness claude-code outside a runner environment runs on the Claude Code token of this workspace.
-    claudeCodeTokenConfigured: async () =>
-      (await getWorkspaceLlm().claudeCodeTokenFor(workspaceId).tokenForJob())
-        .state === "token",
+    claudeCodeTokenConfigured: () => claudeCodeTokenConfigured(workspaceId),
   });
 }
 

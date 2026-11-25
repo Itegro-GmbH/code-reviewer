@@ -14,9 +14,9 @@
 //
 // **The test button checks the shape and nothing else, and says so.** There is no call to make that costs nothing and stays within what the
 // token is for: the token is an inference-only credential of a Claude subscription for Claude Code, and the one thing it can do on its own is
-// spend that subscription (a model call) from a place that is not Claude Code. So the app does not send it to Anthropic. The test answers
+// spend that subscription (a model call) from a place that is not Claude Code. So the app does not send it to the Claude API. The test answers
 // `{ ok: true, verified: false, format: "known" | "unknown" }` for a token the runner would accept (`known`: it has the shape `claude setup-token`
-// prints) and `invalid_input` for one it would refuse. Whether Anthropic accepts the token is found out by its first run
+// prints) and `invalid_input` for one it would refuse. Whether the Claude API accepts the token is found out by its first run
 // (`subscription_auth` on a refusal).
 import {
   JSON_BODY_ERROR_STATUS,

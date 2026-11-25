@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // POST /api/w/:workspace/llm-keys/claude-code/test (#1150): checks the shape of the Claude Code OAuth token, the one typed into the field or,
-// when it is empty, the stored one. It sends nothing to Anthropic (src/llm/claude-code-token-http.ts says why). An Admin or an Owner only
+// when it is empty, the stored one. It sends nothing to the Claude API (src/llm/claude-code-token-http.ts says why). An Admin or an Owner only
 // (`manage_llm_key`).
 import { connection } from "next/server";
 import { createClaudeCodeTokenRouteHandlers } from "@/llm/claude-code-token-http";
