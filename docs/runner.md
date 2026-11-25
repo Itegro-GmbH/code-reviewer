@@ -1207,7 +1207,7 @@ the first run (`subscription_auth`).
 
 ### Cost
 
-A run on either login has no model door and no ledger: it carries `costBasis: subscription` and an estimate, shown as "≈ … via subscription", never
+A run on either login has no model door and no ledger: it carries `costBasis: subscription` and an estimate, shown as "≈ $0.42 through a subscription", never
 billed and never added to a budget or total. The basis is read from **our own record of the turn** (its profile has the harness `claude-code`), for a
 hosted turn as for a runner's, and never from the word of a report (`trustOfJob`). The brake is `--max-budget-usd` and the job's clock, as before.
 
