@@ -27,6 +27,7 @@
     "opencode-providers:derive": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/ci/opencode-providers/cli.ts --write"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@phosphor-icons/react": "^2.1.10",
     "@vercel/functions": "catalog:",
     "better-auth": "1.7.7",
