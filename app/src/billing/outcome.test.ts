@@ -566,6 +566,16 @@ describe("the failures that incurred AI cost", () => {
       ).toBe("free");
   });
 
+  // #1142-T17
+  it("does not charge a step whose MCP server was not available: the agent never ran, on either key", () => {
+    expect(AI_COST_FAILURE_CODES).not.toContain("mcp_unavailable");
+    expect(ERROR_CODE_CLASSES.mcp_unavailable).toBe("free");
+    for (const keyMode of ["managed", "own"] as const)
+      expect(classifyOutcome(failed("mcp_unavailable", { keyMode }))).toBe(
+        "free",
+      );
+  });
+
   // #523-T13
   it("gives every member the class of the group, on both keys", () => {
     for (const code of AI_COST_FAILURE_CODES) {

@@ -1099,6 +1099,7 @@ class ImplementerSession:
             model=entry.model_id,
             provider_id=entry.provider_id,
             transport=self.seams.transport,
+            mcp_endpoints=self._mcp_endpoints,
             # Without a channel nothing is recorded, so nothing is queued to be "not taken in time".
             redactor=Redactor(self.secrets()) if self._steps is not None else None,
             files=None

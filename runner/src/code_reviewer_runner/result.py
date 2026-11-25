@@ -125,6 +125,10 @@ class ErrorCode(StrEnum):
     SUBSCRIPTION_AUTH = "subscription_auth"
     SUBSCRIPTION_LIMIT = "subscription_limit"
     SUBSCRIPTION_MODEL_REFUSED = "subscription_model_refused"
+    # #1142: an MCP server of the step was not connected (or had not listed its tools) when the
+    # agent was about to start, also after one reconnect. The turn ends before the first prompt, so
+    # the model was never used: free. The detail names the server by its configured name.
+    MCP_UNAVAILABLE = "mcp_unavailable"
     # The runner was told to stop (SIGTERM, #765): what is committed was pushed, and the job host
     # gives the job back to the queue under this code.
     RUNNER_SHUTDOWN = "runner_shutdown"

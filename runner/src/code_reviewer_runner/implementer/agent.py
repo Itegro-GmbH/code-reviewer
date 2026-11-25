@@ -20,6 +20,7 @@ removes or rewrites a cache marker.
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -48,6 +49,8 @@ from code_reviewer_runner.result import ErrorCode
 from code_reviewer_runner.resume_wire import ResumeReason
 
 from .config import IMPLEMENTER_AGENT, SESSION_TITLE
+from .mcp_config import McpEndpoint
+from .mcp_ready import ensure_opencode_ready
 from .preface import ResumeMode
 from .resume_session import ResumeInput, ResumeSnapshot
 from .session_export import EngineFetch, ExportFailed, ExportReason, SessionSnapshot, take_snapshot
@@ -170,6 +173,8 @@ class ImplementerAgent:
         transport: Transport = _http_request,
         redactor: Redactor | None = None,
         files: Mapping[str, tuple[bytes, int]] | None = None,
+        mcp_endpoints: Sequence[McpEndpoint] = (),
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.ledger = ledger
         self.command = tuple(command)
@@ -186,6 +191,9 @@ class ImplementerAgent:
         self._instructions = instructions
         # #843: further files for the engine's configuration directory (the finish tool).
         self._files = dict(files or {})
+        # #1142: the MCP servers of the step, which must be connected before the first prompt.
+        self._mcp_endpoints = tuple(mcp_endpoints)
+        self._sleep = sleep
         self._environment = dict(environment)
         self._provider_id = provider_id
         self._startup_seconds = startup_seconds
@@ -206,8 +214,10 @@ class ImplementerAgent:
     # -- process --------------------------------------------------------------
 
     def start(self, port: int, resume: ResumeInput | None = None) -> None:
-        """Write the trusted config, start the engine, wait for it to be healthy and open the one
-        session. Raises `EngineError` or `LimitError`; the caller calls `stop()`.
+        """Write the trusted config, start the engine, wait for it to be healthy, open the one
+        session and check that every MCP server of the step is connected (#1142). Raises
+        `EngineError` (`mcp_unavailable` for a server that is not) or `LimitError`; the caller calls
+        `stop()`.
 
         A follow-up turn (`resume`, #840) first imports the stored conversation, before the engine
         starts (the engine reads its database when it opens, and the import is a second process of
@@ -254,6 +264,9 @@ class ImplementerAgent:
         client.wait_healthy(self._startup_seconds, self._is_running)
         self._client = client
         self.session_id = self._open_session(client, resume, imported)
+        # Before the audit and long before the prompt: a turn that would run without the tools its
+        # step was given ends here, `mcp_unavailable`, and costs nothing (#1142).
+        ensure_opencode_ready(client, self._mcp_endpoints, self.ledger, sleep=self._sleep)
         self._open_audit(client, self.session_id)
 
     def _import(self, resume: ResumeInput, environment: Mapping[str, str]) -> str | None:
