@@ -26,6 +26,7 @@ import type {
 } from "../jobs/job-types.ts";
 import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { runnerAccessOf } from "../runner-api/runner-access.ts";
 import { createRunnerRegistrationApi } from "../runner-api/registration.ts";
 import {
   normalizeLabels,
@@ -549,6 +550,16 @@ export async function startRunnerApiHarness(
         createImplementerRepository(fixture.db, job.workspaceId).getTurnByJob(
           job.id,
         ),
+      claudeCodeToken: (workspaceId) =>
+        llm.claudeCodeTokenFor(workspaceId).tokenForJob(),
+      runnerAccess: (job) =>
+        runnerAccessOf(
+          (workspaceId) =>
+            createRunnersRepository(fixture.db, workspaceId, {
+              now: fixture.clock.now,
+            }),
+          job,
+        ),
       startedByWorkflow: async (job) =>
         job.deliveryId !== null &&
         (await createWorkflowRunsRepository(
@@ -926,10 +937,11 @@ export async function startRunnerApiHarness(
       features?: string,
       target: typeof workerApi = workerApi,
       llmProviders?: string,
+      login?: "workspace",
     ) =>
       target.details(
         new Request(
-          `${workerUrl}/jobs/${jobId}${detailsQuery(features, llmProviders)}`,
+          `${workerUrl}/jobs/${jobId}${detailsQuery(features, llmProviders, login)}`,
           { method: "GET", headers: workerHeaders(credential) },
         ),
         jobId,
@@ -1274,10 +1286,16 @@ export type RunnerApiHarness = Awaited<
 >;
 
 /** A valid, successful result; any field can be replaced. */
-function detailsQuery(features?: string, llmProviders?: string): string {
+function detailsQuery(
+  features?: string,
+  llmProviders?: string,
+  login?: "workspace",
+): string {
   const parts = [
     ...(features === undefined ? [] : [`features=${features}`]),
     ...(llmProviders === undefined ? [] : [`llmProviders=${llmProviders}`]),
+    // #1150: a Worker with no login of its device asks for the workspace's.
+    ...(login === undefined ? [] : [`login=${login}`]),
   ];
   return parts.length === 0 ? "" : `?${parts.join("&")}`;
 }

@@ -107,6 +107,7 @@ export async function selfHostedWaitOf(
     const { rows } = await sql<{ ok: boolean }>`select ${accessRule(
       entriesParam(customerAccess(harnesses)),
       "demanded",
+      { requireToken: true },
     )} as ok from implementer_turns as demanded where demanded.job_id = ${jobId}`.execute(
       db,
     );

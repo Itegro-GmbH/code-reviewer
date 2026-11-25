@@ -36,6 +36,7 @@ import {
   hostedLabels,
   REVIEW_VCPUS,
   requiredLabelsOfTurn,
+  type HostedPlacement,
 } from "../../runner-identity/labels.ts";
 import type { ValidEnqueueInput } from "../../jobs/job-input.ts";
 import { ImplementerStoreError } from "../implementer-errors.ts";
@@ -274,6 +275,41 @@ export function toJob(row: Selectable<JobsTable>): Job {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
+  };
+}
+
+/**
+ * #1158 (epic #1157): the turn's environment with the placement of the hosted runner it copied, read from its row by id. A turn copies an
+ * environment by value and keeps its id (`environment_id`), so a follow-up turn, which starts from the last turn's copy, finds the placement the
+ * same way; an environment of a person, a runner copy and a turn without an environment are on Vercel. The placement decides one label of the job.
+ */
+async function withPlacement<
+  T extends { environment?: { id: string; vcpus: number } | null },
+>(
+  executor: Kysely<Database>,
+  workspaceId: string,
+  input: T,
+): Promise<
+  Omit<T, "environment"> & {
+    environment?: { vcpus: number; placement: HostedPlacement } | null;
+  }
+> {
+  const { environment, ...rest } = input;
+  if (environment === undefined || environment === null)
+    return { ...rest, environment };
+  const row = await executor
+    .selectFrom("implementer_environments")
+    .select("placement")
+    .where("workspace_id", "=", workspaceId)
+    .where("id", "=", environment.id)
+    .where("concurrency", "is not", null)
+    .executeTakeFirst();
+  return {
+    ...rest,
+    environment: {
+      vcpus: environment.vcpus,
+      placement: row?.placement === "cloudflare" ? "cloudflare" : "vercel",
+    },
   };
 }
 
@@ -748,7 +784,11 @@ export function createJobsRepository(
                   actor_login: input.actorLogin,
                   delivery_id: shape.deliveryId,
                   // #971: the labels of the environment the turn was started with.
-                  required_labels: labelsToText(requiredLabelsOfTurn(input)),
+                  required_labels: labelsToText(
+                    requiredLabelsOfTurn(
+                      await withPlacement(inner, workspaceId, input),
+                    ),
+                  ),
                   status: "queued",
                   run_after: timestamp,
                   attempts: 0,
@@ -876,7 +916,11 @@ export function createJobsRepository(
                     actor_login: input.actorLogin,
                     delivery_id: shape.deliveryId,
                     // #971: the labels of the environment the turn was started with.
-                    required_labels: labelsToText(requiredLabelsOfTurn(input)),
+                    required_labels: labelsToText(
+                      requiredLabelsOfTurn(
+                        await withPlacement(inner, workspaceId, input),
+                      ),
+                    ),
                     status: "queued",
                     run_after: timestamp,
                     attempts: 0,

@@ -41,7 +41,9 @@ export type AppOptions = {
    * #1098: the claim features the Worker image of the golden snapshot allows (`imageClaimFeatures` of `SANDBOX_WORKER_FEATURES`,
    * already filtered and parsed by the composition); absent, none is named.
    */
-  imageFeatures?: readonly KnownClaimFeature[];
+  imageFeatures?:
+    | readonly KnownClaimFeature[]
+    | (() => Promise<readonly KnownClaimFeature[]>);
   /** The Worker image id of the golden snapshot (`SANDBOX_IMAGE_DIGEST`): named in the answer of `POST /probe`. */
   imageDigest?: string;
   /** The golden snapshot (`SANDBOX_SNAPSHOT_ID`): named in the answer of `POST /probe` too. */

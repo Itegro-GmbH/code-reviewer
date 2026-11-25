@@ -212,3 +212,22 @@ def test_a_heartbeat_answer_without_the_field_is_not_superseded(recorder: Record
     api = HttpWorkerApi(recorder.url, CREDENTIAL, request_timeout=5)
 
     assert asyncio.run(api.heartbeat(recorder.job_id, CREDENTIAL)).superseded is False
+
+
+# #1150-W01
+def test_a_worker_without_a_device_login_asks_for_the_login_of_the_workspace(
+    recorder: Recorder,
+) -> None:
+    holding = HttpWorkerApi(recorder.url, CREDENTIAL, request_timeout=5)
+    without = HttpWorkerApi(recorder.url, CREDENTIAL, request_timeout=5, workspace_login=True)
+
+    async def go() -> None:
+        await holding.fetch(recorder.job_id)
+        await without.fetch(recorder.job_id)
+
+    asyncio.run(go())
+
+    kept, asked = (parse_qs(urlsplit(str(call["path"])).query) for call in recorder.calls[:2])
+    assert "login" not in kept
+    assert asked["login"] == ["workspace"]
+    assert valid("WorkerJobDetailsRequest", {name: values[0] for name, values in asked.items()})

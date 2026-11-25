@@ -98,6 +98,26 @@ describe("a harness that is not OpenCode (#854)", () => {
     expect(codes("exotic", "box")).toEqual([]);
   });
 
+  // #1150-T16
+  it("is fine on a platform VM once the workspace has a Claude Code OAuth token", () => {
+    const withToken: WorkflowResolver = {
+      ...RESOLVER,
+      claudeCodeToken: () => true,
+    };
+    const errors = (profile: string, environment: string) =>
+      validateWorkflow(workflow(profile, environment), withToken).errors.map(
+        (e) => [e.path, e.code],
+      );
+
+    expect(errors("exotic", "vm")).toEqual([]);
+    expect(errors("exotic", "plain")).toEqual([]);
+    expect(errors("exotic", "box")).toEqual([]);
+    // The token is no way to run a managed model on a runner.
+    expect(errors("managed", "box")).toEqual([
+      ["/steps/0/environment", "runner_needs_own_key"],
+    ]);
+  });
+
   // #854-T174
   it("is not guessed when the facts of the version were not read, or the names are unknown", () => {
     expect(codes("unread", "box")).toEqual([]);

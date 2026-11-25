@@ -20,11 +20,13 @@ import {
   manifestFromText,
 } from "../../runner-identity/announcement.ts";
 import {
+  cloudflareRunnerVcpus,
   HOSTED_RUNNER_VCPUS,
   hostedRunnerDefaultConcurrency,
   hostedRunnerName,
   isHostedConcurrency,
 } from "../../named-runners/hosted.ts";
+import type { HostedPlacement } from "../../runner-identity/labels.ts";
 import type {
   HostedRunner,
   NamedRunner,
@@ -44,15 +46,42 @@ export type NamedRunnersRepository = {
   setHostedConcurrency(id: string, concurrency: number): Promise<boolean>;
 };
 
+/** The types a workspace has when it is whole: every Vercel size, and the Cloudflare sizes the operator enabled (#1158). */
+function wantedTypes(
+  env: Record<string, string | undefined>,
+): { placement: HostedPlacement; vcpus: number }[] {
+  return [
+    ...HOSTED_RUNNER_VCPUS.map((vcpus) => ({
+      placement: "vercel" as const,
+      vcpus,
+    })),
+    ...cloudflareRunnerVcpus(env).map((vcpus) => ({
+      placement: "cloudflare" as const,
+      vcpus,
+    })),
+  ];
+}
+
+function placementOf(row: Selectable<ImplementerEnvironmentsTable>) {
+  return row.placement === "cloudflare" ? "cloudflare" : "vercel";
+}
+
 function hostedFrom(
   row: Selectable<ImplementerEnvironmentsTable>,
+  env: Record<string, string | undefined>,
 ): HostedRunner {
+  const placement = placementOf(row);
   return {
     kind: "hosted",
     id: row.id,
     name: row.name,
     // A hosted runner always has a size and a concurrency (the check of the table); the fallbacks only satisfy the types.
     vcpus: row.vcpus ?? 0,
+    placement,
+    // A Cloudflare runner is offered only for a size the operator enabled; a size switched off later keeps its row (lanes name it).
+    available:
+      placement === "vercel" ||
+      cloudflareRunnerVcpus(env).includes(row.vcpus ?? 0),
     concurrency: row.concurrency ?? 1,
   };
 }
@@ -83,6 +112,7 @@ export function createNamedRunnersRepository(
   workspaceId: WorkspaceId,
   repair: HostedRunnerOptions = {},
 ): NamedRunnersRepository {
+  const env = repair.env ?? process.env;
   const readHosted = () =>
     db
       .selectFrom("implementer_environments")
@@ -90,12 +120,21 @@ export function createNamedRunnersRepository(
       .where("workspace_id", "=", workspaceId)
       .where("concurrency", "is not", null)
       .orderBy("vcpus")
+      // Vercel before Cloudflare within one size (the order of the list the validator and the Setup page show).
+      .orderBy("placement", "desc")
       .orderBy("id")
       .execute();
   return {
     async list() {
       let hosted = await readHosted();
-      if (hosted.length < HOSTED_RUNNER_VCPUS.length) {
+      const present = new Set(
+        hosted.map((row) => `${placementOf(row)}:${String(row.vcpus)}`),
+      );
+      if (
+        wantedTypes(env).some(
+          (type) => !present.has(`${type.placement}:${String(type.vcpus)}`),
+        )
+      ) {
         // A type is missing. Make it under the workspace's lock (another reader may be doing the same: the second finds it made), then read again.
         const run = async (trx: Kysely<Database>) => {
           await lockRunnerNames(trx, workspaceId);
@@ -113,7 +152,10 @@ export function createNamedRunnersRepository(
         .orderBy((eb) => eb.fn("lower", ["name"]))
         .orderBy("id")
         .execute();
-      return [...hosted.map(hostedFrom), ...own.map(selfHostedFrom)];
+      return [
+        ...hosted.map((row) => hostedFrom(row, env)),
+        ...own.map(selfHostedFrom),
+      ];
     },
 
     async find(id) {
@@ -125,7 +167,7 @@ export function createNamedRunnersRepository(
         .where("concurrency", "is not", null)
         .where("id", "=", id)
         .executeTakeFirst();
-      if (hosted !== undefined) return hostedFrom(hosted);
+      if (hosted !== undefined) return hostedFrom(hosted, env);
       const own = await db
         .selectFrom("runners")
         .selectAll()
@@ -224,11 +266,13 @@ export async function ensureHostedRunners(
   const timestamp = formatTimestamp(now());
   const have = await executor
     .selectFrom("implementer_environments")
-    .select("vcpus")
+    .select(["vcpus", "placement"])
     .where("workspace_id", "=", workspaceId)
     .where("concurrency", "is not", null)
     .execute();
-  const present = new Set(have.map((row) => row.vcpus));
+  const present = new Set(
+    have.map((row) => `${row.placement}:${String(row.vcpus)}`),
+  );
   const nameInUse = async (name: string) =>
     (await executor
       .selectFrom("implementer_environments")
@@ -237,9 +281,9 @@ export async function ensureHostedRunners(
       .where(sql<boolean>`lower(name) = lower(${name})`)
       .executeTakeFirst()) !== undefined ||
     (await nameTaken(executor, workspaceId, name));
-  for (const vcpus of HOSTED_RUNNER_VCPUS) {
-    if (present.has(vcpus)) continue;
-    const base = hostedRunnerName(vcpus);
+  for (const { placement, vcpus } of wantedTypes(options.env ?? process.env)) {
+    if (present.has(`${placement}:${String(vcpus)}`)) continue;
+    const base = hostedRunnerName(vcpus, placement);
     let name = base;
     for (let attempt = 0; await nameInUse(name); attempt += 1) {
       // After the tries the last name is used as it is: the insert then raises the clash on the name index.
@@ -256,6 +300,7 @@ export async function ensureHostedRunners(
         setup_script: "",
         kind: "hosted",
         labels: "",
+        placement,
         concurrency,
         created_by: null,
         created_at: timestamp,
@@ -263,7 +308,7 @@ export async function ensureHostedRunners(
       })
       .onConflict((conflict) =>
         conflict
-          .columns(["workspace_id", "vcpus"])
+          .columns(["workspace_id", "placement", "vcpus"])
           .where("concurrency", "is not", null)
           .doNothing(),
       )

@@ -175,6 +175,7 @@ describe("the migrations of both epics", () => {
       "20261121140000_allow_runner_turn_setup",
       "20261122120000_jira_webhook_shared_address",
       "20261125100000_create_factory_oauth",
+      "20261125150000_add_hosted_runner_placement",
     ]);
   });
 

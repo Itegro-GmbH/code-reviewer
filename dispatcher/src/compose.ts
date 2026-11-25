@@ -7,6 +7,7 @@ import { createDispatcher, type Dispatcher } from "./dispatcher-app.ts";
 import { loadSettings, type Settings } from "./config.ts";
 import { createLogger } from "./core/logger.ts";
 import type { Launcher, Logger } from "./core/types.ts";
+import type { KnownClaimFeature } from "./contracts/runner-api.ts";
 import type { LauncherContext, ReaperSetup } from "./launchers/sandbox-env.ts";
 import { createAppClient } from "./core/app-client.ts";
 import { imageClaimFeatures } from "./core/claim-features.ts";
@@ -28,9 +29,27 @@ export type ComposeOptions = {
   background: (work: Promise<unknown>) => void;
   /** The reaper's platform side (#364): its cron route is mounted when there is one. */
   reaper?: (settings: Settings) => ReaperSetup;
+  /**
+   * #1158: the claim features of a Dispatcher with the Cloudflare placement, for every claim, given those of the golden snapshot's image. Absent: the
+   * snapshot's are the claim's (`sandbox-env.ts`).
+   */
+  claimFeatures?: (
+    vercel: readonly KnownClaimFeature[],
+  ) => () => Promise<readonly KnownClaimFeature[]>;
   logger?: Logger;
   fetch?: typeof fetch;
 };
+
+/** The image features of the golden snapshot, or (#1158, with the Cloudflare placement) the function that adds the placement to them for every claim. */
+function claimFeaturesOf(options: ComposeOptions) {
+  const snapshot: readonly KnownClaimFeature[] =
+    options.env.SANDBOX_SNAPSHOT_ID === undefined
+      ? []
+      : imageClaimFeatures(options.env.SANDBOX_WORKER_FEATURES);
+  return options.claimFeatures === undefined
+    ? snapshot
+    : options.claimFeatures(snapshot);
+}
 
 export function composeDispatcher(
   options: ComposeOptions,
@@ -94,10 +113,7 @@ export function composeDispatcher(
       : { snapshotId: options.env.SANDBOX_SNAPSHOT_ID }),
     // #1098: the claim features the Worker image of the snapshot allows, parsed once here. Read only with a snapshot, and never
     // an error: a value nobody can read is the empty list, and the claim then names no feature that depends on the image.
-    imageFeatures:
-      options.env.SANDBOX_SNAPSHOT_ID === undefined
-        ? []
-        : imageClaimFeatures(options.env.SANDBOX_WORKER_FEATURES),
+    imageFeatures: claimFeaturesOf(options),
   });
   if (setup !== undefined) {
     // One client per app: a VM's job is asked about at the app its tenant tag names and at no other (#730).

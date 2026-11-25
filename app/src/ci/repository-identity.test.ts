@@ -42,6 +42,7 @@ describe("the identity of the repository", () => {
     // The guarded workflows are the ones that deploy, roll back, snapshot or run the nightly; losing a guard is as bad as
     // keeping the wrong one.
     expect(Object.keys(compared).sort()).toEqual([
+      ".github/workflows/cloudflare-sandbox.yml",
       ".github/workflows/deploy-production.yml",
       ".github/workflows/dispatcher-canary.yml",
       ".github/workflows/golden-snapshot.yml",

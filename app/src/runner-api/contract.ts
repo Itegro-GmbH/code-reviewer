@@ -86,6 +86,14 @@ export const CLAIM_FEATURES = [
   // handed to the agent, and reads the step's network rule for it (the listed hosts are read-only beside the model's own). Sent only to a
   // caller that named it; a `claude-code` turn with a script or a rule is refused (`implementer_engine_unavailable`, free) for one that did not.
   "implementer_subscription_setup",
+  // #1150: the Worker reads `implementer.subscription.oauthToken`, the Claude Code OAuth token of the workspace, and hands it to Claude Code as
+  // the login of the turn. Sent only to a caller that named it: a hosted turn on the token is not a candidate of a claim that did not (it waits for a
+  // Dispatcher whose image can run it), and a Worker that does not name it is refused the token (`implementer_engine_unavailable`, free).
+  "implementer_workspace_token",
+  // #1158 (epic #1157): the Dispatcher can launch a hosted job on a Cloudflare Container. Only a claim that names it has the platform label
+  // `cr:placement:cloudflare`, so a job of a Cloudflare runner is never a candidate of another claim (it stays queued) and the answer names
+  // `placement: "cloudflare"`.
+  "placement_cloudflare",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -590,6 +598,12 @@ export type SubscriptionJobInput = Omit<
       model?: string;
       /** The most the turn may be worth at API prices, in US dollars as a decimal string (`--max-budget-usd`). */
       maxBudgetUsd: string;
+      /**
+       * #1150: the Claude Code OAuth token of the workspace, for a Worker that has no login of a device (a hosted VM, or a self-hosted
+       * runner without a login of its own). A secret: only this response holds it, it is never logged, and the Worker keeps it out of every
+       * result. Left out when the Worker has a login of its own.
+       */
+      oauthToken?: string;
     };
     /** The profile version names the harness (`ImplementerProfile` in the contract). */
     profile: {

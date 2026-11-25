@@ -353,14 +353,14 @@ function runnerOfStep(
 /** The ids of the runners a step may name (a revoked one is not offered). */
 function runnerIds(resolver: WorkflowResolver): string[] {
   return (resolver.runners?.() ?? [])
-    .filter((runner) => runner.revoked !== true)
+    .filter((runner) => runner.revoked !== true && runner.unavailable !== true)
     .map((runner) => runner.id);
 }
 
 /** "id (name)" for every runner a step may name, for a message: the `available` of the issue holds the ids alone, so they can be copied. */
 function runnersListed(resolver: WorkflowResolver): string {
   const pairs = (resolver.runners?.() ?? [])
-    .filter((runner) => runner.revoked !== true)
+    .filter((runner) => runner.revoked !== true && runner.unavailable !== true)
     .map((runner) => `${runner.id} (${runner.name})`);
   return listNames(pairs);
 }
@@ -1033,10 +1033,22 @@ function checkRunner(
     );
     return;
   }
+  if (found?.unavailable === true) {
+    c.report(
+      issue(
+        at,
+        "runner_unavailable",
+        `The runner ${shown(found.name)} is switched off on this server (the operator did not enable that size of the placement). Name another runner. Runners: ${runnersListed(c.resolver)}.`,
+        runnerIds(c.resolver),
+      ),
+    );
+    return;
+  }
   if (found !== undefined) return;
   const byName = (c.resolver.runners?.() ?? []).find(
     (runner) =>
       runner.revoked !== true &&
+      runner.unavailable !== true &&
       runner.name.toLowerCase() === literal.toLowerCase(),
   );
   c.report(
@@ -1189,12 +1201,17 @@ function checkRunnerRules(
         `The environment ${shown(known.name)} runs on a runner, and the runners with its labels that are online do not announce what ${subject} asks for (${describeDemand(demandOfProfile(facts))}). The workflow can still be saved; the turn waits until a runner announces it.`,
       ),
     );
-  if (!onRunner && harnessNeedsRunner(harness))
+  // #1150: with a Claude Code OAuth token in the workspace's LLM keys the harness runs on a hosted environment too (its Sandbox VM runs on the token).
+  if (
+    !onRunner &&
+    harnessNeedsRunner(harness) &&
+    c.resolver.claudeCodeToken?.() !== true
+  )
     c.report(
       issue(
         where,
         "harness_needs_runner",
-        `${inline ? "The step" : `The profile ${shown(parseProfileRef(String(node.profile))?.name ?? "")}`} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
+        `${inline ? "The step" : `The profile ${shown(parseProfileRef(String(node.profile))?.name ?? "")}`} runs with the harness ${shown(harness)}, which needs a login of its own: the workspace has no Claude Code OAuth token (save one under LLM keys), and the environment ${shown(known.name)} is not on a self-hosted runner. Save the token, or use an environment that runs on a runner.`,
       ),
     );
 }
@@ -1247,12 +1264,17 @@ function checkRunnerRulesAtRunner(
         `The runner ${shown(known.name)} is online and does not announce what ${subject} asks for (${describeDemand(demandOfProfile(facts))}). The workflow can still be saved; the turn waits until it announces it.`,
       ),
     );
-  if (!selfHosted && harnessNeedsRunner(harness))
+  // #1150: as above, a Claude Code OAuth token of the workspace lets the harness run on a hosted runner.
+  if (
+    !selfHosted &&
+    harnessNeedsRunner(harness) &&
+    c.resolver.claudeCodeToken?.() !== true
+  )
     c.report(
       issue(
         where,
         "harness_needs_runner",
-        `${subject.charAt(0).toUpperCase()}${subject.slice(1)} runs with the harness ${shown(harness)}, which exists only on a self-hosted runner. The runner ${shown(known.name)} is a hosted one: name a self-hosted runner.`,
+        `${subject.charAt(0).toUpperCase()}${subject.slice(1)} runs with the harness ${shown(harness)}, which needs a login of its own: the workspace has no Claude Code OAuth token (save one under LLM keys), and the runner ${shown(known.name)} is a hosted one. Save the token, or name a self-hosted runner.`,
       ),
     );
 }

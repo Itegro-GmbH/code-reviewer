@@ -74,6 +74,11 @@ export type FollowUpDependencies = {
   queue: Pick<JobQueue, "enqueueFollowUpTurn" | "findImplementerTurn">;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
+  /**
+   * #1150: whether the workspace has a Claude Code OAuth token it can use (readable). A task on the harness `claude-code` outside a runner
+   * environment runs on it; left out, there is none and such a task is refused.
+   */
+  claudeCodeTokenConfigured?: () => Promise<boolean>;
   log?: (line: string) => void;
   /** The clock, for how long an instruction has waited. */
   now?: () => Date;
@@ -359,7 +364,11 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         model,
       ));
 
-    requireRunnerForHarness(profile, runnerEnvironment);
+    await requireRunnerForHarness(
+      profile,
+      runnerEnvironment,
+      deps.claudeCodeTokenConfigured,
+    );
     // The model of the harness claude-code is a name on a device's login: no catalog, no key of the workspace (#856).
     const reason = modelNeedsCatalog(profile)
       ? await deps.models.check(model)

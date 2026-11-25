@@ -105,30 +105,24 @@ import {
   CLAUDE_CODE_HARNESS,
   OPENCODE_HARNESS,
 } from "../../runner-identity/harness.ts";
-import { customerRunnerId } from "../../runner-identity/tokens.ts";
 
 /**
- * What the usage record of an ended job may take from its report (#856): `subscription` only for a turn of the Implementer whose
- * profile has the harness `claude-code` and that a runner of the workspace held, read from the turn and the runner in our own tables
- * and never from the report (any runner or Worker could name the basis for any job to hide its cost from the alert and the counts).
+ * What the usage record of an ended job may take from its report (#856, #1150): `subscription` only for a turn of the Implementer whose
+ * profile has the harness `claude-code`, read from the turn in our own tables and never from the report (any runner or Worker could name
+ * the basis for any job to hide its cost from the alert and the counts). Such a turn runs on a login of the user's own: the device of a
+ * self-hosted runner, or the Claude Code OAuth token of the workspace (a hosted Sandbox VM too, #1150). It has no model door and no key of
+ * ours, so nothing is charged to our budget and its worth is an estimate that is shown and never billed. Every other turn, hosted or not,
+ * keeps its cost as it reports it.
  */
 async function trustOfJob(
   trx: Kysely<Database>,
   job: { id: string; workspace_id: string; runner_id: string | null },
 ): Promise<SettlementTrust> {
-  const prefix = customerRunnerId("");
-  if (job.runner_id === null || !job.runner_id.startsWith(prefix)) return {};
   const turn = await trx
     .selectFrom("implementer_turns")
-    .innerJoin("runners", (join) =>
-      join
-        .onRef("runners.workspace_id", "=", "implementer_turns.workspace_id")
-        .on("runners.id", "=", job.runner_id?.slice(prefix.length) ?? ""),
-    )
     .select("implementer_turns.id")
     .where("implementer_turns.job_id", "=", job.id)
     .where("implementer_turns.workspace_id", "=", job.workspace_id)
-    .where("implementer_turns.environment_kind", "=", "runner")
     .where("implementer_turns.profile_harness", "=", CLAUDE_CODE_HARNESS)
     .executeTakeFirst();
   return { subscription: turn !== undefined };
@@ -391,6 +385,16 @@ export type ClaimOptions = {
    * such a turn is never a candidate of the claim (it waits; nothing fails).
    */
   acceptsMultiRepo?: boolean;
+  /**
+   * #1150: the caller named the claim feature `implementer_workspace_token`: its Worker image reads the Claude Code OAuth token of the workspace
+   * from the input. Without it a hosted turn on `claude-code` is not a candidate of the claim (it waits for a caller that has the feature).
+   */
+  acceptsWorkspaceLogin?: boolean;
+  /**
+   * #1158: the caller named the claim feature `placement_cloudflare`: its Dispatcher can launch a hosted job on a Cloudflare Container, so the
+   * platform identity has the label `cr:placement:cloudflare` for this claim. Without it a job of a Cloudflare runner is not a candidate (it waits).
+   */
+  acceptsPlacementCloudflare?: boolean;
   /**
    * #854: the claim is a customer's runner's. It takes only the jobs of `workspaceId` whose required labels are all in `labels` (#971: the
    * labels of a customer's runner never include the reserved namespace `cr:`, except the label of its own id, `cr:runner:<runnerId>`,
@@ -854,7 +858,7 @@ export function createRunnerJobsRepository(
          and exists (
            select 1 from implementer_turns as demanded
             where demanded.job_id = jobs.id
-              and ${accessRule(sql`coalesce(${servable} -> named.id, '[]'::jsonb)`, "demanded")})
+              and ${accessRule(sql`coalesce(${servable} -> named.id, '[]'::jsonb)`, "demanded", { requireToken: true })})
     )`;
   }
 
@@ -1285,6 +1289,13 @@ export function createRunnerJobsRepository(
               : {}),
             ...(claimOptions.acceptsMultiRepo === true
               ? { acceptsMultiRepo: true }
+              : {}),
+            // #1150: only a claim that names `implementer_workspace_token` is handed a hosted turn on the token of the workspace.
+            ...(claimOptions.acceptsWorkspaceLogin === true
+              ? { acceptsWorkspaceLogin: true }
+              : {}),
+            ...(claimOptions.acceptsPlacementCloudflare === true
+              ? { acceptsPlacementCloudflare: true }
               : {}),
           };
           const reviewKinds = reviewKindsForEngines(engines);

@@ -99,6 +99,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/api/w/[workspace]/llm-key", class: "core" },
   { route: "/api/w/[workspace]/llm-key/test", class: "core" },
   { route: "/api/w/[workspace]/llm-keys/[provider]", class: "core" },
+  { route: "/api/w/[workspace]/llm-keys/claude-code", class: "core" },
+  { route: "/api/w/[workspace]/llm-keys/claude-code/test", class: "core" },
   { route: "/api/w/[workspace]/llm-keys/[provider]/test", class: "core" },
   { route: "/api/w/[workspace]/members/[userId]", class: "core" },
   { route: "/api/w/[workspace]/plan", class: "core" },

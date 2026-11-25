@@ -34,7 +34,6 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any, Protocol, cast
 
 from code_reviewer_runner.dynamic_review.adapter import (
@@ -98,6 +97,7 @@ from .git_workspace import (
     PushReport,
 )
 from .history import CommitInfo, FileChange
+from .intercept_ca import system_roots as intercept_system_roots
 
 # The bounds are named here too: the tests and the model door read them from this module.
 from .limits import MAX_AGENT_REQUEST_BYTES as MAX_AGENT_REQUEST_BYTES
@@ -250,7 +250,7 @@ class SessionSeams:
     control_narrow_seconds: float = NARROW_SECONDS
     # The system's root certificates, which the agent's trust bundle (#784) starts with: this
     # container has the agent's image's roots (the same Debian bundle); a test brings its own.
-    system_roots: Callable[[], bytes] = lambda: Path(SYSTEM_ROOTS_PATH).read_bytes()
+    system_roots: Callable[[], bytes] = lambda: intercept_system_roots(fallback=SYSTEM_ROOTS_PATH)
 
 
 class AgentPlace(EngineRuntime, Protocol):

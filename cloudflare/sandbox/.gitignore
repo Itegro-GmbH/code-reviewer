@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.secret
+# What image/prepare-context.sh makes for one build: the recipe, the pins, the two images as tarballs.
+image/generated/

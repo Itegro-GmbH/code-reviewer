@@ -30,6 +30,9 @@ import {
 import { configuredKeyProviders } from "./key-providers.ts";
 import { createTurnPricer } from "./turn-price.ts";
 import { createImplementerModels, type ImplementerModels } from "./models.ts";
+import { claudeCodeOptionFor } from "./claude-code-option.ts";
+import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { onlineRunnersFrom } from "../runner-identity/online.ts";
 import {
   createImplementerService,
   type ImplementerService,
@@ -66,6 +69,17 @@ export function implementerModelsFor(workspaceId: string): ImplementerModels {
     keyMode: async () => keyModeForJob(await readEntitlements()),
     configuredProviders: () => configuredKeyProviders(keys),
     nativeCatalog: getImplementerCatalog(),
+    // #1150: where the harness `claude-code` can log in: the token of the workspace, a login announced by an online runner of its own.
+    claudeCode: () =>
+      claudeCodeOptionFor({
+        token: async () =>
+          (
+            await getWorkspaceLlm()
+              .claudeCodeTokenFor(workspaceId)
+              .tokenForJob()
+          ).state === "token",
+        runners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),
+      }),
     catalog: catalogSelectionFrom(catalog, async (id) =>
       entryAllowed(await readEntitlements(), { id }),
     ),
@@ -96,6 +110,20 @@ export function implementerTurnPricer() {
   });
 }
 
+/**
+ * #1150: whether the workspace has a Claude Code OAuth token it can use (a readable one). The tasks, the profiles and the validator of lanes
+ * ask it to let the harness `claude-code` run outside a runner environment. Lives here, beside the other things they already take from this
+ * module, so that none of them imports the wiring of the LLM keys.
+ */
+export async function claudeCodeTokenConfigured(
+  workspaceId: string,
+): Promise<boolean> {
+  return (
+    (await getWorkspaceLlm().claudeCodeTokenFor(workspaceId).tokenForJob())
+      .state === "token"
+  );
+}
+
 /** The Implementer service of one workspace. */
 export function implementerServiceFor(workspaceId: string): ImplementerService {
   const db = getDatabase();
@@ -110,6 +138,8 @@ export function implementerServiceFor(workspaceId: string): ImplementerService {
     models: implementerModelsFor(workspaceId),
     queue: jobQueueFor(workspaceId),
     operatorCostLimitCents: operatorCostLimitCentsFrom(db),
+    // #1150: a task on the harness claude-code outside a runner environment runs on the Claude Code token of this workspace.
+    claudeCodeTokenConfigured: () => claudeCodeTokenConfigured(workspaceId),
   });
 }
 

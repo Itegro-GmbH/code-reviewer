@@ -842,6 +842,54 @@ describe("CI workflow path filter", () => {
     expect(touched("app", "Makefile")).toBe(true);
   });
 
+  // #1159-T30
+  it("sends a change to the Cloudflare Worker, its image or what the image is made of to the cloudflare job, and nothing else", () => {
+    for (const file of [
+      "cloudflare/sandbox/src/handler.ts",
+      "cloudflare/sandbox/image/Dockerfile",
+      "cloudflare/sandbox/README.md",
+      "contracts/cf-sandbox.v1.json",
+      "docker/sandbox/vm-prepare.sh",
+      "docker/vm/pins.env",
+      "dispatcher/src/vm-artifacts/recipe.ts",
+      "dispatcher/src/snapshot/config.ts",
+      "runner/Dockerfile",
+      ".github/workflows/cloudflare-sandbox.yml",
+    ])
+      expect(touched("cloudflare", file), file).toBe(true);
+    for (const file of [
+      "app/src/db/index.ts",
+      "dispatcher/src/app.ts",
+      "runner/src/code_reviewer_runner/cli.py",
+      "website/src/pages/index.astro",
+      "README.md",
+    ])
+      expect(touched("cloudflare", file), file).toBe(false);
+  });
+
+  // #1159-T30
+  it("sends a change that only touches cloudflare/ to no heavy job: not app, not Dispatcher, not runner", () => {
+    for (const file of [
+      "cloudflare/sandbox/src/handler.ts",
+      "cloudflare/sandbox/pnpm-lock.yaml",
+      "cloudflare/sandbox/image/files/cr-sandbox-boot.sh",
+    ])
+      for (const filter of ["app", "dispatcher", "runner"])
+        expect(touched(filter, file), `${filter} ${file}`).toBe(false);
+  });
+
+  // #1159-T30
+  it("runs the Cloudflare image job for pull requests only, never with a secret, and waits for it in the aggregate check", () => {
+    const job = jobNamed("cloudflare-sandbox");
+    expect(job.needs).toBe("changes");
+    expect(String(job.if)).toContain("github.event_name == 'pull_request'");
+    expect(String(job.if)).toContain(
+      "needs.changes.outputs.cloudflare == 'true'",
+    );
+    expect(job.secrets).toBeUndefined();
+    expect(jobNamed("ci-passed").needs).toContain("cloudflare-sandbox");
+  });
+
   // CR-16-T09
   it("lints the workflow files when anything under .github changes", () => {
     expect(filters.workflows).toEqual([".github/**"]);
@@ -989,7 +1037,7 @@ describe("CI workflow installation and runtimes", () => {
   });
 
   // CR-16-T07
-  it("calls a reusable workflow only from the engine job, the VM artifacts job and the program job, the jobs exempt from their own time limit", () => {
+  it("calls a reusable workflow only from the engine job, the VM artifacts job, the program job and the Cloudflare sandbox job, the jobs exempt from their own time limit", () => {
     expect(
       jobs.filter(([, job]) => job.uses).map(([id, job]) => [id, job.uses]),
     ).toEqual([
@@ -998,6 +1046,8 @@ describe("CI workflow installation and runtimes", () => {
       ["vm-artifacts", "./.github/workflows/vm-artifacts.yml"],
       // The program tarball of the Factory-Runner (#1002): a build and an installer lane of about ten minutes, for a pull request that changes what it is made of.
       ["runner-program", "./.github/workflows/runner-program.yml"],
+      // The Cloudflare Worker and its Container image (#1159): the image is built and run once, for a pull request that changes what it is made of.
+      ["cloudflare-sandbox", "./.github/workflows/cloudflare-sandbox.yml"],
     ]);
   });
 
@@ -1009,7 +1059,8 @@ describe("CI workflow installation and runtimes", () => {
     const exempt = (job: Job) =>
       job.uses === "./.github/workflows/engine.yml" ||
       job.uses === "./.github/workflows/vm-artifacts.yml" ||
-      job.uses === "./.github/workflows/runner-program.yml";
+      job.uses === "./.github/workflows/runner-program.yml" ||
+      job.uses === "./.github/workflows/cloudflare-sandbox.yml";
     for (const [id, job] of jobs.filter(([, job]) => !exempt(job))) {
       expect(job["timeout-minutes"], `${id} timeout`).toBeGreaterThan(0);
       expect(job["timeout-minutes"], `${id} timeout`).toBeLessThanOrEqual(30);

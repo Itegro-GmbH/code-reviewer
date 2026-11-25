@@ -60,6 +60,11 @@ export type RunnerInfo = {
   kind: "hosted" | "self_hosted";
   /** A self-hosted runner a member revoked. */
   revoked?: boolean;
+  /**
+   * #1158: a hosted runner the operator switched off (a Cloudflare size not in `CLOUDFLARE_RUNNER_SIZES`). It is still known, so the validator says
+   * `runner_unavailable` and not `runner_unknown`; it is listed in no `available`.
+   */
+  unavailable?: boolean;
 };
 
 /** An MCP server of the workspace as a lane may name it (#1052). */
@@ -95,6 +100,12 @@ export type WorkflowResolver = {
    */
   onlineRunners?(): readonly OnlineRunner[];
   /**
+   * #1150: whether the workspace has a Claude Code OAuth token it can use. With one, a step on the harness `claude-code` runs on a hosted
+   * environment or runner too (its Sandbox VM runs on the token); without one (or from a resolver that does not know), the harness needs a
+   * self-hosted runner, as it did. See `harness_needs_runner`.
+   */
+  claudeCodeToken?(): boolean;
+  /**
    * #1105: why the workspace cannot run a model a step names itself (an agent step with settings of its own), or null when it can: the
    * rule of the Implementer form (`ImplementerModels.check`), the same a profile is held to when it is saved. The service asks it for
    * the models the document names before the validator runs (it is async, the validator is not). Left out, or `undefined` for a model
@@ -110,6 +121,7 @@ export function createResolver(options: {
   environments: readonly EnvironmentInfo[];
   runners?: readonly RunnerInfo[];
   onlineRunners?: readonly OnlineRunner[];
+  claudeCodeToken?: boolean;
   mcpServers?: readonly McpServerInfo[];
   modelCheck?: (model: ModelChoice) => string | null | undefined;
 }): WorkflowResolver {
@@ -120,6 +132,9 @@ export function createResolver(options: {
     ...(named === undefined ? {} : { runners: () => named }),
     ...(servers === undefined ? {} : { mcpServers: () => servers }),
     ...(runners === undefined ? {} : { onlineRunners: () => runners }),
+    ...(options.claudeCodeToken === undefined
+      ? {}
+      : { claudeCodeToken: () => options.claudeCodeToken === true }),
     ...(options.modelCheck === undefined
       ? {}
       : { modelCheck: options.modelCheck }),

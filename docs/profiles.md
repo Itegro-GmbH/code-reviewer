@@ -99,7 +99,7 @@ Of the body (the same list in `validate` and in a refused save):
 | `limit_exceeded` | A text longer than its bound, or a result schema over its caps. | Shorten it. |
 | `environment_unknown` | The workspace has no environment of that name (#919). | Use one of `available`. |
 | `runner_needs_own_key` | The environment runs on a runner and the model is a managed one. | Choose a model of your own key, or a hosted environment. |
-| `harness_needs_runner` | The harness is not OpenCode and the environment is a hosted one. | Choose an environment that runs on a runner. |
+| `harness_needs_runner` | The harness is not OpenCode, the environment is a hosted one and the workspace has no Claude Code OAuth token. | Save a Claude Code OAuth token under LLM keys (a hosted VM then runs on it, [`runner.md`](runner.md#claude-code-on-the-token-of-the-workspace-1150)), or choose an environment that runs on a runner. |
 | `no_runner_announces` | A **warning**: a runner with the environment's labels is online and none announces the harness, the auth and the model of the profile (#973). The profile is valid and saves. | Choose a model or a harness the runner announces, or save anyway. |
 | `model_not_allowed` | The workspace cannot run that model (the message gives the reason). | Pick one from `GET .../implementer/models`. |
 | `cost_limit_above_maximum` | The cost limit is above the operator's maximum per turn. | Use that or less. |

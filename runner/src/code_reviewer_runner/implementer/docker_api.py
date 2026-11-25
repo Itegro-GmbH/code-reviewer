@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from typing import IO, Any, Final
 from urllib.parse import quote
 
+from code_reviewer_runner.implementer.intercept_ca import with_intercept_ca
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
 DOCKER_SOCKET: Final = "/run/docker.sock"
@@ -168,6 +169,9 @@ class DockerApi:
         self._path = socket_path
         self._timeout = timeout
         self.half_close = half_close
+        # #1158: where the VM's intercept CA bundle is; None is the fixed path of the
+        # Cloudflare placement.
+        self.intercept_ca_path: str | None = None
 
     # -- plain calls ----------------------------------------------------------------------------
 
@@ -245,7 +249,10 @@ class DockerApi:
         self.request("DELETE", f"/networks/{network}", ok=(200, 204, 404))
 
     def create_container(self, document: dict[str, Any], name: str) -> str:
-        return _identifier(self.request("POST", f"/containers/create?name={name}", document))
+        # #1158: on the Cloudflare placement every container of the VM trusts the outbound
+        # handler's authority (`intercept_ca.py`).
+        sent = with_intercept_ca(document, path=self.intercept_ca_path)
+        return _identifier(self.request("POST", f"/containers/create?name={name}", sent))
 
     def start_container(self, container: str, *, timeout: float | None = None) -> None:
         self.request("POST", f"/containers/{container}/start", ok=(204, 304), timeout=timeout)

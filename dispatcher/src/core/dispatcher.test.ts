@@ -13,6 +13,7 @@ import {
   waitFor,
 } from "../test-support/harness.ts";
 import { imageClaimFeatures } from "./claim-features.ts";
+import type { KnownClaimFeature } from "../contracts/runner-api.ts";
 import { createDispatcherCore } from "./dispatcher.ts";
 import { createLogger } from "./logger.ts";
 import { LaunchError, type HandleResult } from "./types.ts";
@@ -50,7 +51,9 @@ function recordingFetch() {
 function build(
   overrides: Parameters<typeof settingsFor>[1] = {},
   launcherOptions: Parameters<typeof createFakeLauncher>[0] = {},
-  imageFeatures?: Parameters<typeof imageClaimFeatures>[0],
+  imageFeatures?:
+    | Parameters<typeof imageClaimFeatures>[0]
+    | (() => Promise<KnownClaimFeature[]>),
 ) {
   const logger = recordingLogger();
   const launcher = createFakeLauncher(launcherOptions);
@@ -63,7 +66,12 @@ function build(
     fetch: recorded.fetch,
     ...(imageFeatures === undefined
       ? {}
-      : { imageFeatures: imageClaimFeatures(imageFeatures) }),
+      : {
+          imageFeatures:
+            typeof imageFeatures === "function"
+              ? (imageFeatures as () => Promise<KnownClaimFeature[]>)
+              : imageClaimFeatures(imageFeatures),
+        }),
   });
   return { core, launcher, logger, recorded };
 }
@@ -176,6 +184,50 @@ describe("the Dispatcher core", () => {
       ]);
     },
   );
+
+  // #1158-D10
+  it("asks for the features of every claim when they come from a function, so the Cloudflare placement is named only while its Worker answers", async () => {
+    let up = true;
+    const first = app.enqueue();
+    const second = app.enqueue();
+    const { core, recorded } = build({}, {}, async () =>
+      up ? ["placement_cloudflare"] : [],
+    );
+
+    await handled(
+      core.handle({ appId: "reviewer", jobId: first, reviewKind: "diff" }),
+    );
+    up = false;
+    await handled(
+      core.handle({ appId: "reviewer", jobId: second, reviewKind: "diff" }),
+    );
+
+    const claims = recorded.calls.filter((call) => call.url.endsWith("/claim"));
+    expect(
+      claims.map((c) => (c.body as { features: string[] }).features),
+    ).toEqual([
+      ["worker_credential", "vm_lifecycle", "placement_cloudflare"],
+      ["worker_credential", "vm_lifecycle"],
+    ]);
+  });
+
+  // #1158-D11
+  it("names the fixed features only when the function fails: a job that needs more stays queued", async () => {
+    const jobId = app.enqueue();
+    const { core, recorded } = build({}, {}, () =>
+      Promise.reject(new Error("health down")),
+    );
+
+    await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "diff" }),
+    );
+
+    const claim = recorded.calls.find((call) => call.url.endsWith("/claim"));
+    expect((claim?.body as { features: string[] }).features).toEqual([
+      "worker_credential",
+      "vm_lifecycle",
+    ]);
+  });
 
   // #327-T03
   it("ignores a job the claim does not hand out (a replay, a running or a finished job) and launches nothing", async () => {
@@ -1165,6 +1217,88 @@ describe("the size of a job (#818)", () => {
       expect(launcher.launches).toHaveLength(0);
     },
   );
+});
+
+describe("the placement of a job (#1158)", () => {
+  const buildAll = () =>
+    build(
+      {
+        engines: ["pr-agent", "opencode", "implementer"],
+        kinds: ["diff", "dynamic", "implementer"],
+      },
+      { engines: ["pr-agent", "opencode", "implementer"] },
+    );
+
+  // #1158-D01
+  it("hands the placement of the claim answer to the Launcher for a turn of the Implementer, and none for a job that names none", async () => {
+    const cloudflare = app.enqueue({
+      reviewKind: "implementer",
+      sizeLabel: "cr:size-4",
+      vcpus: 4,
+      placement: "cloudflare",
+    });
+    const vercel = app.enqueue({
+      reviewKind: "implementer",
+      sizeLabel: "cr:size-4",
+      vcpus: 4,
+    });
+    const { core, launcher } = buildAll();
+
+    await handled(
+      core.handle({
+        appId: "reviewer",
+        jobId: cloudflare,
+        reviewKind: "implementer",
+      }),
+    );
+    await handled(
+      core.handle({
+        appId: "reviewer",
+        jobId: vercel,
+        reviewKind: "implementer",
+      }),
+    );
+
+    expect(launcher.launches[0]?.placement).toBe("cloudflare");
+    expect(launcher.launches[1]?.placement).toBeUndefined();
+  });
+
+  // #1158-D02
+  it("gives a job back unlaunched when its placement is one it does not know, and starts nothing for it", async () => {
+    const jobId = app.enqueue({
+      reviewKind: "implementer",
+      sizeLabel: "cr:size-4",
+      placement: "azure",
+    });
+    const { core, launcher, logger } = buildAll();
+
+    const result = await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "implementer" }),
+    );
+
+    expect(result).toStrictEqual({ outcome: "not_capable" });
+    expect(launcher.launches).toHaveLength(0);
+    expect(logger.text()).toContain("placement_not_offered");
+    expect(
+      app.requests().filter((request) => request.route === "release"),
+    ).toStrictEqual([{ method: "POST", route: "release", jobId, status: 200 }]);
+  });
+
+  // #1158-D03
+  it("never lets a review be placed on Cloudflare: a placement on any other kind than the Implementer's is not passed on", async () => {
+    const jobId = app.enqueue({
+      reviewKind: "diff",
+      sizeLabel: "cr:size-1",
+      placement: "cloudflare",
+    });
+    const { core, launcher } = buildAll();
+
+    await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "diff" }),
+    );
+
+    expect(launcher.launches[0]?.placement).toBeUndefined();
+  });
 });
 
 describe("the size label of a job (#971)", () => {

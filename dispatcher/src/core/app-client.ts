@@ -54,6 +54,11 @@ export type ClaimedJob = {
    */
   sizeLabel?: string;
   /**
+   * #1158: where the App says the VM runs, read from its authenticated answer only. Kept as text: a value this Dispatcher does not know is given back
+   * unlaunched by the core (`placement_not_offered`), not an answer it cannot read, so no claim is lost to a newer App. Absent: Vercel, as before.
+   */
+  placement?: string;
+  /**
    * #745, step 7: the environment's rule for the agent's network, for a job of the kind `implementer` (a task without an
    * environment is `off`). Read from the App's authenticated answer only; absent from the release before.
    */
@@ -132,6 +137,8 @@ const splitClaim = z.object({
     vcpus: z.number().int().min(1).max(64).optional(),
     // #971: spelled `cr:size-<n>`; whether the platform offers that size is the core's decision, which gives the job back.
     sizeLabel: z.string().refine(isSizeLabel).optional(),
+    // #1158: whether this Dispatcher launches that placement is the core's decision, which gives the job back.
+    placement: z.string().min(1).max(32).optional(),
     network: NetworkRuleSchema.optional(),
     modelHost: z.string().max(253).regex(PLAIN_HOST).optional(),
   }),
@@ -148,6 +155,7 @@ export function parseSplitClaim(body: unknown): ClaimedJob | null {
     heartbeatIntervalSeconds,
     vcpus,
     sizeLabel,
+    placement,
     network,
     modelHost,
   } = parsed.data.job;
@@ -158,6 +166,7 @@ export function parseSplitClaim(body: unknown): ClaimedJob | null {
     heartbeatIntervalSeconds,
     ...(vcpus === undefined ? {} : { vcpus }),
     ...(sizeLabel === undefined ? {} : { sizeLabel }),
+    ...(placement === undefined ? {} : { placement }),
     ...(network === undefined ? {} : { network }),
     ...(modelHost === undefined ? {} : { modelHost }),
   };
@@ -188,7 +197,9 @@ export type AppClientOptions = {
    * #1098: the claim features that depend on the Worker image (`imageClaimFeatures`), named next to the fixed ones. Absent or
    * empty: the claim names the fixed ones only, so a job that needs more stays queued for a Dispatcher that can run it.
    */
-  imageFeatures?: readonly KnownClaimFeature[];
+  imageFeatures?:
+    | readonly KnownClaimFeature[]
+    | (() => Promise<readonly KnownClaimFeature[]>);
 };
 
 export type ClaimRequestBody = {
@@ -208,12 +219,21 @@ function retryAfterOf(response: Response): number | undefined {
 export function createAppClient(options: AppClientOptions) {
   const timeout = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const base = options.appUrl.replace(/\/+$/, "");
-  const claimFeatures: KnownClaimFeature[] = [
-    ...CLAIM_FEATURES,
-    ...(options.imageFeatures ?? []).filter(
-      (feature) => !CLAIM_FEATURES.includes(feature),
-    ),
-  ];
+  /**
+   * The features this claim names. #1158: the image features may be a function (the Cloudflare placement's health answer changes while the Dispatcher
+   * runs, and one claim can be given a job of either placement); it is asked for every claim, and a failure of it is the fixed features only, so a job that
+   * needs more stays queued for a Dispatcher that can run it.
+   */
+  async function claimFeaturesNow(): Promise<KnownClaimFeature[]> {
+    const image =
+      typeof options.imageFeatures === "function"
+        ? await options.imageFeatures().catch(() => [])
+        : (options.imageFeatures ?? []);
+    return [
+      ...CLAIM_FEATURES,
+      ...image.filter((feature) => !CLAIM_FEATURES.includes(feature)),
+    ];
+  }
 
   async function send(
     path: string,
@@ -323,7 +343,7 @@ export function createAppClient(options: AppClientOptions) {
         method: "POST",
         bearer: options.token,
         runnerId: true,
-        body: { ...body, features: claimFeatures },
+        body: { ...body, features: await claimFeaturesNow() },
       });
       if (
         response === null ||

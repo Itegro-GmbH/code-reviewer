@@ -142,7 +142,8 @@ _IMPLEMENTER_PROFILE_FIELDS = {"name", "version", "instructions", "canPush", "ha
 HARNESS_OPENCODE = "opencode"
 HARNESS_CLAUDE_CODE = "claude-code"
 HARNESSES = (HARNESS_OPENCODE, HARNESS_CLAUDE_CODE)
-_IMPLEMENTER_SUBSCRIPTION_FIELDS = {"model", "maxBudgetUsd"}
+_IMPLEMENTER_SUBSCRIPTION_FIELDS = {"model", "maxBudgetUsd", "oauthToken"}
+_SUBSCRIPTION_OAUTH_TOKEN = re.compile(r"[\x21-\x7e]{1,4096}")
 _SUBSCRIPTION_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,99}")
 _SUBSCRIPTION_BUDGET = re.compile(r"[0-9]{1,6}(?:\.[0-9]{1,6})?")
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
@@ -443,10 +444,13 @@ class SubscriptionTurn:
     """What a turn on the harness `claude-code` is run with instead of a model door (#856,
     `ImplementerSubscription` of the contract): the model name Claude Code reads (None: its
     default) and the most the turn may be worth at API prices, a positive decimal in dollars.
-    The login itself is the device's and is never in a job."""
+    The login is the device's and is never in a job, or (#1150) the Claude Code OAuth token of the
+    workspace (`oauth_token`), which the app puts into the input of a Worker that has no login of a
+    device: a secret, never printed (`repr` leaves it out) and never logged."""
 
     max_budget_usd: str
     model: str | None = None
+    oauth_token: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -1670,7 +1674,14 @@ def _implementer_subscription(
         if not isinstance(raw, str) or _SUBSCRIPTION_MODEL.fullmatch(raw) is None:
             raise _invalid("implementer.subscription.model is not a model name")
         model = raw
-    return SubscriptionTurn(max_budget_usd=budget, model=model)
+    oauth_token: str | None = None
+    if "oauthToken" in given:
+        raw_token = given["oauthToken"]
+        # The refusal names the field and never a value.
+        if not isinstance(raw_token, str) or _SUBSCRIPTION_OAUTH_TOKEN.fullmatch(raw_token) is None:
+            raise _invalid("implementer.subscription.oauthToken is not one printable token")
+        oauth_token = raw_token
+    return SubscriptionTurn(max_budget_usd=budget, model=model, oauth_token=oauth_token)
 
 
 def _implementer_result_schema(spec: dict[str, Any]) -> dict[str, Any] | None:

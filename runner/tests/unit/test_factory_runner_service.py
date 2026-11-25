@@ -2011,6 +2011,43 @@ def test_a_credential_that_cannot_be_read_is_not_announced_and_a_claim_that_come
     assert rig.launcher.processes == []
 
 
+# #1150-S01
+def test_a_device_with_no_login_offers_the_token_of_the_workspace_and_a_later_login_wins(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, claude="2.1.311", environment=PLAIN_STORAGE)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(rig.client.announced) >= 1)
+        credentials_of(rig).add("mine", LOGIN)
+        await until(lambda: len(rig.client.announced) >= 2)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    first, second = (claude_entry(a) for a in rig.client.announced[:2])
+    assert first is not None and first["auth"] == "app-key" and "models" not in first
+    assert second is not None and second["auth"] == "subscription"
+    assert LOGIN not in json.dumps([a.body() for a in rig.client.announced])
+
+
+# #1150-S02
+def test_a_job_on_the_token_of_the_workspace_hands_its_worker_no_credential_of_the_device(
+    tmp_path: Path,
+) -> None:
+    rig = credential_rig(tmp_path)
+    rig.client.claims = [
+        claim(access=JobAccess(harness="claude-code", auth="app-key", model="sonnet"))
+    ]
+
+    assert rig.go(once=True) == EXIT_OK
+
+    stdin = json.loads(rig.launcher.processes[0].spec.stdin)
+    assert "localCredential" not in stdin
+
+
 # #980-FIX4
 def test_a_service_that_started_before_the_first_credential_offers_claude_code_without_a_restart(
     tmp_path: Path,
@@ -2020,7 +2057,12 @@ def test_a_service_that_started_before_the_first_credential_offers_claude_code_w
     async def scenario() -> None:
         task = asyncio.create_task(rig.service.run(once=False))
         await until(lambda: len(rig.client.announced) >= 1)
-        assert claude_entry(rig.client.announced[0]) is None, "nothing to offer yet"
+        # #1150: no login at all: offered on the token of the workspace, with no model list.
+        assert claude_entry(rig.client.announced[0]) == {
+            "harness": "claude-code",
+            "version": "2.1.311",
+            "auth": "app-key",
+        }
         credentials_of(rig).add("late", LOGIN, models=("opus",))
         await until(lambda: len(rig.client.announced) >= 2)
         rig.service.stop()

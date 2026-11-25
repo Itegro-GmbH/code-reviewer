@@ -9,6 +9,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [The Factory-Runner](#the-factory-runner-r1b-854): the service, the `factory-runner` command, the image, installation for a
   developer and operation in a VM (R1b).
 - [Several repositories per turn](#several-repositories-per-turn-1090): what a runner reads and does for a job with `implementer.repos` (#1090).
+- [Claude Code on the token of the workspace](#claude-code-on-the-token-of-the-workspace-1150): the Claude Code OAuth token a workspace stores under LLM keys, the order of the logins, hosted VMs, what the agent can see (#1150).
 - [Claude Code, R3](#claude-code-r3-856): the first slice of the Claude Code harness (adapter core) and what is left.
 - [Spikes R0](#spikes-r0-853): what was measured on a real VM before the build.
 - [Spike: Firecracker sandbox](#spike-firecracker-sandbox-970): the Runner v2 sandbox on Linux (a Firecracker microVM with Docker and Sysbox), measured in CI (#970).
@@ -17,6 +18,8 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [The Incus launcher](#the-incus-launcher-1007): the one local backend (Runner v2, #1007): two unprivileged Incus instances per job, the inner wall in the trusted one, `narrow` as an unplug, the control channel over a unix socket, the quota, the clean-up by mark.
 - [Claude Code on the Incus backend](#claude-code-on-the-incus-backend-1023): the harness installed on the device into the golden image, announced from it, and the local credential of a job on Incus (#1023).
 - [The outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979): the static nft table (printed in full) and the proxy of the local Dispatcher that is the only way out of a job's VM (#979).
+- [Cloudflare placement: the App and the Dispatcher](#cloudflare-placement-the-app-and-the-dispatcher-1158): a hosted runner type "Cloudflare Container 4 vCPU", its label and claim feature, the HTTP client of the Worker, the router of the two platforms and the VM steps per placement (#1158, epic #1157).
+- [Cloudflare placement: the Worker and the image](#cloudflare-placement-the-worker-and-the-image-1159): the Worker `cr-sandbox`, its Durable Objects and Container image, the outer wall, the deployment, and how a larger size becomes active (#1159, epic #1157).
 - [Spike: Cloudflare Containers](#spike-cloudflare-containers-1149): a microVM per job on Cloudflare as a third hosted placement, with dockerd, Sysbox and the outbound handler as the door, measured in a real Container (#1149).
 - [Spike: Incus (LXD) backend](#spike-incus-lxd-backend-1005): the same job on a machine without `/dev/kvm`, two unprivileged system containers instead of a microVM, measured on the DevBox (#1005).
 
@@ -151,7 +154,7 @@ A **runner** is whatever runs an agent turn, and a step names one by its id. Two
   rules of the registration): lanes store the id, so a rename changes no lane. (No route or Setup page calls it yet: #1116.)
 - A **hosted runner** is one **type** of the provided Vercel Sandbox: a row of `implementer_environments` of the kind `hosted` that has a `concurrency`, one for each size
   an environment may name (`environmentVcpus` of `contracts/environment-sizes.v1.json`: **2, 4, 6 and 8 vCPU**; 1 vCPU is a size of the platform that leaves the agent no memory),
-  named "Vercel Sandbox 4 vCPU" and so on, in **every workspace**: the migration made them for the workspaces that exist, and the creation of a workspace (the three places that
+  named "Vercel Sandbox 4 vCPU" and so on (and, since #1158, "Cloudflare Container 4 vCPU" for the sizes the operator enabled: a second **placement** of the same hosted runner, see "Cloudflare placement: the App and the Dispatcher"), in **every workspace**: the migration made them for the workspaces that exist, and the creation of a workspace (the three places that
   make one) makes them for a new one. The **size is fixed per type** (a database index holds one hosted runner for each type and workspace); only the `concurrency` is set
   (`HOSTED_RUNNER_DEFAULT_CONCURRENCY`, a whole number from 1 to 100 set by the operator, 2 when it is not set, is what the first rows get). A hosted runner is not an environment
   of a person: the environments page and its routes do not list it, count it, change it or delete it. A name that a person's environment or a runner already had is not taken from
@@ -323,7 +326,7 @@ its model is managed and which harness it runs with. Since #919 the environment 
 | Code                   | When                                                                                                                                   |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `runner_needs_own_key` | A profile (or an agent step) runs a **managed model** in an environment of the kind `runner`. Managed models run on platform VMs only. |
-| `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's.                            |
+| `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's, **and the workspace has no Claude Code OAuth token** (#1150: with one, a hosted environment or runner is fine). |
 | `no_runner_announces`  | A profile (or an agent step) in a runner environment asks for a harness, auth and model that **no online runner of the workspace with the environment's labels announces** (#973). A **warning**, not an error (`severity: "warning"`, listed in `warnings`; the save goes through): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. With no such runner online nothing is said: the turn waits for one. |
 
 An agent step names its harness (`harness`: `opencode` or `claude-code`, [`workflows.md`](workflows.md#settings-in-the-step-1105); a profile of the old form did, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
@@ -1140,6 +1143,117 @@ tokens"; that is why subscriptions are only for a runner on your own machine and
 so that one does not hit its limit first: sharing one login among people, or reselling one, is against the terms and is not what this is for.
 Use of your own credentials on your own device is the design (we never hold or resell a login), but it does not replace reading the terms.
 
+## Claude Code on the token of the workspace (#1150)
+
+Owner decision 2026-11-25: the factory offers many models and harnesses, and Claude Code is one of them. Like the secrets of a repository
+in GitHub Actions, a workspace can store a **Claude Code OAuth token** (what `claude setup-token` prints, which Claude Code reads as
+`CLAUDE_CODE_OAUTH_TOKEN`) under **LLM keys**. Whether a user does that is their decision: **there is no further restriction** (no scope per
+person, no limit on who may start a run that uses it, no trigger limit). Whoever may manage the LLM keys (an Admin or an Owner,
+`manage_llm_key`) sets, replaces, tests and removes it. Whoever may start a run of the workspace on the harness `claude-code` spends that
+subscription; the card says so.
+
+### Where it is stored
+
+Exactly like the LLM keys (`app/src/llm/claude-code-token.ts`): a slot of the encrypted store of the workspace (`workspace_secrets`, AES-256-GCM,
+a key derived from `APP_SECRET`, the workspace and the slot name `claude_code_oauth_token` bound into the ciphertext, the binding `claude-code`
+compared again at every use). Write-only: no answer holds it but its last four characters, for those who manage it. It is **not an LLM
+provider** (it is not in the provider registry: no models, price or address of ours behind it), so no list of providers shows it. It is masked
+in every result of the workspace's jobs with the keys (`currentKeysFor`), is in no log line and no snapshot, and goes with its workspace. **No
+migration**: the slot is a row of the existing, workspace-scoped table. Routes: `GET|PUT|DELETE /api/w/:workspace/llm-keys/claude-code` and
+`POST .../llm-keys/claude-code/test`, static siblings of `[provider]`.
+
+**The test button checks the shape and nothing else**, and says so: there is no call that is free and stays within what the token is for (it is an
+inference-only credential of a subscription for Claude Code; the one thing it can do on its own is spend that subscription), so the app does not
+send it to Anthropic. The answer is `{ok: true, verified: false, format: "known" | "unknown"}`; whether Anthropic accepts the token shows with
+the first run (`subscription_auth`).
+
+### Which login a run gets (the order)
+
+1. **The runner's own login wins.** A self-hosted runner that has a login of its own announces `claude-code` as a `subscription` (with the
+   models of its credentials); a job it takes is run on **that**, its dispatcher hands the Worker the credential as before, and the token of
+   the workspace is **not sent to that Worker** (it does not even ask: the Worker says `login=workspace` on its fetch only when it holds no
+   device login).
+2. **The token of the workspace is the fallback.** A runner whose device has **no login at all** (no credential in the store, no token file, no
+   variable) announces `claude-code` as `app-key` ("I can run it on the token the workspace keeps in the app"), with no model list. A device
+   whose credentials are only rate limited or refused for now is **withdrawn**, never swapped for the workspace's token behind its owner's
+   back. A runner announces either the `subscription` entry or the `app-key` entry, never both, so a runner whose login does not cover the
+   model of a job is simply not a candidate for it (the job stays queued, as before). **The entry only matters while the workspace holds a token**:
+   the routing rule (`accessRule` with `requireToken`, the same rule in memory with `workspaceToken`) lets the `app-key` entry meet a demand for
+   Claude Code only when the workspace has a token. Without one, a runner with no login is not a candidate and the job **stays queued** for a runner
+   that has a login, exactly as before the token existed; nothing fails because of which runner polled first. (The claim re-reads the token as it
+   builds the answer; a token removed in that moment sends the job back to the queue instead of failing it.)
+3. **A hosted Sandbox VM has only the token.** The platform's Dispatcher has an `app-key` entry for `claude-code` (`PLATFORM_ACCESS`), so a
+   turn of a hosted environment (or of none) on `claude-code` is handed to it, and `claude-code` is selectable on hosted runners and
+   environments when the workspace has the token.
+4. **No login for a hosted turn**: the claim ends the job free with `implementer_config_invalid`, detail `reason=claude_code_token_missing` (or
+   `claude_code_token_unreadable` for a stored token that cannot be decrypted; the same word for a runner whose token cannot be read): a hosted turn has no
+   other taker, so it is the one place the claim says what is missing. The validator says so when the lane is saved (`harness_needs_runner` with the way
+   out), and the task form refuses it before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`). For a self-hosted runner there is no terminal
+   refusal: see 2.
+
+### How the token reaches a run, and what the agent can see
+
+- The claim answer to a dispatcher never holds the token. The **Worker's fetch** (`GET /api/workers/v1/jobs/:id`) is where it is put into the
+  input, as `implementer.subscription.oauthToken`, for a hosted turn and for a runner Worker that asked with `login=workspace`. It is the same
+  channel that carries the git token. The Worker's masker knows it from that moment; the job process reads the input on its standard input.
+  A Worker that does not send `login=workspace` is one of an earlier release and keeps the login of its device, so a runner of an older release
+  keeps working when the app is updated first. **The app holds the Worker to what the claim chose**: for a turn of a runner the fetch looks at the
+  manifest the runner announces now, and when it has a login of its device for the model (the claim said `subscription`) the token is not put
+  into the input even if the Worker says `login=workspace`.
+- **The feature `implementer_workspace_token`.** Reading `oauthToken` is a claim feature (`WORKER_FEATURES` of the runner, `KnownClaimFeature` of the
+  contract). The fetch hands the token only to a Worker that names it (else the job ends free, `implementer_engine_unavailable`,
+  `reason=workspace_token`), and a **hosted** turn on the token is a candidate only of a Dispatcher's claim that names it. The Dispatcher names it
+  only when the Worker image of its active golden snapshot lists it (`IMAGE_GATED_CLAIM_FEATURES`, as for `implementer_multi_repo`), so **while a
+  snapshot built before this feature is live, hosted turns on the token wait in the queue** instead of starting a VM that would refuse them; the
+  snapshot is rebuilt by the release (`golden-snapshot.md`, "The Claude Code token needs a rebuilt snapshot").
+- **No outer wall, no token on a hosted VM.** The token is in the agent's container, so a Worker that holds the workspace's token (not a device
+  login) must be able to narrow the VM's outer network policy. A hosted Dispatcher without a public URL (`DISPATCHER_PUBLIC_URL`, the base of the
+  network switch) gives the Worker no way to; the turn is then refused free before any container exists (`implementer_engine_unavailable`, detail
+  `network_switch_missing`) instead of running behind the inner door alone. A turn on a device login is unchanged.
+- **The agent can read it.** The token is handed to Claude Code as `CLAUDE_CODE_OAUTH_TOKEN` in the environment of the `exec` that starts it, and the
+  tools of the agent (Bash and the others) run in that environment: unlike an API key, which stays in the model door **outside** the container, a
+  subscription token has to be in the process that talks to Anthropic. Claude Code's own option that would scrub it from the tools' environment
+  (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`) forces the permission mode to `default` and is not used (see `claude_environment`). What stays true is what
+  the design of R3 already keeps: it is **not in the setup script's container or its definition** (the script ends, and what it left is ended,
+  before the token is handed over); the agent's network is forced to the rule `list` with `api.anthropic.com` on port 443 plus the hosts the step lists,
+  read-only (`gates.py`), and a step cannot have an open network (`subscription_network_open`, `subscription_network_wildcard`); it is taken
+  out of every step record, text, note, branch name, commit subject and log line of the turn (the agent's `Redactor` and the job's secrets), and out of
+  the result the app stores (`currentKeysFor`: the app masks the token that is current when the result arrives; a token replaced or removed during a run
+  is still caught by the runner's own redaction, which knows the token the run started with, and not by the app's second look, as for the LLM keys). **A run that is told to send the token somewhere it may reach (a host the lane lists) can send it**:
+  the lane's author chooses the hosts. Treat the token as the credential of the person who stored it.
+- **Hosted VMs have no Claude Code layer** (we do not ship Claude Code: it is in no image of ours). The Worker builds the layer in the VM's own
+  Docker the first time a turn needs it, exactly as a starting runner builds it (`ensure_layer`: the pinned version, each package accepted only with its own
+  pinned SHA-512), **before** the VM's network is narrowed for the agent, and only for this case (a machine with no login of its own and the token
+  from the job). The build needs the npm registry from the VM at that moment and takes a minute or two of the turn's time; a build that fails refuses the
+  job (`implementer_engine_unavailable`, `harness_not_ready`, the reason in words and never the token). The Dispatcher narrows the VM to the App, GitHub,
+  the rule's hosts and `api.anthropic.com` (the claim names it as the model host; the token of the switch signs it).
+
+### Cost
+
+A run on either login has no model door and no ledger: it carries `costBasis: subscription` and an estimate, shown as "≈ $0.42 through a subscription", never
+billed and never added to a budget or total. The basis is read from **our own record of the turn** (its profile has the harness `claude-code`), for a
+hosted turn as for a runner's, and never from the word of a report (`trustOfJob`). The brake is `--max-budget-usd` and the job's clock, as before.
+
+### Models
+
+`GET /api/w/:workspace/implementer/models` carries `claudeCode: {harness, models, source}` next to the providers when the workspace can log
+Claude Code in: `workspace_token` (the aliases `sonnet`, `opus`, `haiku`), `runner_login` (the models an online runner of the workspace announces for
+its own login) or `both`; otherwise it is left out. A step names its model as `{"provider": "claude-code", "model": "sonnet"}` with the harness
+`claude-code`, as before.
+
+### Tests
+
+App: `claude-code-token.test.ts` and `claude-code-token.integration.test.ts` (rule, encryption at rest, workspace isolation, masking, the handlers and
+the test button, which sends nothing), `ui/claude-code-token-card.test.tsx`, `runner-identity/access*.test.ts` (the rule in memory and in the database),
+`runner-api/runner-subscription.integration.test.ts` (the claim and fetch: hosted with and without the token, a runner without a login, the runner's own
+login winning, no token in the log), `runner-subscription-cost.integration.test.ts` (the hosted turn is a subscription), the validator tests
+(`workflows/check-runner.test.ts`, `runner-rules.test.ts`), the task and profile services. Runner: `test_claude_code_readiness.py` (the order of
+the logins, the layer build, a login that cannot be used is never swapped), `test_implementer_subscription_job.py`, `test_worker_outer_proxy.py`
+and the Worker API contract test (`login=workspace`), `test_factory_runner_service.py` and `test_factory_runner_credential_pool.py` (the `app-key` entry).
+
+**Not proven by any automated test:** a real hosted Sandbox VM building the layer and running a turn on the token (it needs the VM, the npm
+registry and a real token). That is the first live test after the release.
+
 ## Claude Code, R3 (#856)
 
 R3 adds Claude Code as a harness that a runner announces when its device has a login for it. **The first slice was the adapter core**:
@@ -1151,8 +1265,11 @@ The code is [`runner/src/code_reviewer_runner/implementer/claude_code/`](../runn
 ### Rules it keeps (owner, 2026-11-05)
 
 - Claude Code is used **unmodified, with each user's own credentials, on the customer's device** (our runner). No resale. The login is
-  a token the customer makes with `claude setup-token`; it is **never stored in our app or its database, never sent to the app, never
-  logged**, and there is no Claude login in our app. The operator key never goes to a runner.
+  a token the customer makes with `claude setup-token`; the one **on the device** is **never stored in our app or its database, never
+  sent to the app, never logged**, and there is no Claude login in our app. The operator key never goes to a runner.
+  **Amended 2026-11-25 (#1150, owner decision):** a workspace may also store such a token itself, as a secret next to its LLM keys,
+  and Claude Code then runs on it in a hosted Sandbox VM and on a runner that has no login of its own; see
+  [Claude Code on the token of the workspace](#claude-code-on-the-token-of-the-workspace-1150). Nothing else here changes.
 - **The agent is free inside the sandbox**: `--permission-mode bypassPermissions`, no `--allowedTools` (a closed list of tools). Only
   money, key and exits are guarded.
 - **Not as root, and not on `IS_SANDBOX=1`.** Bypass mode refuses to run as root unless `IS_SANDBOX=1`, which Anthropic does not
@@ -1204,12 +1321,12 @@ show is the lane (CI).
 only, null reads as `opencode`). The model of such a profile is `{"provider": "claude-code", "model": "<name Claude Code reads>"}` (for
 example `sonnet`, `claude-sonnet-5-5`): no catalog entry, no key of the workspace and no price stand behind it, so the model check of
 the catalog is skipped and the provider name `claude-code` is refused on any other harness. Starting a task with such a profile in an
-environment that is not a runner's is refused before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`, 422); the workflow check
-`harness_needs_runner` says the same for a workflow.
+environment that is not a runner's is refused before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`, 422) **unless the workspace has
+a Claude Code OAuth token** (#1150); the workflow check `harness_needs_runner` says the same for a workflow.
 
 **Routing.** The claim of a customer's runner takes a turn only when an entry of its manifest has the harness of the turn's profile, the auth (`claude-code` asks for
-`subscription`) and the model (#973: `accessRule` in `app/src/runner-identity/access.ts`, which replaced the harness test of #856); the platform's claim has no subscription entry, so
-it never takes a turn on `claude-code`. A runner that does not announce `claude-code` as a `subscription` (or whose entry does not list the model), because its login is gone or it
+`subscription`) and the model (#973: `accessRule` in `app/src/runner-identity/access.ts`, which replaced the harness test of #856); the platform's claim has no *subscription* entry (#1150: it has an
+`app-key` entry for `claude-code`, which only a Dispatcher's claim can use: the token of the workspace). A runner that does not announce `claude-code` as a `subscription` (or whose entry does not list the model), because its login is gone or it
 withdrew the entry, leaves the turn queued for one that does.
 
 **The job.** A turn on `claude-code` is handed to the runner as a job without `llm`, without `implementer.cost` and without
@@ -3236,6 +3353,124 @@ At the end: no instance, no image (the two, `spike-docker` and the Ubuntu base),
 host proxy, the decoy and the control endpoint stopped, the downloads and the exported image (840 MB) deleted. The owner's `default` pool, the profile `default` and `incusbr0` were never changed. `/` is at 69 % as before. **A mistake of the spike:** a first timing loop that went to the background after its tool call timed out kept starting `incus init` jobs for a quarter of an hour; its two
 extra timings (16.7 and 18.4 s) overlapped another init and are not used for the headline; the quiet runs are.
 
+
+## Cloudflare placement: the App and the Dispatcher (#1158)
+
+Epic #1157. A lane step can name the hosted runner **"Cloudflare Container 4 vCPU"**; its job is claimed by the Dispatcher that claims every hosted job and is launched on a Cloudflare Container instead of a Vercel Sandbox VM. Everything else is the code that runs today: the claim, the per-job credential, the VM steps, the network switch, the reaper and the exit report. The Worker, the Durable Objects and the image are the other slice (#1159, `cloudflare/sandbox/`); the two meet at the HTTP API of [`contracts/cf-sandbox.v1.json`](../contracts/cf-sandbox.v1.json) (and `x-vm-image` in it: what the image holds). The decisions of the epic (beta accepted, layout P1 of the spike, no second dispatcher, the outbound handler as the outer wall, sizes as configuration) are in "Spike: Cloudflare Containers (#1149)" below.
+
+### The App: a placement of the hosted runner
+
+- **A hosted runner has a placement**: `vercel` (every one that existed) or `cloudflare` (`implementer_environments.placement`, migration `20261125150000`; the unique index is now for each workspace, placement and size, so a Cloudflare runner of 4 vCPU stands beside the Vercel one). Cloudflare rows exist **only for the sizes the operator enabled**: `CLOUDFLARE_RUNNER_SIZES`, a comma list of vCPU counts of `contracts/environment-sizes.v1.json` (2, 4, 6, 8; for example `4`). Unset, empty or only values that are no such size: the placement is off and nobody has such a runner. `NamedRunnersRepository.list` and the creation of a workspace make them by the same rule as the Vercel ones (under the workspace's lock, with the same concurrency, `HOSTED_RUNNER_DEFAULT_CONCURRENCY`). A size switched off later **keeps its row** (a lane may name it): `NamedRunner.available` is false for it, the validator says **`runner_unavailable`** (the id is no longer in `available`) and a run of a saved version ends `runner_not_found` ("switched off on this server").
+- **Name** "Cloudflare Container 4 vCPU" (the same collision rule as "(hosted)": a name a person's environment or a runner already has is not taken from it). The built-in lanes and the conversion of old environments still pick the **Vercel** runner of their size.
+- **The label.** A turn on a Cloudflare runner requires `cr:managed`, `cr:size-<n>` **and the new reserved label `cr:placement:cloudflare`** (`app/src/runner-identity/labels.ts`; the placement of a turn is read from its runner's row by the id the turn copied, so a follow-up turn keeps it). The platform identity has that label **only for a claim that names the new claim feature `placement_cloudflare`** (`KnownClaimFeature`), so a Dispatcher without the Cloudflare configuration never takes such a job (it stays queued; nothing fails, as for a multi-repo job) and a Vercel job, which does not require the label, is never launched on Cloudflare. The claim answer names `placement: "cloudflare"` for such a job (`SplitClaimResponse`; the issue sketched the labels, this is the one fact the Dispatcher reads). The doorbell is unchanged: it rings the Dispatcher by job id, and the claim decides by the label. A job of a placement nobody serves waits like any hosted job that waits for another reason, and is given up as `dispatch_unavailable`.
+- **Claude Code on the workspace's token (#1150)** is allowed on this placement exactly as on a Vercel hosted runner (it is hosted: the outer wall is the outbound handler, set through the same `POST /network` switch).
+
+### The Dispatcher
+
+- **Configuration** (`dispatcher/src/launchers/cloudflare-env.ts`; [`deployment-vercel.md`](deployment-vercel.md)): `CF_SANDBOX_URL`, `CF_SANDBOX_TOKEN` (secret, at least 32 characters) and `CF_SANDBOX_INSTANCE_TYPES` (`4=standard-4`; a later `8=<custom type>` is the only change when Cloudflare grants a larger size) are set **all three or none**; one or two refuse the start (naming the variable), none is the Dispatcher as it was and it never names `placement_cloudflare`. They need the Vercel configuration too (without a snapshot they refuse the start). `CF_SANDBOX_SYSBOX_PROOF` (`proven` by default, the spike's result with the patched `sysbox-mgr`; `unproven` keeps the Implementer out) is the Sysbox verdict that the golden snapshot's record gives the Vercel placement.
+- **The client** (`launchers/cf-sandbox.ts`): `SandboxService` and `SandboxFleet` over the API (`fetch`, a timeout for every call, `redirect: error`; a failure is a `SandboxServiceError` with a kind of `SANDBOX_FAILURE_KINDS`, never a body or the token; the credential of the job goes in the `data` of the stdin call and nowhere else). `POST /v1/vms` may take 300 s (the image's boot and the load of the inner images), so its call timeout is 330 s. `exec` is held to 1 s to 10 min, a process is polled with `waitMs=25000` until it ends. Tested against the double in `fakes/cf-sandbox/` and held to the contract's examples (`cf-sandbox.test.ts`).
+- **Placement choice and the name** (`launchers/placement.ts`): the claim answer's `placement` goes to `LaunchSpec.placement` (a turn of the Implementer only; any value but `cloudflare` gives the job back unlaunched, `placement_not_offered`). The Launcher's `service` is a **router**: a create with `placement: "cloudflare"` goes to Cloudflare, everything else to Vercel; every call that has only a name (`stop`, `delete`, `POST /network`) goes by the name. A Cloudflare VM is named `cr-<kind>-<job id>-cf-<8 hex>` (63 characters at most, the Worker's limit; `reaper/vm-shape.ts` knows the marker, so the reaper and the stop route treat it as a job VM like any other). **The reaper and the stop route list both fleets**; a failure of the Cloudflare listing is logged (`cloudflare_list_failed`, a code only) and the listing answers with Vercel's, so a Cloudflare outage cannot stop the reaping and stopping of the platform that was here first. A Cloudflare VM that is missed that way ends by itself at its own timeout (the Worker destroys it) and the next listing finds it.
+- **The claim features** (`core/claim-features.ts`, `cloudflare-env.ts`): the Dispatcher names `placement_cloudflare` for every claim in which `GET /health` of the Worker (cached 30 s, a failure 10 s) answers usably (an image id and an instance type it is configured with). One claim can be given a job of either placement, so an **image-gated feature** (`implementer_multi_repo`, `implementer_workspace_token`) is named only when **both** the snapshot's image and the Cloudflare image's `workerFeatures` list it. With no usable answer the claim is the Vercel one, without the placement.
+- **The VM steps** are the golden snapshot's, in the same order (`create`, the run directories, IPv6 off, `vm-prepare.sh`, the image check, `sysbox-prepare.sh`, the work volume, `docker run`), with what differs per placement: the image id comes from `workerImageId` of the Worker's health (the Vercel snapshot's digest is another image), the Sysbox verdict from `CF_SANDBOX_SYSBOX_PROOF`, the **work volume's reserve disk is 2 GiB** (`CLOUDFLARE_RESERVE_DISK_GIB`: an eighth of the 20 GB root, as 8 GiB is of 64 GB), and **the Worker container gets the intercept CA**: the outbound handler terminates TLS for every request of the VM, so `/etc/cr-sandbox/ca-bundle.crt` (the system's roots plus the handler's authority, made by the image's boot) is bind-mounted read-only at the same path and `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO` point at it (`WorkerContainerLauncherAdditions.interceptCa`, the one fixed path: no other host path can be mounted this way). The Worker's Control starts the door containers, the readers and the agent's container **inside the VM**: `DockerApi.create_container` (`runner/.../implementer/intercept_ca.py`) binds the same file read-only into each of them and sets the same five variables (a variable the container sets itself keeps its value; the roots of the agent's trust bundle for the network door are this bundle). Where the file does not exist, every other placement, nothing is added. **Limits** (the spike found them): a tool with its own trust store that reads none of the variables (a JVM, a pinned client) fails TLS here for every host, not only for the package registries.
+- **Not here**: the Worker, the Durable Objects and the image (#1159), the MCP tools (#1146), Cloudflare billing and plans, a capability probe (`POST /probe`) on the Cloudflare placement (the canary runs on Vercel only).
+## Cloudflare placement: the Worker and the image (#1159)
+
+Epic #1157 makes a Cloudflare Container one more **hosted placement** next to Vercel Sandbox: the existing Dispatcher keeps claiming every hosted job, and its
+`SandboxService`/`SandboxFleet` for this placement (#1158) talk over HTTPS to a small Worker, **`cr-sandbox`**, that owns one Durable Object and one Container (a
+microVM) per VM. This section is the Worker's and the image's side: [`cloudflare/sandbox/`](../cloudflare/sandbox/README.md). It is built from the measured spike below
+(the code of [`spikes/cloudflare/`](../spikes/cloudflare/README.md): the Durable Object, the outbound handler, the Sysbox patch, the boot, the CA) and is **not** a second
+dispatcher: nothing in the claim, the queue or the VM steps changes.
+
+```
+ Dispatcher (Vercel) ── HTTPS, Bearer CF_SANDBOX_TOKEN ──▶ Worker cr-sandbox   (contracts/cf-sandbox.v1.json)
+   claim, per-job credential, VM steps,                      │  POST /v1/vms … exec … processes … network … DELETE, GET /v1/vms, GET /health
+   reaper, exit report (all unchanged)                       ├─ Durable Object CrSandboxVm   "<vm name>": one Container, policy, alarm
+                                                             ├─ Durable Object CrSandboxRegistry "global": listing, cap, sweep
+                                                             └─ Door (outbound handler): every HTTP/HTTPS request of a Container, rule read per request
+                                                                         ▼
+                                              Container (microVM, enableInternet: false), the image of cloudflare/sandbox/image/
+```
+
+### What was decided (the epic) and what it means
+
+- **Beta accepted**: the `durable_object` scheduling policy of Cloudflare Containers (public beta). The Worker is written for its failures: a Container can be stopped by the
+  platform, a Durable Object can restart and lose its in-memory process handles (a process it lost is reported as ended with exit code 255; the lease and the heartbeat of the
+  App already cover a lost job).
+- **Layout P1**: the hosted VM's content (Control, the doors, the agent under Sysbox) runs inside **one** Container. **What that means for isolation**: the walls are the
+  microVM towards everything else (the hypervisor, per job, like Vercel's and Firecracker's), **Sysbox (patched) between the agent and the control side**, the container hardening
+  of the Worker/door/agent specs as on Vercel, and the **outbound handler** as the outer network wall. Root in the Container itself is not confined from the VM (spike, Q2): whatever
+  is secret and shares the Container with the agent is the agent's unless Sysbox stands between them, exactly as on the hosted VM. **P2** (nothing secret in the microVM: the handler
+  would hold the per-job credential, the git token and the model key) stays the target for later and needs a rewrite of how Control gets its secrets.
+- **Outer wall = the outbound handler.** The Container starts with `enableInternet: false`; all its HTTP and HTTPS arrives at `Door` (`src/door.ts`), which terminates TLS and reads the
+  VM's policy from its Durable Object **on every request**: `PUT /v1/vms/{name}/network` is effective for the next request (no connection is closed, no `ack` is waited for). A VM starts
+  with `allow-all`; the Dispatcher's VM steps narrow it with `policyFor` exactly as on Vercel ("no outer wall, no token" holds). The matching rule is the one of
+  [`contracts/network-rule-examples.json`](../contracts/network-rule-examples.json) (a name matches an entry that is exactly it, or `*.suffix` when strictly below it; ports 80 and 443
+  only; an IP address in any spelling is never a name) and the Worker's test runs its verdicts. On top of any policy the wall refuses private, loopback, link-local and metadata addresses,
+  local names, and the reserved `.door` names (the spike's `model.door`; layout P1 serves none, so nothing a Container sends is ever given a credential here). A redirect is never followed
+  (`redirect: "manual"`): the Container asks again and the wall judges the next name.
+- **Sizes are configuration.** `INSTANCE_TYPES` (wrangler `vars`) lists what the Worker accepts: `standard-4` now (4 vCPU, 12 GiB, 20 GB, the account default). `GET /health` publishes
+  the list; a `create` with another type is a 400. The Dispatcher's `CF_SANDBOX_INSTANCE_TYPES` maps vCPU counts to these names.
+
+### The image
+
+`cloudflare/sandbox/image/Dockerfile` is the golden snapshot's recipe run unchanged on the same Ubuntu Base 26.04.1 as the local VM's root file system
+(`docker/vm/rootfs/build.sh`): `image/prepare-context.sh` writes the recipe with the Dispatcher's own code (`dispatcher/src/vm-artifacts/recipe-main.ts`: Docker, buildx, the pinned
+Sysbox 0.7.1 package checked by sha256, `daemon.json`, `vm-prepare.sh` and `sysbox-prepare.sh` at their golden-snapshot paths), so **no version is written a second time**.
+What is added for a Container, and nothing else:
+
+| What | Where | Why |
+|---|---|---|
+| **Patched `sysbox-mgr`** | `/usr/bin/sysbox-mgr`, `/var/modules` (empty, read-only) | The Container's kernel has no module support, so stock `sysbox-mgr` dies on `open /proc/modules`. `image/files/patch-sysbox-mgr.sh` swaps that one string for `/var//modules` (same length: a longer one crashed the binary in the spike), after checking the sha256 of the original and of the result, and fails the build otherwise |
+| Boot script | `/usr/local/sbin/cr-sandbox-boot.sh` | Run once by the Worker at `create` (below) |
+| The Worker and agent images | `/opt/cr-sandbox/inner/{worker,agent}.tar.zst` (deleted after the load) | `docker save` of the two targets of `runner/Dockerfile` with the golden snapshot's tags (`code-reviewer-worker:golden`, `code-reviewer-agent:golden`), built in CI by `image/build-inner.sh`. **No Docker Hub pull at run time** (429 for the platform's addresses) |
+| `tini` as init | `/usr/bin/tini` | The Container's entrypoint (`tini -- sleep infinity`); everything else starts with `exec` |
+
+**The boot** (`POST /v1/vms` answers when it ends, up to 300 s): (1) the **intercept CA**: the handler terminates TLS, Cloudflare writes its CA to
+`/etc/cloudflare/certs/cloudflare-containers-ca.crt` when the handlers are registered before the start; it goes into the system store and three files are made for the VM steps:
+`/etc/cr-sandbox/ca-bundle.crt` (system bundle plus the CA), `intercept-ca.crt` (the CA alone) and `ca.env` (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`,
+`REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`). The VM steps mount the bundle read-only into the Worker container, the door containers and the agent container and set those variables
+(without the CA a tool with its own trust store fails on every host: spike, Q3). (2) the **images**: `vm-prepare.sh` (the cgroup fix and `dockerd`) starts the daemon, both archives are
+loaded in parallel, the tags are checked, the archives are deleted (1.4 GB of the 20 GB disk) and the daemon is stopped cleanly. **The daemon is not running when `create` answers**: the
+Dispatcher's steps run as on Vercel (run directories on tmpfs, `vm-prepare.sh`, the image check, `sysbox-prepare.sh`, the work volume). The load costs about two minutes of a
+turn's start (spike: 19.6 s per 511 MB on 2 vCPU; 4 vCPU here); a Cloudflare container snapshot per image version would remove it and is a follow-up, not a change of the API.
+
+`GET /health` is `{ ok, imageVersion, workerFeatures, instanceTypes, workerImageId?, agentImageId? }`: `imageVersion` is the git SHA of the build; **`workerFeatures` and the two image ids are
+read from the images by the build** (`image/self-check.sh` runs the Container image privileged on the CI runner, loads both archives with the real boot script and asks the Worker image for
+its `WORKER_FEATURES` as the golden snapshot's `worker_features` step does) and handed to the deployment as `--var`s. The Dispatcher gates the claim features that depend on the image by
+`workerFeatures` and can compare `docker image inspect` in the VM with the ids.
+
+### Lifecycle of a VM
+
+`create` (registry: reserve a place, refused with 429 above `MAX_VMS` (8) and with 400 for a name that exists; the Durable Object registers the handlers, starts the Container, runs the boot) →
+`exec` (to its end; stdout and stderr keep their last 262144 bytes; a timeout kills the command and answers 124) and **processes** (`start`, `writeStdin`, `closeStdin`, `wait` with a
+long poll of at most 25 s; the Durable Object holds them) → `DELETE` (destroys the Container and forgets everything; a VM that is gone is not an error). Three clocks end a VM that nobody
+stops: the Durable Object's **alarm every 45 s** (code inside the Container is not activity for the platform; an alarm that runs more often than the **120 s inactivity timeout** is, and
+the timeout is **set again in the constructor** because it does not survive a restart: spike finding) destroys the Container at `timeoutMs`; the **registry's sweep** (every 5 minutes)
+destroys a VM that is 5 minutes past its deadline or was `pending` for 10 minutes; and the Dispatcher's reaper lists with `GET /v1/vms?namePrefix=&tag=k:v` and stops what is not
+its own. Everything is in `src/` as small modules (`vm-controller.ts`, `registry-controller.ts`, `handler.ts`, the pure `policy.ts`, `lifecycle.ts`, `validate.ts`) that the
+Durable Object classes only adapt, so that the logic is unit-tested without Cloudflare.
+
+### Deployment
+
+`.github/workflows/cloudflare-sandbox.yml`: for a pull request that changes what the image is made of (`ci.yml`, the `cloudflare` filter) it runs the Worker's tests and builds **and runs**
+the image once on the runner (no push, no deploy, no secret) and dry-runs the deployment; on a **push to main** (part of the release) and by hand on main it then runs `wrangler deploy`
+(wrangler builds the Container image from the same Dockerfile and pushes it to Cloudflare's registry) and sets the Worker secret with `wrangler secret put CF_SANDBOX_TOKEN` (stdin).
+Only in this repository (the old repository name must not deploy). **The owner sets three repository secrets**: `CLOUDFLARE_API_TOKEN` (a token of the account "Itegro GmbH" that may deploy
+Workers, Durable Objects and Containers), `CLOUDFLARE_ACCOUNT_ID` and `CF_SANDBOX_TOKEN` (at least 32 random characters; the Dispatcher's `CF_SANDBOX_TOKEN` is the same value). A deployment
+whose secrets are missing fails in its first step, naming them, before anything is built. **Account guard** (a test holds it): every resource is named `cr-sandbox*` (the Worker, the
+`CrSandbox*` classes, the container application and the image repository that wrangler derives from them); nothing touches the spike's `cr-spike-*` (the lead deletes it when Cloudflare
+Support has closed its case), `reserwirt-preview-*`, `office-preview`, billing or plans; the workflow calls wrangler for `deploy` and `secret` only.
+
+**How to enable a larger size** once Cloudflare grants it (a support case for 8 vCPU / 32 GiB / 100 GB is open): add its name to `INSTANCE_TYPES` in `cloudflare/sandbox/wrangler.jsonc`
+(`"standard-4,custom-8"`), and, if it is not one of Cloudflare's own type names, its resources to `CUSTOM_INSTANCE_TYPES` (`{"custom-8":{"vcpu":8,"memoryMib":32768,"diskMb":100000}}`);
+deploy; then add `8=custom-8` to the Dispatcher's `CF_SANDBOX_INSTANCE_TYPES` and `8` to the App's `CLOUDFLARE_RUNNER_SIZES`. No code changes.
+
+**Re-deriving the Sysbox patch** (a Sysbox bump fails the build in `patch-sysbox-mgr.sh` on purpose): download the pinned package, `dpkg-deb -x` it, `sha256sum usr/bin/sysbox-mgr` is the
+new `original_sha256`; replace the one `/proc/modules` with `/var//modules` in a copy and hash that for `patched_sha256`; update the two hashes in the script and in `image/self-check.sh`.
+
+**Not proven yet** (needs the first deployment, by the lead): a real run of the Dispatcher's VM steps in this image (the first run is the live test of the epic), the CA in every tool of a real
+repository, a job longer than the spike's, and the time of the first image load on a loaded host. Follow-ups: a container snapshot per image version to remove the two-minute load, P2,
+and the work volume's reserve disk on btrfs (the Dispatcher's slice).
 
 ## Spike: Cloudflare Containers (#1149)
 

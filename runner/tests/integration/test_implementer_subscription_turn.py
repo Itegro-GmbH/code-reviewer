@@ -438,6 +438,25 @@ def test_a_device_that_cannot_run_claude_code_refuses_the_job_and_runs_nothing(
     assert played.setups == 0 and played.places == [], "no workspace, no container, no fallback"
 
 
+# #1150-N04
+def test_the_token_of_the_workspace_is_not_handed_to_an_agent_behind_the_inner_door_alone(
+    play: Callable[..., Played],
+) -> None:
+    """A hosted Dispatcher without a public URL gives the Worker no network switch: the login would
+    sit in the container with only the door of the turn around it."""
+    played = play(
+        says("Done."),
+        harness=ReadyHarness(ClaudeLogin.oauth_token(LOGIN), IMAGE, workspace_token=True),
+    )
+
+    result = played.result
+    assert result["ok"] is False and result["errorCode"] == "implementer_engine_unavailable"
+    assert "network_switch_missing" in result["logTail"]
+    assert LOGIN not in played.output
+    assert played.setups == 0 and played.places == [], "no workspace, no container, no token placed"
+    assert result["usage"] is None, "free"
+
+
 # #856-R02
 def test_the_login_is_in_no_text_of_the_result_whatever_the_agent_printed(
     play: Callable[..., Played],

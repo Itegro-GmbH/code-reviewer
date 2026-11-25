@@ -18,6 +18,7 @@ from code_reviewer_runner.implementer.claude_code.layer import (
     layer_labels,
     layer_tag,
 )
+from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin, holds_device_login
 from code_reviewer_runner.implementer.claude_code.readiness import (
     HARNESS_CLAUDE_CODE,
     HarnessNotReady,
@@ -291,3 +292,98 @@ def test_an_agent_image_that_is_not_there_refuses_the_job(tmp_path: Path) -> Non
     daemon.images.pop("code-reviewer-agent:golden")
 
     assert isinstance(ready_harness(daemon, token_in(tmp_path), tmp_path), HarnessNotReady)
+
+
+WORKSPACE = ClaudeLogin.oauth_token("sk-" + "ant-" + "oat01-workspace-token-not-real-9999999999")
+
+
+# #1150-R01
+def test_a_machine_with_no_login_runs_the_job_on_the_token_of_the_workspace(tmp_path: Path) -> None:
+    daemon = Daemon(layer=True)
+
+    found = ready_harness(daemon, {}, tmp_path, workspace_login=WORKSPACE)
+
+    assert isinstance(found, ReadyHarness)
+    assert found.login.secret == WORKSPACE.secret and found.image == layer_tag(BASE, SPEC)
+    assert found.workspace_token, "the job says the login is not one of this machine"
+    assert daemon.built == 0
+
+
+# #1150-R01
+def test_a_machine_with_no_login_and_no_layer_builds_the_layer_for_the_token_of_the_workspace(
+    tmp_path: Path,
+) -> None:
+    """A hosted Sandbox VM has no layer: Claude Code is not part of any image of ours."""
+    daemon = Daemon(layer=False)
+
+    found = ready_harness(daemon, {}, tmp_path, workspace_login=WORKSPACE)
+
+    assert isinstance(found, ReadyHarness) and found.login.secret == WORKSPACE.secret
+    assert daemon.built == 1
+    assert found.image == layer_tag(BASE, SPEC)
+
+
+# #1150-R02
+def test_the_own_login_of_the_machine_wins_over_the_token_of_the_workspace(tmp_path: Path) -> None:
+    daemon = Daemon(layer=True)
+
+    found = ready_harness(daemon, token_in(tmp_path), tmp_path, workspace_login=WORKSPACE)
+
+    assert isinstance(found, ReadyHarness)
+    assert found.login.secret == TOKEN
+    assert found.login.secret != WORKSPACE.secret
+    assert not found.workspace_token
+
+
+# #1150-R02
+def test_a_login_of_the_machine_that_cannot_be_used_is_never_swapped_for_the_token(
+    tmp_path: Path,
+) -> None:
+    daemon = Daemon(layer=True)
+
+    found = ready_harness(
+        daemon, token_in(tmp_path, mode=0o644), tmp_path, workspace_login=WORKSPACE
+    )
+
+    assert isinstance(found, HarnessNotReady)
+    assert WORKSPACE.secret not in found.text and TOKEN not in found.text
+    assert daemon.built == 0
+
+
+# #1150-R01
+def test_a_layer_that_cannot_be_built_refuses_the_job_with_the_reason_and_not_the_token(
+    tmp_path: Path,
+) -> None:
+    daemon = Daemon(layer=False, refuse="no route to the registry")
+
+    found = ready_harness(daemon, {}, tmp_path, workspace_login=WORKSPACE)
+
+    assert isinstance(found, HarnessNotReady)
+    assert "could not be built" in found.text and WORKSPACE.secret not in found.text
+
+
+# #1150-R01
+def test_without_the_token_a_machine_with_no_login_still_refuses_the_job(tmp_path: Path) -> None:
+    assert isinstance(ready_harness(Daemon(layer=True), {}, tmp_path), HarnessNotReady)
+
+
+# #1150-R03
+def test_a_process_is_said_to_hold_a_device_login_only_when_it_was_handed_one(
+    tmp_path: Path,
+) -> None:
+    assert not holds_device_login({})
+    assert not holds_device_login({"CLAUDE_CODE_OAUTH_TOKEN": ""})
+    assert holds_device_login({"CLAUDE_CODE_OAUTH_TOKEN": TOKEN})
+    assert holds_device_login({"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(tmp_path / "t")})
+
+
+# #1150-N04
+def test_a_machine_has_environment_control_only_when_it_was_started_for_one() -> None:
+    from code_reviewer_runner.implementer.environment_control import has_environment_control
+
+    assert not has_environment_control({})
+    assert not has_environment_control({"RUNNER_IMPLEMENTER_NETWORK_SWITCH": "  "})
+    assert not has_environment_control({"RUNNER_IMPLEMENTER_NETWORK_SWITCH": "not a switch"})
+    assert not has_environment_control({"RUNNER_ENVIRONMENT_CONTROL": "carrier-pigeon"})
+    assert has_environment_control({"RUNNER_ENVIRONMENT_CONTROL": "vsock"})
+    assert has_environment_control({"RUNNER_ENVIRONMENT_CONTROL": "unix"})

@@ -47,6 +47,7 @@ import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
 import { isRevoked } from "../named-runners/types.ts";
 import { inlineModelsIn, runnerIdsIn } from "./agent-settings.ts";
 import { isRecord, textLength } from "./json.ts";
+import { CLAUDE_CODE_HARNESS } from "../runner-identity/harness.ts";
 import { mcpServersNamedBy } from "./mcp.ts";
 import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
 import {
@@ -59,6 +60,7 @@ import {
 import {
   createResolver,
   type McpServerInfo,
+  type ProfileInfo,
   type RunnerInfo,
   type WorkflowResolver,
 } from "./resolver.ts";
@@ -189,6 +191,11 @@ export type WorkflowServiceDependencies = {
    */
   onlineRunners?: () => Promise<readonly OnlineRunner[]>;
   /**
+   * #1150: whether the workspace has a Claude Code OAuth token it can use, so the validator lets a step on the harness `claude-code` run on a
+   * hosted environment or runner. Left out: the workspace has none.
+   */
+  claudeCodeTokenConfigured?: () => Promise<boolean>;
+  /**
    * #1105 (ADR 0007): the concrete runners of the workspace, so a step can name only one of them (`runner_unknown`) and the rules of a
    * runner are judged at the one it names. Left out: the workspace's runners are not known, and a step that names one is refused.
    */
@@ -257,6 +264,9 @@ async function runnerInfos(
     id: runner.id,
     name: runner.name,
     kind: runner.kind,
+    ...(runner.kind === "hosted" && !runner.available
+      ? { unavailable: true }
+      : {}),
   }));
   for (const id of runnerIdsIn(document, RUNNER_LOOKUPS_MAX)) {
     if (known.has(id)) continue;
@@ -313,7 +323,9 @@ async function builtInSettings(
     };
   const hosted = (await runners?.list())?.find(
     (runner) =>
-      runner.kind === "hosted" && runner.vcpus === BUILT_IN_RUNNER_VCPUS,
+      runner.kind === "hosted" &&
+      runner.placement === "vercel" &&
+      runner.vcpus === BUILT_IN_RUNNER_VCPUS,
   );
   if (hosted === undefined)
     return {
@@ -337,6 +349,20 @@ async function builtInSettings(
   };
 }
 
+/** Whether a document has a step on the harness `claude-code`: named inline, or by a profile version whose facts say so (#1150). */
+function runsClaudeCode(
+  body: unknown,
+  profiles: readonly ProfileInfo[],
+): boolean {
+  if (JSON.stringify(body).includes(`"harness":"${CLAUDE_CODE_HARNESS}"`))
+    return true;
+  return profiles.some((profile) =>
+    Object.values(profile.facts).some(
+      (facts) => facts.harness === CLAUDE_CODE_HARNESS,
+    ),
+  );
+}
+
 export function createWorkflowService({
   workflows,
   projects,
@@ -345,6 +371,7 @@ export function createWorkflowService({
   mcpServers,
   mcpOAuth,
   onlineRunners,
+  claudeCodeTokenConfigured,
   runners,
   models,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
@@ -372,12 +399,13 @@ export function createWorkflowService({
         for (const model of named)
           verdicts.set(JSON.stringify(model), await models.check(model));
     }
+    const profileInfos = build(facts);
     return createResolver({
       ...(models === undefined
         ? {}
         : { modelCheck: (model) => verdicts.get(JSON.stringify(model)) }),
       environments: known,
-      profiles: build(facts),
+      profiles: profileInfos,
       archivedProfiles: await profiles.archivedNames(),
       ...(mcpServers === undefined || mcpServersNamedBy(body).length === 0
         ? {}
@@ -387,6 +415,12 @@ export function createWorkflowService({
       ...(onlineRunners === undefined
         ? {}
         : { onlineRunners: await onlineRunners() }),
+      // #1150: the token is read only for a document that has a step on the harness `claude-code`, inline or through a profile: one read of one
+      // row, and a document without such a step never opens the store of secrets.
+      ...(claudeCodeTokenConfigured === undefined ||
+      !runsClaudeCode(body, profileInfos)
+        ? {}
+        : { claudeCodeToken: await claudeCodeTokenConfigured() }),
       ...(runners === undefined
         ? {}
         : { runners: await runnerInfos(runners, body) }),

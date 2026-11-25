@@ -2,10 +2,13 @@
 
 """The login of Claude Code, which comes from the customer's device (#856, plan decisions 1 and 11).
 
-The unmodified Claude Code is used with **each user's own credentials**, on the device of the one
-who runs the runner. The credential is a one-year inference-only token from `claude setup-token`:
-it is printed once and stored nowhere by Claude Code, and it is **never stored in our app or its
-database, never sent to the app, never logged**. The runner reads it from
+The unmodified Claude Code is used with **each user's own credentials**. The credential is a
+one-year inference-only token from `claude setup-token`: it is printed once and stored nowhere by
+Claude Code. The login of **the device** is **never stored in our app or its database, never sent
+to the app, never logged**. (#1150, owner decision: a workspace may also store such a token in the
+app, with its LLM keys, and a machine that has **no login of its own at all** runs on that one,
+which the app puts into the job: `readiness.ready_harness`. The device's own login always wins.)
+The runner reads the login of its device from
 
 1. the credential store of the runner's home (`credentials.py`, #980: `factory-runner credential
    add claude`) as soon as it holds a credential: the first usable one serves the self-test, while
@@ -147,6 +150,16 @@ def load_legacy_login(environment: Mapping[str, str], home: Path) -> ClaudeLogin
         return ClaudeLogin.oauth_token(token)
     return LoginProblem(
         f"no Claude Code login on this device: {_HOW}, or set {OAUTH_VARIABLE}", configured=False
+    )
+
+
+def holds_device_login(environment: Mapping[str, str]) -> bool:
+    """Whether a process was handed the login of a device (#1150): the token its dispatcher
+    passed (`CLAUDE_CODE_OAUTH_TOKEN`) or the path of the token file of the runner. A hosted VM
+    and a runner without a login hold none: a turn on Claude Code runs on the token of the
+    workspace there. It says nothing about whether the login is usable."""
+    return bool(environment.get(OAUTH_VARIABLE)) or bool(
+        environment.get(TOKEN_FILE_VARIABLE, "").strip()
     )
 
 

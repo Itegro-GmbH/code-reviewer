@@ -67,9 +67,39 @@ export function sizeLabel(vcpus: number): string {
   return `${SIZE_PREFIX}${String(vcpus)}`;
 }
 
-/** The labels of a hosted job of one size. */
-export function hostedLabels(vcpus: number): string[] {
-  return [MANAGED_LABEL, sizeLabel(vcpus)];
+/** Where a hosted runner's VM runs: Vercel's Sandbox (the default, as before #1158) or a Cloudflare Container. */
+export type HostedPlacement = "vercel" | "cloudflare";
+
+/**
+ * #1158 (epic #1157): the reserved label of a hosted job that runs on a Cloudflare Container. The job requires it next to `cr:managed` and
+ * its size. It is not one of `PLATFORM_LABELS`: the platform identity has it only when its claim names the claim feature
+ * `placement_cloudflare` (the Dispatcher has the Cloudflare configuration and its Worker answered), so a Dispatcher without it never takes
+ * such a job, and a job of Vercel never needs it, so it is never launched on Cloudflare.
+ */
+export const PLACEMENT_CLOUDFLARE_LABEL = "cr:placement:cloudflare";
+
+/** The claim feature that gives the platform identity `PLACEMENT_CLOUDFLARE_LABEL` for that claim (`KnownClaimFeature`). */
+export const PLACEMENT_CLOUDFLARE_FEATURE = "placement_cloudflare";
+
+/** The labels of a hosted job of one size and placement. */
+export function hostedLabels(
+  vcpus: number,
+  placement: HostedPlacement = "vercel",
+): string[] {
+  return [
+    MANAGED_LABEL,
+    sizeLabel(vcpus),
+    ...(placement === "cloudflare" ? [PLACEMENT_CLOUDFLARE_LABEL] : []),
+  ];
+}
+
+/** The placement the labels a job requires name: Cloudflare for its exact label, Vercel for everything else (a job written before #1158 too). */
+export function placementOfRequiredLabels(
+  labels: readonly string[] | null | undefined,
+): HostedPlacement {
+  return labels?.includes(PLACEMENT_CLOUDFLARE_LABEL) === true
+    ? "cloudflare"
+    : "vercel";
 }
 
 /** Every label of the platform identity: `cr:managed` and one for each size. */
@@ -124,7 +154,7 @@ export function hasAllLabels(
  * exactly that label and no other, and the job then requires the label of that runner alone.
  */
 export function requiredLabelsOfTurn(environments: {
-  environment?: { vcpus: number } | null;
+  environment?: { vcpus: number; placement?: HostedPlacement } | null;
   runnerEnvironment?: { id: string; labels: readonly string[] } | null;
 }): string[] {
   if (environments.runnerEnvironment) {
@@ -143,5 +173,6 @@ export function requiredLabelsOfTurn(environments: {
   }
   return hostedLabels(
     environments.environment?.vcpus ?? DEFAULT_IMPLEMENTER_VCPUS,
+    environments.environment?.placement,
   );
 }

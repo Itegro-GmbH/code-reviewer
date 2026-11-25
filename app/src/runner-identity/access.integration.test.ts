@@ -6,6 +6,7 @@
 import { sql } from "kysely";
 import { afterAll, describe, expect, it } from "vitest";
 import { createTestDatabase } from "../test-support/test-database.ts";
+import { addWorkspace } from "../test-support/workspaces.ts";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
@@ -48,6 +49,15 @@ const MANIFESTS: Record<string, readonly HarnessAccess[]> = {
     { ...OPENCODE, auth: "local-key", models: ["gpt-5"] },
   ],
   "claude code alone": [CLAUDE],
+  // #1150: a runner without a login of its own, and a login that is on the device, together.
+  "claude code on the token of the workspace": [
+    OPENCODE,
+    { ...CLAUDE, auth: "app-key" },
+  ],
+  "claude code, sonnet only, and the token of the workspace": [
+    { ...CLAUDE, models: ["sonnet"] },
+    { ...CLAUDE, auth: "app-key" },
+  ],
 };
 
 const TURNS: Record<
@@ -126,7 +136,7 @@ describe("the rule in the database and in memory", () => {
         if (inMemory) taken += 1;
       }
 
-    expect(compared).toBe(70);
+    expect(compared).toBe(84);
     // The table must not be one-sided: some pairs match and some do not.
     expect(taken).toBeGreaterThan(10);
     expect(taken).toBeLessThan(60);
@@ -190,6 +200,79 @@ describe("the rule in the database and in memory", () => {
     );
 
     expect(rows[0]?.ok).toBe(false);
+  });
+
+  // #1150-T18
+  it("lets the token of the workspace stand in for a login only while the workspace holds one, in the database as in memory", async () => {
+    const database = await createTestDatabase();
+    databases.push(database);
+    const withToken = await addWorkspace(database.db, "with-token");
+    const without = await addWorkspace(database.db, "without");
+    await database.db
+      .insertInto("workspace_secrets")
+      .values({
+        workspace_id: withToken,
+        name: "claude_code_oauth_token",
+        binding: "claude-code",
+        ciphertext: "AAAA",
+        nonce: "AAAA",
+        key_version: 1,
+        last_four: null,
+        updated_by: null,
+        updated_at: "2026-11-25T00:00:00.000Z",
+      })
+      .execute();
+    // The slot of another workspace's LLM key is no token.
+    await database.db
+      .insertInto("workspace_secrets")
+      .values({
+        workspace_id: without,
+        name: "llm_api_key",
+        binding: "openrouter",
+        ciphertext: "AAAA",
+        nonce: "AAAA",
+        key_version: 1,
+        last_four: null,
+        updated_by: null,
+        updated_at: "2026-11-25T00:00:00.000Z",
+      })
+      .execute();
+    const manifests = {
+      "the token only": [{ ...CLAUDE, auth: "app-key" as const }],
+      "a login of the device": [CLAUDE],
+      "the token and OpenCode": [
+        OPENCODE,
+        { ...CLAUDE, auth: "app-key" as const },
+      ],
+    } satisfies Record<string, readonly HarnessAccess[]>;
+    const choice = JSON.stringify({ provider: "claude-code", model: "opus" });
+
+    for (const [name, entries] of Object.entries(manifests))
+      for (const [workspace, id, held] of [
+        ["with a token", withToken, true],
+        ["without", without, false],
+      ] as const)
+        for (const required of [true, false]) {
+          const { rows } = await sql<{ ok: boolean }>`
+            select ${accessRule(entriesParam(entries), "t", { requireToken: required })} as ok
+            from (values ('claude-code'::text, ${choice}::text, ${id}::text)) as t(profile_harness, model_choice, workspace_id)`.execute(
+            database.db,
+          );
+          const inMemory = accessMatches(
+            entries,
+            demandOfTurn({
+              harness: "claude-code",
+              modelChoice: { provider: "claude-code", model: "opus" },
+            }),
+            required ? { workspaceToken: held } : {},
+          );
+          expect({ name, workspace, required, sql: rows[0]?.ok }).toEqual({
+            name,
+            workspace,
+            required,
+            sql: inMemory,
+          });
+        }
   });
 
   // #973-T01

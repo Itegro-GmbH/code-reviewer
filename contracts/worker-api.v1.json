@@ -6,9 +6,10 @@
   "version": 1,
   "$defs": {
     "WorkerJobDetailsRequest": {
-      "description": "#424: the query string of GET /api/workers/v1/jobs/{id}, as an object of its parameters. Both are optional comma separated lists: `features` (the names of KnownClaimFeature, unknown names are ignored) and `llmProviders` (slugs of LlmProviderId: the LLM providers the Worker can run; absent means `openrouter`). The app ignores the list today (the claim issue of epic #420 will use it); it still always sends `openrouter`.",
+      "description": "#424: the query string of GET /api/workers/v1/jobs/{id}, as an object of its parameters. Both are optional comma separated lists: `features` (the names of KnownClaimFeature, unknown names are ignored) and `llmProviders` (slugs of LlmProviderId: the LLM providers the Worker can run; absent means `openrouter`). The app ignores the list today (the claim issue of epic #420 will use it); it still always sends `openrouter`. #1150: `login` is `workspace` when the Worker holds no login of a device (its dispatcher handed it none, or it runs in a hosted VM): a turn on the harness `claude-code` then runs on the Claude Code OAuth token of the workspace, which the app puts into `implementer.subscription.oauthToken` of the answer. A Worker that holds the login of its own device leaves it out (an app and a Worker from before never send it) and never receives the token: the device's own login wins.",
       "type": "object",
       "properties": {
+        "login": { "const": "workspace" },
         "features": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9_]{0,63}(,[a-z][a-z0-9_]{0,63}){0,15}$"

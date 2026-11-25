@@ -65,6 +65,7 @@ from code_reviewer_runner.factory_runner.app_client import (
     UpdateNeeded,
 )
 from code_reviewer_runner.factory_runner.base import (
+    AUTH_APP_KEY,
     AUTH_SUBSCRIPTION,
     EXIT_APP_UNREACHABLE,
     EXIT_CONFIG,
@@ -539,6 +540,17 @@ class RunnerService:
             if offer.models is not None:
                 entry["models"] = list(offer.models)
             entries.append(entry)
+        elif self._pool.holds_no_login():
+            # #1150: no login on this device at all: the harness is installed and can run on the
+            # Claude Code OAuth token the workspace keeps in the app (the app hands it to the
+            # Worker with the job; the entry allows any model). A login added later wins.
+            entries.append(
+                {
+                    "harness": HARNESS_CLAUDE_CODE,
+                    "version": self._prepared.claude_version,
+                    "auth": AUTH_APP_KEY,
+                }
+            )
         return replace(base, manifest={**base.manifest, "harnesses": entries})
 
     async def _sync_announcement(self) -> None:
@@ -562,7 +574,12 @@ class RunnerService:
             return
         self._announced = desired
         models = _claude_models(desired)
-        if models is None:
+        if models is not None and _claude_auth(desired) == AUTH_APP_KEY:
+            self._log.info(
+                "claude-code is offered on the Claude Code token of the workspace (this device "
+                "has no login of its own)"
+            )
+        elif models is None:
             self._log.warning(
                 "claude-code is withdrawn from the manifest: no credential of this device can be "
                 "used now (rate limited, refused or without a model)"
@@ -848,6 +865,16 @@ class RunnerService:
             waiting.cancel()
             stopped.cancel()
             await asyncio.gather(waiting, stopped, return_exceptions=True)
+
+
+def _claude_auth(announcement: Announcement) -> str | None:
+    """The auth of the entry of Claude Code (`subscription`: a login of this device; `app-key`:
+    the token of the workspace)."""
+    entries = cast("Sequence[dict[str, object]]", announcement.manifest.get("harnesses", []))
+    for entry in entries:
+        if entry.get("harness") == HARNESS_CLAUDE_CODE:
+            return str(entry.get("auth"))
+    return None
 
 
 def _claude_models(announcement: Announcement) -> list[str] | None:

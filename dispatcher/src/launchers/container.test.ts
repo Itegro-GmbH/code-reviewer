@@ -19,6 +19,7 @@ import {
 } from "./container.ts";
 import {
   IMPLEMENTER_CONTAINER_SPEC,
+  CLOUDFLARE_LAUNCHER_ADDITIONS,
   SANDBOX_LAUNCHER_ADDITIONS,
   WORKER_CONTAINER_SPEC,
 } from "./container-spec.ts";
@@ -588,6 +589,73 @@ describe("the per-launcher additions (IPv6 off)", () => {
           }),
       ),
     ).toBe("additions_not_allowed");
+  });
+});
+
+describe("the intercept CA of the Cloudflare placement (#1158)", () => {
+  const BUNDLE = "/etc/cr-sandbox/ca-bundle.crt";
+
+  // #1158-K01
+  it("binds the VM's one bundle read-only at the same path and sets the five variables, for the Cloudflare variant", () => {
+    const args = render({
+      additions: CLOUDFLARE_LAUNCHER_ADDITIONS,
+      environment: { HOME: "/home/runner" },
+    });
+
+    expect(valuesOf(args, "--mount")).toEqual([
+      `type=bind,source=${BUNDLE},target=${BUNDLE},readonly`,
+    ]);
+    const environment = valuesOf(args, "--env");
+    for (const name of [
+      "SSL_CERT_FILE",
+      "REQUESTS_CA_BUNDLE",
+      "CURL_CA_BUNDLE",
+      "NODE_EXTRA_CA_CERTS",
+      "GIT_SSL_CAINFO",
+    ])
+      expect(environment).toContain(`${name}=${BUNDLE}`);
+    expect(environment).toContain("HOME=/home/runner");
+    // The IPv6 switches of the Sandbox variant are still there, and nothing else is: the spec is the spec.
+    expect(valuesOf(args, "--sysctl")).toHaveLength(2);
+    expect(args).not.toContain("--privileged");
+  });
+
+  // #1158-K02
+  it("renders nothing of it for the Vercel variant, whose rendering stays the golden file's", () => {
+    const args = render({ additions: SANDBOX_LAUNCHER_ADDITIONS });
+    expect(args.join(" ")).not.toContain("cr-sandbox");
+    expect(valuesOf(args, "--mount")).toEqual([]);
+  });
+
+  // #1158-K03
+  it.each<[string, unknown]>([
+    ["another path", { interceptCa: { bundle: "/etc/shadow" } }],
+    [
+      "a path with a way out",
+      { interceptCa: { bundle: `${BUNDLE}/../../shadow` } },
+    ],
+    [
+      "an extra key",
+      { interceptCa: { bundle: BUNDLE, target: "/etc/passwd" } },
+    ],
+    ["no bundle", { interceptCa: {} }],
+    ["a non-object", { interceptCa: BUNDLE }],
+  ])("refuses additions with %s", (_name, additions) => {
+    expect(codeOf(() => render({ additions: additions as never }))).toBe(
+      "additions_not_allowed",
+    );
+  });
+
+  // #1158-K04
+  it("lets the job's own environment name none of the five variables: they are the variant's, not the spec's allow-list", () => {
+    expect(
+      codeOf(() =>
+        render({
+          additions: CLOUDFLARE_LAUNCHER_ADDITIONS,
+          environment: { SSL_CERT_FILE: "/tmp/mine" },
+        }),
+      ),
+    ).toBe("environment_not_allowed");
   });
 });
 

@@ -103,7 +103,8 @@ describe("the rule", () => {
     ).toBe(false);
   });
 
-  it("is what the platform's dispatcher says for itself: OpenCode on its keys and on a key of the app, never a subscription", () => {
+  // #1150-T08
+  it("is what the platform's dispatcher says for itself: OpenCode on its keys and on a key of the app, Claude Code on the workspace's token", () => {
     expect(
       accessMatches(PLATFORM_ACCESS, demandOfTurn({ modelChoice: CATALOG })),
     ).toBe(true);
@@ -115,7 +116,61 @@ describe("the rule", () => {
         PLATFORM_ACCESS,
         demandOfTurn({ harness: "claude-code", modelChoice: OPUS }),
       ),
-    ).toBe(false);
+    ).toBe(true);
+    // The platform has no login of a device of its own: its entry for Claude Code is the token of the workspace, nothing else.
+    expect(PLATFORM_ACCESS.filter((e) => e.harness === "claude-code")).toEqual([
+      { harness: "claude-code", version: "pinned", auth: "app-key" },
+    ]);
+  });
+
+  // #1150-T08
+  it("lets a runner without a login of its own take a turn on Claude Code on the workspace's token, for any model", () => {
+    const token: HarnessAccess = {
+      harness: "claude-code",
+      version: "2",
+      auth: "app-key",
+    };
+    const any = demandOfTurn({
+      harness: "claude-code",
+      modelChoice: { provider: "claude-code", model: "claude-opus-9" },
+    });
+
+    expect(accessMatches([OPENCODE, token], any)).toBe(true);
+    expect(
+      accessMatches(
+        [OPENCODE, token],
+        demandOfTurn({ harness: "claude-code", modelChoice: OPUS }),
+      ),
+    ).toBe(true);
+    // The harness is still the harness: a key of the app for OpenCode is no way to run Claude Code, and the token is no way to run OpenCode.
+    expect(accessMatches([OPENCODE], any)).toBe(false);
+    expect(accessMatches([token], demandOfTurn({ modelChoice: OWN }))).toBe(
+      false,
+    );
+    // And a key of the app does not stand in for a login on the device's own key.
+    expect(accessMatches([{ ...token, auth: "local-key" }], any)).toBe(false);
+  });
+
+  // #1150-T18
+  it("lets the token of the workspace stand in for a login only while the workspace has one", () => {
+    const token: HarnessAccess = {
+      harness: "claude-code",
+      version: "2",
+      auth: "app-key",
+    };
+    const any = demandOfTurn({ harness: "claude-code", modelChoice: OPUS });
+
+    expect(accessMatches([token], any, { workspaceToken: true })).toBe(true);
+    expect(accessMatches([token], any, { workspaceToken: false })).toBe(false);
+    // What nobody says about the token is the old rule: the entry is enough.
+    expect(accessMatches([token], any)).toBe(true);
+    // A login of the device never depends on the token, and OpenCode's key of the app is another matter.
+    expect(accessMatches([CLAUDE], any, { workspaceToken: false })).toBe(true);
+    expect(
+      accessMatches([OPENCODE], demandOfTurn({ modelChoice: OWN }), {
+        workspaceToken: false,
+      }),
+    ).toBe(true);
   });
 
   it("finds a harness in a manifest by name alone (the base of every runner holds OpenCode)", () => {

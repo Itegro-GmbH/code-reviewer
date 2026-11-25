@@ -108,6 +108,42 @@ describe("the runner of an agent step (#1105)", () => {
     expect(found[0]?.available).not.toContain(OLD_BOX.id);
   });
 
+  // #1158
+  it("refuses a Cloudflare runner whose size the operator switched off, as unavailable: known, never offered, never taken by its name", () => {
+    const off: RunnerInfo = {
+      id: "cf-8",
+      name: "Cloudflare Container 8 vCPU",
+      kind: "hosted",
+      unavailable: true,
+    };
+    const withOff = resolver({ runners: () => [HOSTED_4, off, DEVBOX] });
+    const found = result(lane(step({ runner: off.id })), withOff).errors;
+    expect(found.map((e) => [e.path, e.code])).toEqual([
+      ["/steps/0/runner", "runner_unavailable"],
+    ]);
+    expect(found[0]?.message).toContain("Cloudflare Container 8 vCPU");
+    expect(found[0]?.available).toEqual([HOSTED_4.id, DEVBOX.id]);
+    expect(found[0]?.message).not.toContain("cf-8 (");
+    // Its name is no way in either: the name of an unavailable runner is not "the name of a runner".
+    const byName = result(lane(step({ runner: off.name })), withOff).errors;
+    expect(byName.map((e) => e.code)).toEqual(["runner_unknown"]);
+  });
+
+  // #1158
+  it("accepts a Cloudflare runner that is on", () => {
+    const on: RunnerInfo = {
+      id: "cf-4",
+      name: "Cloudflare Container 4 vCPU",
+      kind: "hosted",
+    };
+    expect(
+      codes(
+        lane(step({ runner: on.id })),
+        resolver({ runners: () => [HOSTED_4, on, DEVBOX] }),
+      ),
+    ).toEqual([]);
+  });
+
   // #1105-R05
   it("fails closed when the resolver knows no runners", () => {
     const blind = resolver();
@@ -262,6 +298,26 @@ describe("the runner of an agent step (#1105)", () => {
     expect(codes(lane(step(claude)))).toEqual([
       ["/steps/0/runner", "harness_needs_runner"],
     ]);
+  });
+
+  // #1150-T16
+  it("lets a harness that is not OpenCode run on a hosted runner once the workspace has a Claude Code OAuth token, and says what is missing otherwise", () => {
+    const claude = { harness: "claude-code", model: LOGIN };
+    const withToken = resolver({ claudeCodeToken: () => true });
+    const without = resolver({ claudeCodeToken: () => false });
+
+    expect(codes(lane(step(claude)), withToken)).toEqual([]);
+    expect(codes(lane(step(claude)), without)).toEqual([
+      ["/steps/0/runner", "harness_needs_runner"],
+    ]);
+    // The message names the way out: the token under LLM keys.
+    expect(result(lane(step(claude)), without).errors[0]?.message).toContain(
+      "Claude Code OAuth token",
+    );
+    // A self-hosted runner needs no token to be valid: its own login may do (the runner announces it).
+    expect(
+      codes(lane(step({ ...claude, runner: DEVBOX.id })), without),
+    ).toEqual([]);
   });
 
   // #1105-R12

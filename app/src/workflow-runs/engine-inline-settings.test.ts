@@ -398,6 +398,8 @@ describe("an agent step with settings of its own, in the engine (#1105)", () => 
       id: "h-4",
       name: "Vercel Sandbox 4 vCPU",
       vcpus: 4,
+      placement: "vercel",
+      available: true,
       concurrency: 2,
     };
     const step = inlineStep({ runner: "h-4", setupScript: "npm ci" });
@@ -449,6 +451,8 @@ describe("an agent step with settings of its own, in the engine (#1105)", () => 
       id: "h-2",
       name: "Vercel Sandbox 2 vCPU",
       vcpus: 2,
+      placement: "vercel",
+      available: true,
       concurrency: 1,
     };
     const app = harness({

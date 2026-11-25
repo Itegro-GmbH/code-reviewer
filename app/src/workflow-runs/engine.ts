@@ -20,7 +20,11 @@
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type { NamedRunnersRepository } from "../db/repositories/named-runners-repository.ts";
-import { isRevoked, type NamedRunner } from "../named-runners/types.ts";
+import {
+  isRevoked,
+  isUnavailable,
+  type NamedRunner,
+} from "../named-runners/types.ts";
 import type {
   RunLock,
   StepOutcome,
@@ -1356,6 +1360,14 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           outcome: failed(
             "runner_not_found",
             "The runner of this step is not one of the workspace, or it was revoked. Save a new version of the lane that names a runner that exists.",
+          ),
+        };
+      // #1158: a Cloudflare size the operator switched off keeps its row; a turn on it would wait for a placement nobody serves.
+      if (isUnavailable(runner))
+        return {
+          outcome: failed(
+            "runner_not_found",
+            "The runner of this step is switched off on this server (a Cloudflare Container size the operator disabled). Save a new version of the lane that names another runner.",
           ),
         };
     }
