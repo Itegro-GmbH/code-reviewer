@@ -275,7 +275,7 @@ def test_claude_init_with_every_server_connected_names_nothing() -> None:
 
 
 # #1142-T11
-@pytest.mark.parametrize("status", ["failed", "pending", "needs-auth", "disabled"])
+@pytest.mark.parametrize("status", ["failed", "needs-auth", "disabled"])
 def test_claude_init_a_server_that_is_not_connected_is_named(status: str) -> None:
     found = unavailable_in_claude_init(
         init({"name": "Issues", "status": status}, {"name": "Docs", "status": "connected"}),
@@ -283,6 +283,16 @@ def test_claude_init_a_server_that_is_not_connected_is_named(status: str) -> Non
     )
 
     assert [endpoint.name for endpoint in found] == ["Issues"]
+
+
+# #1142-T11b
+def test_claude_init_a_pending_server_is_not_a_failure() -> None:
+    found = unavailable_in_claude_init(
+        init({"name": "Issues", "status": "pending"}, {"name": "Docs", "status": "connected"}),
+        endpoints(ISSUES, DOCS),
+    )
+
+    assert found == []
 
 
 # #1142-T12

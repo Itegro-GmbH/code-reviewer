@@ -66,6 +66,10 @@ def unavailable_detail(endpoints: Sequence[McpEndpoint]) -> str:
     )
 
 
+CLAUDE_PENDING: Final = "pending"
+"""Claude Code's word for a server that is still connecting when `init` is written."""
+
+
 def not_connected(
     statuses: Mapping[str, str], endpoints: Sequence[McpEndpoint]
 ) -> list[McpEndpoint]:
@@ -112,8 +116,10 @@ def _statuses(client: EngineClient, ledger: BudgetLedger) -> dict[str, str]:
 def unavailable_in_claude_init(
     init: Mapping[str, Any], endpoints: Sequence[McpEndpoint]
 ) -> list[McpEndpoint]:
-    """The endpoints of the step that the `system/init` line of Claude Code does not show as
-    `connected` (a status of any other word, or no entry at all). Servers the step did not name
+    """The endpoints of the step that the `system/init` line of Claude Code shows as not available:
+    a status other than `connected` or `pending`, or no entry at all. `pending` is not a failure:
+    Claude Code waits only a short time for a server before it writes `init`, and a slow server
+    (door, app proxy, remote server) keeps connecting after it. Servers the step did not name
     (the finish tool, or one a repository tried to add) are not looked at."""
     if not endpoints:
         return []
@@ -128,4 +134,8 @@ def unavailable_in_claude_init(
             name, status = entry.get("name"), entry.get("status")
             if isinstance(name, str) and isinstance(status, str):
                 statuses[name] = status
-    return not_connected(statuses, endpoints)
+    return [
+        endpoint
+        for endpoint in not_connected(statuses, endpoints)
+        if statuses.get(endpoint.key) != CLAUDE_PENDING
+    ]
