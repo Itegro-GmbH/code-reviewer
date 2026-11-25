@@ -70,6 +70,10 @@ async function LlmSettingsContent({
           keyStatuses: await llm.keyServiceFor(workspaceId).nativeStatuses(),
         }
       : undefined;
+  // #1150: the Claude Code OAuth token, where the factory runs the harness `claude-code`.
+  const claudeCodeToken = getCapabilities().has("implementer")
+    ? await llm.claudeCodeTokenFor(workspaceId).status()
+    : undefined;
   const catalogLabels =
     !canManage || nativeStatuses.length === 0
       ? new Map<string, string>()
@@ -107,6 +111,7 @@ async function LlmSettingsContent({
       {...(catalog === undefined ? {} : { catalog })}
       summary={summary}
       {...(keyChoice === undefined ? {} : { keyChoice })}
+      {...(claudeCodeToken === undefined ? {} : { claudeCodeToken })}
       showPlan={showPlan}
       showBilling={showBilling}
       // In the factory the LLM keys are a place of Setup, not of the settings (#1108); code-review.com keeps its settings page.
