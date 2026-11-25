@@ -570,7 +570,12 @@ describe("the fetch of a turn on several repositories on the harness claude-code
 // login keeps it (the runner's own login wins).
 const OAUTH_TOKEN =
   "sk-" + "ant-" + "oat01-WORKSPACETOKENWORKSPACETOKEN0123456789-abcdef_WXYZ";
-const HOSTED_FEATURES = [...NOW_FEATURES, "implementer_subscription_setup"];
+const TOKEN_FEATURE = "implementer_workspace_token";
+const HOSTED_FEATURES = [
+  ...NOW_FEATURES,
+  "implementer_subscription_setup",
+  TOKEN_FEATURE,
+];
 const DISPATCHER_ENGINES = ["implementer", "opencode", "pr-agent"];
 const TOKEN_ACCESS = [
   ...OPENCODE_ACCESS,
@@ -767,7 +772,7 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     const fetched = await h.worker.details(
       job.id,
       job.credential,
-      NOW_FEATURES.join(","),
+      [...NOW_FEATURES, TOKEN_FEATURE].join(","),
       undefined,
       undefined,
       "workspace",
@@ -779,9 +784,37 @@ describe("the claim of a turn on claude-code that runs on the token of the works
   });
 
   // #1150-T12
-  it("ends a turn on a runner without a login of its own, free, when the workspace has no token", async () => {
+  it("leaves the turn queued for a runner that has a login when the workspace has no token: a runner without one is no candidate and nothing fails", async () => {
     const h = await start();
-    const runner = await h.registerRunner({
+    const without = await h.registerRunner({
+      labels: ["box"],
+      manifest: TOKEN_ONLY,
+    });
+    const withLogin = await h.registerRunner({
+      labels: ["box"],
+      manifest: BOTH,
+    });
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
+    });
+
+    expect((await h.claim(claimOf(without.credential))).status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
+
+    const taken = await h.claim(claimOf(withLogin.credential));
+    expect(taken.status).toBe(200);
+    expect(((await taken.json()) as SplitClaimResponse).job).toMatchObject({
+      id: turn.job.id,
+      access: { harness: "claude-code", auth: "subscription" },
+    });
+  });
+
+  // #1150-T12
+  it("hands the runner without a login the turn as soon as the workspace stores a token", async () => {
+    const h = await start();
+    const without = await h.registerRunner({
       labels: ["box"],
       manifest: TOKEN_ONLY,
     });
@@ -790,13 +823,15 @@ describe("the claim of a turn on claude-code that runs on the token of the works
       runnerEnvironment: RUNNER_ENV,
       profile: PROFILE,
     });
+    expect((await h.claim(claimOf(without.credential))).status).toBe(204);
 
-    expect((await h.claim(claimOf(runner.credential))).status).toBe(204);
+    await saveToken(h);
+    const taken = await h.claim(claimOf(without.credential));
 
-    expect(await h.queue.get(turn.job.id)).toMatchObject({
-      status: "failed",
-      errorCode: "implementer_config_invalid",
-    });
+    expect(taken.status).toBe(200);
+    expect(((await taken.json()) as SplitClaimResponse).job.id).toBe(
+      turn.job.id,
+    );
   });
 
   // #1150-T13
@@ -824,14 +859,14 @@ describe("the claim of a turn on claude-code that runs on the token of the works
   });
 
   // #1150-T13
-  it("takes the token for a model the runner's login does not allow, as a runner without one does", async () => {
+  it("leaves a turn for a model the runner's login does not allow queued, as before: the token is not a way around the list of models of a login", async () => {
     const h = await start();
     await saveToken(h);
-    const runner = await h.registerRunner({
+    const haikuOnly = await h.registerRunner({
       labels: ["box"],
       manifest: {
         harnesses: [
-          ...TOKEN_ACCESS,
+          ...OPENCODE_ACCESS,
           {
             harness: "claude-code",
             version: "2.1.311",
@@ -842,20 +877,95 @@ describe("the claim of a turn on claude-code that runs on the token of the works
         capabilities: [],
       },
     });
-    await h.enqueueTurn({
+    const turn = await h.enqueueTurn({
       modelChoice: { provider: "claude-code", model: "opus" },
       runnerEnvironment: RUNNER_ENV,
       profile: PROFILE,
     });
 
-    const claim = await h.claim(claimOf(runner.credential));
+    expect((await h.claim(claimOf(haikuOnly.credential))).status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
+  });
 
-    expect(claim.status).toBe(200);
-    expect(((await claim.json()) as SplitClaimResponse).job.access).toEqual({
-      harness: "claude-code",
-      auth: "app-key",
-      model: "opus",
+  // #1150-T20
+  it("does not hand the token to a Worker that says it holds no login when the claim chose the runner's own login", async () => {
+    const h = await start();
+    await saveToken(h);
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: PROFILE,
     });
+    const claim = await h.claim(claimOf(runner.credential));
+    const { job } = (await claim.json()) as SplitClaimResponse;
+    expect(job.access).toMatchObject({ auth: "subscription" });
+
+    const fetched = await h.worker.details(
+      job.id,
+      job.credential,
+      [...NOW_FEATURES, TOKEN_FEATURE].join(","),
+      undefined,
+      undefined,
+      "workspace",
+    );
+
+    const input = (await turnInput(fetched)) as unknown as {
+      implementer: { subscription: Record<string, unknown> };
+    };
+    expect(input.implementer.subscription).not.toHaveProperty("oauthToken");
+    expect(JSON.stringify(input)).not.toContain(OAUTH_TOKEN);
+  });
+
+  // #1150-T21
+  it("leaves a hosted turn on the token queued for a Dispatcher whose image cannot run it: a claim that does not name the feature is no candidate", async () => {
+    const h = await start();
+    await saveToken(h);
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+    });
+
+    const old = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES.filter((name) => name !== TOKEN_FEATURE),
+    });
+
+    expect(old.status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
+    const current = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+    expect(current.status).toBe(200);
+  });
+
+  // #1150-T21
+  it("refuses the token to a Worker that does not name the feature, free: it would not read it", async () => {
+    const h = await start();
+    await saveToken(h);
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+    });
+    const response = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+    const { job } = (await response.json()) as SplitClaimResponse;
+
+    const fetched = await h.worker.details(
+      job.id,
+      job.credential,
+      HOSTED_FEATURES.filter((name) => name !== TOKEN_FEATURE).join(","),
+    );
+
+    expect(fetched.status).toBe(409);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.issuedJobTokens()).toEqual([]);
   });
 
   // #1150-T14

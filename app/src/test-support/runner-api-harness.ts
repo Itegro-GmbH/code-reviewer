@@ -26,6 +26,7 @@ import type {
 } from "../jobs/job-types.ts";
 import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { runnerAccessOf } from "../runner-api/runner-access.ts";
 import { createRunnerRegistrationApi } from "../runner-api/registration.ts";
 import {
   normalizeLabels,
@@ -551,6 +552,14 @@ export async function startRunnerApiHarness(
         ),
       claudeCodeToken: (workspaceId) =>
         llm.claudeCodeTokenFor(workspaceId).tokenForJob(),
+      runnerAccess: (job) =>
+        runnerAccessOf(
+          (workspaceId) =>
+            createRunnersRepository(fixture.db, workspaceId, {
+              now: fixture.clock.now,
+            }),
+          job,
+        ),
       startedByWorkflow: async (job) =>
         job.deliveryId !== null &&
         (await createWorkflowRunsRepository(

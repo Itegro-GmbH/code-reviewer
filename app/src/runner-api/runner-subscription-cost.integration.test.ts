@@ -123,8 +123,9 @@ describe("who may say that a job ran on a subscription", () => {
       profile: { ...PROFILE, harness: "claude-code" },
     });
     const claimed = await h.queue.claimNext("runner-a", IMPLEMENTER, {
-      // The token of the workspace reaches only a Dispatcher's claim (the per-job credential).
+      // The token of the workspace reaches only a Dispatcher's claim whose Worker image reads it.
       workerCredential: true,
+      acceptsWorkspaceLogin: true,
     });
     expect(claimed?.job.id).toBe(turn.job.id);
 

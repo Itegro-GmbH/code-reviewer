@@ -249,7 +249,7 @@ export function createRunnerDispatchesRepository(
           select announced_label
             from unnest(string_to_array(r.labels, E'\n')) as announced_label
            where lower(btrim(announced_label)) not like 'cr:%') || array[${RUNNER_LABEL_PREFIX} || r.id])
-        and ${accessRule(sql`coalesce(${announced} -> r.id, '[]'::jsonb)`, "t")}
+        and ${accessRule(sql`coalesce(${announced} -> r.id, '[]'::jsonb)`, "t", { requireToken: true })}
         and ${where}
       order by j.run_after, j.id, r.id
       limit ${limit}`.execute(db);

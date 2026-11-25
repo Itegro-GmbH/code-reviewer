@@ -306,6 +306,11 @@ export type ClaimDeps = {
    */
   claudeCodeToken: (workspaceId: string) => Promise<ClaudeCodeTokenForJob>;
   /**
+   * #1150: what the runner that holds the job announces now (its manifest without any `managed` entry), so that the fetch can tell whether the
+   * claim chose the runner's own login or the token. Empty for a job that no longer has a runner of the workspace.
+   */
+  runnerAccess: (job: Job) => Promise<readonly HarnessAccess[]>;
+  /**
    * #1053: the MCP runtime of one workspace (`mcp/job-proxy.ts`): which servers the agent step of a job may use, resolved in that workspace.
    * Left out where the deployment has none: no turn carries `mcp` then.
    */
@@ -1819,7 +1824,17 @@ async function prepareSubscription(
       ? "device"
       : "token";
   if (source === "token") {
-    const refused = tokenRefusal(await deps.claudeCodeToken(job.workspaceId));
+    const token = await deps.claudeCodeToken(job.workspaceId);
+    // A self-hosted runner without a login is a candidate only while the workspace holds a token (the rule of the claim), so a token that is
+    // gone by now was removed a moment ago: the turn goes back to the queue for a runner that has a login, and nothing fails. A hosted turn has
+    // no other taker, so the claim says what is missing.
+    if (onRunner && token.state === "none")
+      return {
+        kind: "retry",
+        reason: "claude_code_token_missing",
+        retryAfterSeconds: DEFAULT_RETRY_AFTER_SECONDS,
+      };
+    const refused = tokenRefusal(token);
     if (refused !== null) return refused;
   }
   if (job.leaseExpiresAt === null)
@@ -1930,8 +1945,17 @@ export async function buildSubscriptionJob(
   // the input, with the job's credential and nowhere else. A self-hosted runner's Worker keeps the login of its device (the runner's own login
   // wins and the token of the workspace is not even read) unless it says it holds none (`login=workspace`: the claim chose the token for it,
   // because the runner announced no login of its own).
+  // The app holds the Worker to what the claim chose: when the runner's manifest has a login of its device for this model the claim said `device`, and
+  // a Worker that asks for the token anyway is not given it (it has no login to fall back on if it really has none, and the turn fails there, free).
+  const needsToken =
+    !onRunner ||
+    (workspaceLogin &&
+      !deviceLoginServes(await deps.runnerAccess(job), choice.model));
   let oauthToken: string | undefined;
-  if (!onRunner || workspaceLogin) {
+  if (needsToken) {
+    // A Worker that does not read the field would refuse the job; one that does not say so is not sent the token at all, whatever its image is.
+    if (!features.includes("implementer_workspace_token"))
+      return refuse("implementer_engine_unavailable", "reason=workspace_token");
     const token = await deps.claudeCodeToken(job.workspaceId);
     const refused = tokenRefusal(token);
     if (refused !== null) return refused;
@@ -2480,6 +2504,10 @@ export async function handleClaim(
       // #1092: a turn on several repositories goes only to a caller that reads `implementer.repos`; for any other it waits in the queue.
       ...(features.includes("implementer_multi_repo")
         ? { acceptsMultiRepo: true }
+        : {}),
+      // #1150: a hosted turn on the token of the workspace goes only to a claim whose Worker image reads it.
+      ...(split && features.includes("implementer_workspace_token")
+        ? { acceptsWorkspaceLogin: true }
         : {}),
       ...(target.customerRunner === undefined
         ? {}

@@ -41,8 +41,9 @@ export type JobClaim = {
    */
   acceptsMultiRepo?: boolean;
   /**
-   * #1150: the claim is a Dispatcher's (it names `worker_credential`): its Worker fetches the input, which is where the Claude Code OAuth token
-   * of the workspace reaches a hosted turn. Without it a hosted turn on `claude-code` is not a candidate and stays queued.
+   * #1150: the claim names the feature `implementer_workspace_token`: the Dispatcher's Worker image reads `implementer.subscription.oauthToken`,
+   * which is where the Claude Code OAuth token of the workspace reaches a hosted turn. Without it a hosted turn on `claude-code` is not a
+   * candidate and stays queued for a Dispatcher whose image can run it (a snapshot built before this feature is the case).
    */
   acceptsWorkspaceLogin?: boolean;
   now: Date;
@@ -257,7 +258,7 @@ function claimQuery(
         and due.workspace_id = ${scope.customerRunner.workspaceId}
         and exists (
           select 1 from implementer_turns as routed
-          where routed.job_id = due.id and ${accessRule(entries, "routed")}
+          where routed.job_id = due.id and ${accessRule(entries, "routed", { requireToken: true })}
         )`;
   // #1092: a job whose session has `repos` goes only to a caller that reads them; for any other it is not a candidate (no error, no attempt).
   const multiRepoRule =

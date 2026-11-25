@@ -386,6 +386,11 @@ export type ClaimOptions = {
    */
   acceptsMultiRepo?: boolean;
   /**
+   * #1150: the caller named the claim feature `implementer_workspace_token`: its Worker image reads the Claude Code OAuth token of the workspace
+   * from the input. Without it a hosted turn on `claude-code` is not a candidate of the claim (it waits for a caller that has the feature).
+   */
+  acceptsWorkspaceLogin?: boolean;
+  /**
    * #854: the claim is a customer's runner's. It takes only the jobs of `workspaceId` whose required labels are all in `labels` (#971: the
    * labels of a customer's runner never include the reserved namespace `cr:`, except the label of its own id, `cr:runner:<runnerId>`,
    * ADR 0007 decision 10), and never a job of another kind. Without it the claim is
@@ -848,7 +853,7 @@ export function createRunnerJobsRepository(
          and exists (
            select 1 from implementer_turns as demanded
             where demanded.job_id = jobs.id
-              and ${accessRule(sql`coalesce(${servable} -> named.id, '[]'::jsonb)`, "demanded")})
+              and ${accessRule(sql`coalesce(${servable} -> named.id, '[]'::jsonb)`, "demanded", { requireToken: true })})
     )`;
   }
 
@@ -1280,8 +1285,8 @@ export function createRunnerJobsRepository(
             ...(claimOptions.acceptsMultiRepo === true
               ? { acceptsMultiRepo: true }
               : {}),
-            // #1150: only a Dispatcher's claim (the per-job credential) is handed a hosted turn on the token of the workspace.
-            ...(claimOptions.workerCredential === true
+            // #1150: only a claim that names `implementer_workspace_token` is handed a hosted turn on the token of the workspace.
+            ...(claimOptions.acceptsWorkspaceLogin === true
               ? { acceptsWorkspaceLogin: true }
               : {}),
           };

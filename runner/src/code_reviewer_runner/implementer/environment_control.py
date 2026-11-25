@@ -379,6 +379,18 @@ def control_from_environment(
     return HttpsControl(switch, post=post, pause_seconds=pause_seconds)
 
 
+def has_environment_control(environment: Mapping[str, str]) -> bool:
+    """Whether this Worker was started with a way to narrow the VM's outer network wall (#1150): the
+    https switch of a hosted Dispatcher (`DISPATCHER_PUBLIC_URL` is what makes it), or a socket to
+    the
+    host. A configuration that cannot be read is no control. Nothing is connected and nothing is
+    sent."""
+    try:
+        return control_from_environment(environment) is not None
+    except JobError:
+        return False
+
+
 def report_worker_end(
     environment: Mapping[str, str],
     exit_code: int,

@@ -64,6 +64,7 @@ from .claude_code.layer import LayerDaemon
 from .claude_code.login import ClaudeLogin
 from .claude_code.readiness import HarnessNotReady, ReadyHarness, ready_harness
 from .docker_api import DockerApi
+from .environment_control import has_environment_control
 from .environment_setup import EnvironmentSetup, log_output, run_environment_setup
 from .git_workspace import (
     GitIdentity,
@@ -631,6 +632,19 @@ def run_implementer_job(
                 duration_ms=_elapsed_ms(clock, started),
             )
         ready = looked
+        # #1150: the token of the workspace is in the agent's container, so the second wall (the
+        # VM's outer network policy) must be one this Worker can narrow. A hosted Dispatcher
+        # without a public URL has no network switch: the turn would run behind the inner door
+        # alone, and that is not enough for a login. Refused here, free, before any workspace or
+        # container exists.
+        if ready.workspace_token and not has_environment_control(environment):
+            return failure(
+                ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,
+                "network_switch_missing: this machine has no way to narrow its outer network wall, "
+                "and the Claude Code token of the workspace is not handed to an agent behind the "
+                "inner door alone",
+                duration_ms=_elapsed_ms(clock, started),
+            )
         if secrets_sink is not None:
             secrets_sink.append(ready.login.secret)
     # No answer is no lease: a process started without the channel never pushes.

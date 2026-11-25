@@ -13,11 +13,12 @@
 // Owner decision 2026-11-25 (issue #1150): a workspace stores the token the way a repository stores a secret for its CI,
 // and **no further restriction** applies: no scope per person, no limit on who may start a run that uses it. Whoever may
 // manage the LLM keys of the workspace (`manage_llm_key`) may set it, replace it and remove it.
+import { CLAUDE_CODE_TOKEN_SECRET_NAME } from "../secret-names/names.ts";
 import type { WorkspaceSecretStore } from "../secrets/workspace-store.ts";
 import type { SecretValue } from "../secrets/secret-value.ts";
 
 /** The slot of the token in the encrypted store of the workspace. The name never changes: the ciphertext is bound to it. */
-export const CLAUDE_CODE_TOKEN_SECRET_NAME = "claude_code_oauth_token";
+export { CLAUDE_CODE_TOKEN_SECRET_NAME };
 export type ClaudeCodeTokenSecretName = typeof CLAUDE_CODE_TOKEN_SECRET_NAME;
 
 /** What the token is made for (the binding stored beside it, compared again when it is used). */

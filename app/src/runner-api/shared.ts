@@ -66,6 +66,8 @@ import { HEARTBEAT_INTERVAL_SECONDS } from "./contract.ts";
 import { createReviewSettingsJobOptionsSource } from "./review-settings-job-options.ts";
 import { consoleRunnerApiLogger, describeError } from "./logger.ts";
 import { createKnownSecrets } from "./known-secrets.ts";
+import { runnerAccessOf } from "./runner-access.ts";
+import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { getClaimedKeys, getWriteTokens } from "./claimed-keys-shared.ts";
 import { errorResponse } from "./responses.ts";
 import { configuredRunnerToken } from "./token-auth.ts";
@@ -138,6 +140,11 @@ function sharedDeps(): WorkerApiDeps {
     // #1150: the Claude Code OAuth token of the job's own workspace, for a turn on the harness `claude-code` that runs on it.
     claudeCodeToken: (workspaceId) =>
       llm.claudeCodeTokenFor(workspaceId).tokenForJob(),
+    runnerAccess: (job) =>
+      runnerAccessOf(
+        (workspaceId) => createRunnersRepository(db, workspaceId),
+        job,
+      ),
     // #920: a turn a workflow step started is the only one that may ask: its delivery id is the request id of an agent step of this workspace.
     startedByWorkflow: async (job) =>
       job.deliveryId !== null &&

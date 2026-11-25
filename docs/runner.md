@@ -1173,13 +1173,20 @@ the first run (`subscription_auth`).
 2. **The token of the workspace is the fallback.** A runner whose device has **no login at all** (no credential in the store, no token file, no
    variable) announces `claude-code` as `app-key` ("I can run it on the token the workspace keeps in the app"), with no model list. A device
    whose credentials are only rate limited or refused for now is **withdrawn**, never swapped for the workspace's token behind its owner's
-   back. When the runner has a login but not for the model of the job, the claim takes the token for that job.
+   back. A runner announces either the `subscription` entry or the `app-key` entry, never both, so a runner whose login does not cover the
+   model of a job is simply not a candidate for it (the job stays queued, as before). **The entry only matters while the workspace holds a token**:
+   the routing rule (`accessRule` with `requireToken`, the same rule in memory with `workspaceToken`) lets the `app-key` entry meet a demand for
+   Claude Code only when the workspace has a token. Without one, a runner with no login is not a candidate and the job **stays queued** for a runner
+   that has a login, exactly as before the token existed; nothing fails because of which runner polled first. (The claim re-reads the token as it
+   builds the answer; a token removed in that moment sends the job back to the queue instead of failing it.)
 3. **A hosted Sandbox VM has only the token.** The platform's Dispatcher has an `app-key` entry for `claude-code` (`PLATFORM_ACCESS`), so a
    turn of a hosted environment (or of none) on `claude-code` is handed to it, and `claude-code` is selectable on hosted runners and
    environments when the workspace has the token.
-4. **No login anywhere**: the claim ends the job free with `implementer_config_invalid`, detail `reason=claude_code_token_missing` (or
-   `claude_code_token_unreadable` for a stored token that cannot be decrypted); the validator says so when the lane is saved (`harness_needs_runner`
-   with the way out), and the task form refuses it before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`).
+4. **No login for a hosted turn**: the claim ends the job free with `implementer_config_invalid`, detail `reason=claude_code_token_missing` (or
+   `claude_code_token_unreadable` for a stored token that cannot be decrypted; the same word for a runner whose token cannot be read): a hosted turn has no
+   other taker, so it is the one place the claim says what is missing. The validator says so when the lane is saved (`harness_needs_runner` with the way
+   out), and the task form refuses it before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`). For a self-hosted runner there is no terminal
+   refusal: see 2.
 
 ### How the token reaches a run, and what the agent can see
 
@@ -1187,7 +1194,19 @@ the first run (`subscription_auth`).
   input, as `implementer.subscription.oauthToken`, for a hosted turn and for a runner Worker that asked with `login=workspace`. It is the same
   channel that carries the git token. The Worker's masker knows it from that moment; the job process reads the input on its standard input.
   A Worker that does not send `login=workspace` is one of an earlier release and keeps the login of its device, so a runner of an older release
-  keeps working when the app is updated first.
+  keeps working when the app is updated first. **The app holds the Worker to what the claim chose**: for a turn of a runner the fetch looks at the
+  manifest the runner announces now, and when it has a login of its device for the model (the claim said `subscription`) the token is not put
+  into the input even if the Worker says `login=workspace`.
+- **The feature `implementer_workspace_token`.** Reading `oauthToken` is a claim feature (`WORKER_FEATURES` of the runner, `KnownClaimFeature` of the
+  contract). The fetch hands the token only to a Worker that names it (else the job ends free, `implementer_engine_unavailable`,
+  `reason=workspace_token`), and a **hosted** turn on the token is a candidate only of a Dispatcher's claim that names it. The Dispatcher names it
+  only when the Worker image of its active golden snapshot lists it (`IMAGE_GATED_CLAIM_FEATURES`, as for `implementer_multi_repo`), so **while a
+  snapshot built before this feature is live, hosted turns on the token wait in the queue** instead of starting a VM that would refuse them; the
+  snapshot is rebuilt by the release (`golden-snapshot.md`, "The Claude Code token needs a rebuilt snapshot").
+- **No outer wall, no token on a hosted VM.** The token is in the agent's container, so a Worker that holds the workspace's token (not a device
+  login) must be able to narrow the VM's outer network policy. A hosted Dispatcher without a public URL (`DISPATCHER_PUBLIC_URL`, the base of the
+  network switch) gives the Worker no way to; the turn is then refused free before any container exists (`implementer_engine_unavailable`, detail
+  `network_switch_missing`) instead of running behind the inner door alone. A turn on a device login is unchanged.
 - **The agent can read it.** The token is handed to Claude Code as `CLAUDE_CODE_OAUTH_TOKEN` in the environment of the `exec` that starts it, and the
   tools of the agent (Bash and the others) run in that environment: unlike an API key, which stays in the model door **outside** the container, a
   subscription token has to be in the process that talks to Anthropic. Claude Code's own option that would scrub it from the tools' environment
@@ -1196,7 +1215,8 @@ the first run (`subscription_auth`).
   before the token is handed over); the agent's network is forced to the rule `list` with `api.anthropic.com` on port 443 plus the hosts the step lists,
   read-only (`gates.py`), and a step cannot have an open network (`subscription_network_open`, `subscription_network_wildcard`); it is taken
   out of every step record, text, note, branch name, commit subject and log line of the turn (the agent's `Redactor` and the job's secrets), and out of
-  the result the app stores (`currentKeysFor`). **A run that is told to send the token somewhere it may reach (a host the lane lists) can send it**:
+  the result the app stores (`currentKeysFor`: the app masks the token that is current when the result arrives; a token replaced or removed during a run
+  is still caught by the runner's own redaction, which knows the token the run started with, and not by the app's second look, as for the LLM keys). **A run that is told to send the token somewhere it may reach (a host the lane lists) can send it**:
   the lane's author chooses the hosts. Treat the token as the credential of the person who stored it.
 - **Hosted VMs have no Claude Code layer** (we do not ship Claude Code: it is in no image of ours). The Worker builds the layer in the VM's own
   Docker the first time a turn needs it, exactly as a starting runner builds it (`ensure_layer`: the pinned version, each package accepted only with its own

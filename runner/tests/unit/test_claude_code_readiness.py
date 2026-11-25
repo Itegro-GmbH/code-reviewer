@@ -305,6 +305,7 @@ def test_a_machine_with_no_login_runs_the_job_on_the_token_of_the_workspace(tmp_
 
     assert isinstance(found, ReadyHarness)
     assert found.login.secret == WORKSPACE.secret and found.image == layer_tag(BASE, SPEC)
+    assert found.workspace_token, "the job says the login is not one of this machine"
     assert daemon.built == 0
 
 
@@ -331,6 +332,7 @@ def test_the_own_login_of_the_machine_wins_over_the_token_of_the_workspace(tmp_p
     assert isinstance(found, ReadyHarness)
     assert found.login.secret == TOKEN
     assert found.login.secret != WORKSPACE.secret
+    assert not found.workspace_token
 
 
 # #1150-R02
@@ -373,3 +375,15 @@ def test_a_process_is_said_to_hold_a_device_login_only_when_it_was_handed_one(
     assert not holds_device_login({"CLAUDE_CODE_OAUTH_TOKEN": ""})
     assert holds_device_login({"CLAUDE_CODE_OAUTH_TOKEN": TOKEN})
     assert holds_device_login({"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(tmp_path / "t")})
+
+
+# #1150-N04
+def test_a_machine_has_environment_control_only_when_it_was_started_for_one() -> None:
+    from code_reviewer_runner.implementer.environment_control import has_environment_control
+
+    assert not has_environment_control({})
+    assert not has_environment_control({"RUNNER_IMPLEMENTER_NETWORK_SWITCH": "  "})
+    assert not has_environment_control({"RUNNER_IMPLEMENTER_NETWORK_SWITCH": "not a switch"})
+    assert not has_environment_control({"RUNNER_ENVIRONMENT_CONTROL": "carrier-pigeon"})
+    assert has_environment_control({"RUNNER_ENVIRONMENT_CONTROL": "vsock"})
+    assert has_environment_control({"RUNNER_ENVIRONMENT_CONTROL": "unix"})

@@ -95,6 +95,9 @@ class ReadyHarness:
 
     login: ClaudeLogin
     image: str
+    # #1150: the login is the Claude Code token of the workspace that the job carried, not one of
+    # this machine: it is in the agent's container, so the outer wall must be narrowable.
+    workspace_token: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,7 +148,7 @@ def ready_harness(
         return HarnessNotReady(str(error))
     if layer is None:
         return HarnessNotReady(f"the layer with Claude Code {spec.version} is not on this daemon")
-    return ReadyHarness(login, layer.image)
+    return ReadyHarness(login, layer.image, workspace_token=build)
 
 
 __all__ = [

@@ -10,10 +10,13 @@ import { parseWorkerFeatures } from "../snapshot/worker-features.ts";
 
 /**
  * The claim features named only when the Worker image lists a feature of the same name (`SANDBOX_WORKER_FEATURES`, recorded
- * by the snapshot build from the image itself). `implementer_multi_repo` (#1090): the Worker reads `implementer.repos`.
+ * by the snapshot build from the image itself). `implementer_multi_repo` (#1090): the Worker reads `implementer.repos`; `implementer_workspace_token` (#1150): the Worker reads the workspace's Claude Code token.
  */
 export const IMAGE_GATED_CLAIM_FEATURES = [
   "implementer_multi_repo",
+  // #1150: the Worker reads `implementer.subscription.oauthToken`. A snapshot built before this release does not list it, so the Dispatcher
+  // does not name it, the App leaves a hosted turn on `claude-code` queued, and no VM starts that would refuse it.
+  "implementer_workspace_token",
 ] as const satisfies readonly KnownClaimFeature[];
 
 /** The gated features the image lists: none for an image whose list is absent, empty or unreadable. */

@@ -151,6 +151,28 @@ describe("the rule", () => {
     expect(accessMatches([{ ...token, auth: "local-key" }], any)).toBe(false);
   });
 
+  // #1150-T18
+  it("lets the token of the workspace stand in for a login only while the workspace has one", () => {
+    const token: HarnessAccess = {
+      harness: "claude-code",
+      version: "2",
+      auth: "app-key",
+    };
+    const any = demandOfTurn({ harness: "claude-code", modelChoice: OPUS });
+
+    expect(accessMatches([token], any, { workspaceToken: true })).toBe(true);
+    expect(accessMatches([token], any, { workspaceToken: false })).toBe(false);
+    // What nobody says about the token is the old rule: the entry is enough.
+    expect(accessMatches([token], any)).toBe(true);
+    // A login of the device never depends on the token, and OpenCode's key of the app is another matter.
+    expect(accessMatches([CLAUDE], any, { workspaceToken: false })).toBe(true);
+    expect(
+      accessMatches([OPENCODE], demandOfTurn({ modelChoice: OWN }), {
+        workspaceToken: false,
+      }),
+    ).toBe(true);
+  });
+
   it("finds a harness in a manifest by name alone (the base of every runner holds OpenCode)", () => {
     expect(announcesHarness([OPENCODE, CLAUDE], "opencode")).toBe(true);
     expect(announcesHarness([CLAUDE], "opencode")).toBe(false);

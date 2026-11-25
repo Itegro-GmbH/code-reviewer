@@ -86,6 +86,10 @@ export const CLAIM_FEATURES = [
   // handed to the agent, and reads the step's network rule for it (the listed hosts are read-only beside the model's own). Sent only to a
   // caller that named it; a `claude-code` turn with a script or a rule is refused (`implementer_engine_unavailable`, free) for one that did not.
   "implementer_subscription_setup",
+  // #1150: the Worker reads `implementer.subscription.oauthToken`, the Claude Code OAuth token of the workspace, and hands it to Claude Code as
+  // the login of the turn. Sent only to a caller that named it: a hosted turn on the token is not a candidate of a claim that did not (it waits for a
+  // Dispatcher whose image can run it), and a Worker that does not name it is refused the token (`implementer_engine_unavailable`, free).
+  "implementer_workspace_token",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 

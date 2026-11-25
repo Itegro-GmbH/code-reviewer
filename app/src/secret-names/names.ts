@@ -36,3 +36,10 @@ export const FIXED_SECRET_NAMES = [
   ...STRIPE_SECRET_NAMES,
 ] as const;
 export type FixedSecretName = (typeof FIXED_SECRET_NAMES)[number];
+
+/**
+ * The slot of the Claude Code OAuth token in the encrypted store of a workspace (#1150): one row of `workspace_secrets` per workspace, named
+ * like the LLM keys of a workspace (`llm_api_key…`) are, and not a provider's. The name never changes (the ciphertext is bound to it). Here so
+ * that the routing rule of the database can ask whether a workspace holds one without importing the LLM module.
+ */
+export const CLAUDE_CODE_TOKEN_SECRET_NAME = "claude_code_oauth_token";

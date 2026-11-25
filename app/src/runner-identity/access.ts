@@ -12,6 +12,7 @@
 // tests) and `accessRule` for the database (the claim and the pairing of the rings, which both use this fragment and nothing else). The integration test of
 // this rule runs a table of cases through both and demands the same answer.
 import { sql, type RawBuilder } from "kysely";
+import { CLAUDE_CODE_TOKEN_SECRET_NAME as WORKSPACE_TOKEN_SECRET_NAME } from "../secret-names/names.ts";
 import { CLAUDE_CODE_HARNESS, OPENCODE_HARNESS } from "./harness.ts";
 import { CLAUDE_MODEL_ALIASES, modelsAllow } from "./model-aliases.ts";
 
@@ -180,10 +181,16 @@ export function runnerCanServe(demand: AccessDemand): boolean {
 export function accessMatches(
   entries: readonly HarnessAccess[],
   demand: AccessDemand,
+  /**
+   * #1150: `workspaceToken: false` says the workspace has no Claude Code OAuth token, so the entry that can only run on it does not meet the demand.
+   * Left out, the token is not asked about (the validator and every caller that does not route a job).
+   */
+  options: { workspaceToken?: boolean } = {},
 ): boolean {
   const tokenToo =
     demand.auth === "subscription" &&
-    SUBSCRIPTION_HARNESSES.includes(demand.harness);
+    SUBSCRIPTION_HARNESSES.includes(demand.harness) &&
+    options.workspaceToken !== false;
   return entries.some(
     (entry) =>
       entry.harness === demand.harness &&
@@ -245,14 +252,28 @@ function aliasOfSql(name: RawBuilder<unknown>): RawBuilder<string | null> {
 export function accessRule(
   entries: RawBuilder<unknown>,
   turn: string,
+  /**
+   * #1150: `requireToken` makes the entry that can only run on the token of the workspace (`TOKEN_FALLBACK_AUTH`) meet a demand for the login of a
+   * device only when the workspace of the turn (`<turn>.workspace_id`) holds that token. A customer's runner without a login of its own is then
+   * not a candidate for a turn of a workspace that has none, and the turn stays queued for a runner that has a login, as it did before the
+   * token existed. The platform's claim leaves it off: for a hosted turn there is no other taker, and the claim says what is missing.
+   */
+  options: { requireToken?: boolean } = {},
 ): RawBuilder<boolean> {
   const demand = turnDemand(turn);
+  const tokenHeld =
+    options.requireToken === true
+      ? sql`exists (
+          select 1 from workspace_secrets as held
+          where held.workspace_id = ${sql.ref(`${turn}.workspace_id`)}
+            and held.name = ${WORKSPACE_TOKEN_SECRET_NAME}::text)`
+      : sql`true`;
   return sql<boolean>`exists (
     select 1 from jsonb_array_elements(${entries}) as announced
     where jsonb_typeof(${demand.choice}) = 'object'
       and announced ->> 'harness' = ${demand.harness}
       and (announced ->> 'auth' = ${demand.auth}
-        or (${demand.auth} = 'subscription' and announced ->> 'auth' = ${TOKEN_FALLBACK_AUTH}::text))
+        or (${demand.auth} = 'subscription' and announced ->> 'auth' = ${TOKEN_FALLBACK_AUTH}::text and ${tokenHeld}))
       and (${demand.model} is null
         or announced -> 'models' is null
         or exists (

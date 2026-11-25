@@ -122,6 +122,9 @@ WORKER_FEATURES: tuple[str, ...] = (
     # to the agent) and reads the step's network rule for it (the hosts besides the model's own are
     # read-only). Without it the app ends such a turn, free, instead of the Worker ignoring them.
     "implementer_subscription_setup",
+    # #1150: the Worker reads `implementer.subscription.oauthToken` (the Claude Code OAuth token of
+    # the workspace) and runs the turn on it when the machine has no login of its own.
+    "implementer_workspace_token",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"
