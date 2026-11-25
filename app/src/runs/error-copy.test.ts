@@ -339,6 +339,7 @@ describe("the sentences for the codes of a task", () => {
     "subscription_auth",
     "subscription_limit",
     "subscription_model_refused",
+    "mcp_unavailable",
     "agent_gave_up",
     "push_rejected",
     "branch_violation",

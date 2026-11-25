@@ -18,7 +18,7 @@ from code_reviewer_runner.dynamic_review.adapter import EngineError
 from code_reviewer_runner.dynamic_review.budget import LimitError
 from code_reviewer_runner.implementer.agent import CommandOutcome
 from code_reviewer_runner.implementer.claude_code.agent import ClaudeCodeAgent
-from code_reviewer_runner.implementer.claude_code.command import AGENT_USER
+from code_reviewer_runner.implementer.claude_code.command import AGENT_EXEC_USER, AGENT_USER
 from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin
 from code_reviewer_runner.implementer.preface import ResumeMode
 from code_reviewer_runner.result import ErrorCode
@@ -164,7 +164,7 @@ def test_a_turn_runs_claude_as_the_unprivileged_user_with_the_prompt_on_stdin() 
     agent_of(place).turn("Fix the bug")
 
     [run] = place.runs
-    assert run.user == AGENT_USER
+    assert run.user == AGENT_EXEC_USER
     assert run.stdin == b"Fix the bug"
     assert run.argv[:2] == ["claude", "-p"] and "Fix the bug" not in run.argv
     assert run.argv[run.argv.index("--session-id") + 1] == SESSION

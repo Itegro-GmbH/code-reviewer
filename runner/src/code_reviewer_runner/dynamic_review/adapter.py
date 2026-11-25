@@ -56,7 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from urllib.request import Request
 
 from code_reviewer_runner.dynamic_findings import (
@@ -373,6 +373,36 @@ class EngineClient:
             return False
         document = as_object(value)
         return document is not None and document.get("id") == session_id
+
+    def mcp_status(self, timeout: float) -> dict[str, str]:
+        """The status word of each MCP server the engine was configured with (`GET /mcp`, #1142):
+        `connected`, `failed`, `needs_auth`, `needs_client_registration` or `disabled`. The engine's
+        own message of a failure is not read: it may carry an address. An answer that is not an
+        object of objects is the engine's failure."""
+        status, body = self._call("GET", "/mcp", timeout=timeout)
+        document: dict[str, Any] | None = None
+        if status == 200:
+            try:
+                value: Any = json.loads(body)
+            except ValueError:
+                value = None
+            document = as_object(value)
+        if document is None:
+            raise EngineError(
+                ErrorCode.DYNAMIC_ENGINE_UNAVAILABLE, "the engine did not give its MCP status"
+            )
+        words: dict[str, str] = {}
+        for key, entry in document.items():
+            found = as_object(entry)
+            word = None if found is None else found.get("status")
+            words[key] = word if isinstance(word, str) else "unknown"
+        return words
+
+    def mcp_connect(self, key: str, timeout: float) -> None:
+        """Ask the engine to connect one MCP server again (`POST /mcp/<key>/connect`). Whether it
+        worked is the status that follows; a refusal is not raised."""
+        with contextlib.suppress(EngineError):
+            self._call("POST", f"/mcp/{quote(key, safe='')}/connect", timeout=timeout)
 
     def send_message(
         self,

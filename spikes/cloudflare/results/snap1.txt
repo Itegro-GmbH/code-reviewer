@@ -1,0 +1,13 @@
+public.ecr.aws/docker/library/docker:29.1.3-dind
+   [11.13 s rc=0] docker pull -q public.ecr.aws/docker/library/docker:29.1.3-dind
+   [7.12 s rc=0] sh -c dd if=/dev/urandom of=/root/blob.bin bs=1M count=600 status=none
+inner images: public.ecr.aws/docker/library/docker:29.1.3-dind 
+root used 408M avail 14760M
+--- docker save | load of the 511 MB dind image into a Sysbox inner daemon (the preload path):
+Loaded image: public.ecr.aws/docker/library/docker:29.1.3-dind
+   [19.61 s rc=0] sh -c docker save public.ecr.aws/docker/library/docker:29.1.3-dind | docker exec -i agent docker load | tail -1
+--- plain tar of the image (pigz):
+   [9.92 s rc=0] sh -c docker save public.ecr.aws/docker/library/docker:29.1.3-dind | pigz -1 > /root/dind.tgz
+130M
+
+ERR: 

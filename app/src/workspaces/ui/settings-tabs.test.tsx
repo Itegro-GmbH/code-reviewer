@@ -130,12 +130,13 @@ describe("the settings tabs", () => {
 
 describe("the second row of a tab", () => {
   // #925
-  it("lists the pages of General: the workspace, the read only review defaults and Advanced, and marks the current one (#1108)", () => {
+  it("lists the pages of General: the workspace, the read only review defaults, the connected AI apps (#1144) and Advanced, and marks the current one (#1108)", () => {
     tabs({ current: "review-defaults" });
 
     expect(linksOf("General pages")).toEqual([
       "Workspace",
       "Review defaults",
+      "Connected AI apps",
       "Advanced",
     ]);
     expect(
@@ -151,12 +152,17 @@ describe("the second row of a tab", () => {
     expect(linksOf("General pages")).toEqual([
       "Workspace",
       "Review defaults",
+      "Connected AI apps",
       "Advanced",
     ]);
     cleanup();
 
     tabs({ current: "", showAdvanced: false });
-    expect(linksOf("General pages")).toEqual(["Workspace", "Review defaults"]);
+    expect(linksOf("General pages")).toEqual([
+      "Workspace",
+      "Review defaults",
+      "Connected AI apps",
+    ]);
   });
 
   // #658-T02

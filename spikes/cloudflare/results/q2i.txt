@@ -1,0 +1,16 @@
+--- the agent's shape: Sysbox container (root = uid 165536 of the VM-container), probes from INSIDE it
+uid_map:  0 165536 65536
+devices: core fd full kmsg mqueue null ptmx pts random shm stderr stdin stdout tty urandom zero 
+mount: permission denied (are you root?)
+(tmpfs mount allowed inside own ns)
+AF_VSOCK: PermissionError(1, 'Operation not permitted')
+net: 
+wget: server returned error: HTTP/1.1 403 Forbidden
+(gateway:80 -> 0)
+--- the same probe in a plain runc container (no Sysbox), for contrast:
+AF_VSOCK: PermissionError(1, 'Operation not permitted')
+core fd full mqueue null ptmx pts random shm stderr stdin stdout tty urandom zero 
+
+
+ERR: 
+exit 0 ms 6880

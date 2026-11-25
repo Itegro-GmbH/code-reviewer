@@ -566,6 +566,29 @@ describe("triggers with pre-steps", () => {
     expect(
       codes(workflow([{ id: "weekly", kind: "schedule", cron: "0 6 *" }])),
     ).toEqual([["/triggers/0/cron", "invalid_value"]]);
+    // #1140-T06: the values are read, not only counted; and the message no longer says the schedule is reserved.
+    for (const cron of [
+      "61 6 * * *",
+      "0 6 * * MON",
+      "0 25 * * *",
+      "*/0 * * * *",
+    ])
+      expect(
+        codes(workflow([{ id: "weekly", kind: "schedule", cron }])),
+      ).toEqual([["/triggers/0/cron", "invalid_value"]]);
+    expect(
+      check(
+        workflow(
+          [{ id: "weekly", kind: "schedule", cron: "0 6 * * 0" }],
+          [comment("say", 7)],
+        ),
+      ).errors,
+    ).toEqual([]);
+    expect(
+      JSON.stringify(
+        check(workflow([{ id: "weekly", kind: "schedule" }])).errors,
+      ),
+    ).not.toMatch(/reserved|no run starts/);
     expect(
       codes(workflow([{ id: "push", kind: "pullRequest.pushed", label: "x" }])),
     ).toEqual([["/triggers/0/label", "unknown_field"]]);

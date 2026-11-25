@@ -52,9 +52,9 @@ from code_reviewer_runner.implementer.agent_container import (
 )
 from code_reviewer_runner.implementer.claude_code.agent import ClaudeCodeAgent
 from code_reviewer_runner.implementer.claude_code.command import (
+    AGENT_EXEC_USER,
     AGENT_HOME,
     AGENT_PATH,
-    AGENT_USER,
     EXECUTABLE,
 )
 from code_reviewer_runner.implementer.claude_code.gates import subscription_rule
@@ -224,7 +224,7 @@ def _version_check(
             api,
             container,
             [EXECUTABLE, "--version"],
-            user=AGENT_USER,
+            user=AGENT_EXEC_USER,
             env={"HOME": AGENT_HOME, "PATH": AGENT_PATH},
             timeout=VERSION_SECONDS,
             name="claude --version",

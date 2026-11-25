@@ -19,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 import pytest
 
@@ -50,9 +50,16 @@ from code_reviewer_runner.implementer.agent_container import (
     proxy_environment,
 )
 from code_reviewer_runner.implementer.claude_code.agent import ClaudePlace
-from code_reviewer_runner.implementer.docker_api import DockerApi
+from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.door_launcher import network_document
 from code_reviewer_runner.implementer.network_rule import MODE_LIST, OFF, NetworkRule
+from code_reviewer_runner.implementer.placement import (
+    DOOR_ADDRESS_VARIABLE,
+    HOSTED,
+    PLACEMENT_VARIABLE,
+    SPLIT,
+    placement_of,
+)
 from code_reviewer_runner.implementer.reader import (
     READER_CONTAINER_NAME,
     READER_WRITER_CONTAINER_NAME,
@@ -112,6 +119,9 @@ class Rig:
         env = dict(item.split("=", 1) for item in made.document.get("Env", []))
         self.execs.append((argv, env, made.document.get("WorkingDir")))
         if argv[:3] == ["/bin/sh", "-c", ac.WRITE_FILE_SCRIPT]:
+            self.written[argv[4]] = stdin.read()
+            return 0
+        if argv[:3] == ["/bin/sh", "-c", ac.SYSTEM_TRUST_SCRIPT]:
             self.written[argv[4]] = stdin.read()
             return 0
         if argv[:3] == ["/bin/sh", "-c", ac.RESTART_DOCKER_SCRIPT]:
@@ -374,6 +384,172 @@ def test_the_config_goes_in_through_an_exec_and_the_engine_starts_with_an_exec_n
         "a loopback listener of Control, not an address in the agent"
     )
     place.stop()
+
+
+# #1138-T02
+@pytest.mark.parametrize("split", [False, True], ids=["hosted", "incus-split"])
+def test_no_container_made_from_the_agent_image_has_a_docker_socket_of_the_vm_or_the_host(
+    split: bool,
+) -> None:
+    # The group opens the container's own socket only. What the agent's container is made with
+    # holds no bind or mount of any `docker.sock`, in either placement, with every option that
+    # adds a mount (a result directory, several repositories, the MCP door, a network rule).
+    placement = (
+        placement_of({PLACEMENT_VARIABLE: SPLIT, DOOR_ADDRESS_VARIABLE: "10.0.0.2"})
+        if split
+        else HOSTED
+    )
+    document = ac.agent_document(
+        AGENT_IMAGE_ID,
+        WORK_VOLUME,
+        2560 * 1024 * 1024,
+        rule=LIST_RULE,
+        result=True,
+        no_new_privileges=True,
+        placement=placement,
+        mcp=True,
+        places=places_of(("acme__app", "shared-lib")),
+    )
+
+    host = document["HostConfig"]
+    assert not host.get("Binds") and not host.get("Devices")
+    assert host.get("PidMode") in (None, "") and host.get("IpcMode") != "host"
+    mounts = host["Mounts"]
+    assert mounts and {m["Type"] for m in mounts} == {"volume"}, "volumes of Docker, no host path"
+    assert all("docker.sock" not in json.dumps(m) for m in mounts)
+    assert "docker.sock" not in json.dumps(document), "nowhere in the definition"
+    assert host["Privileged"] is split
+
+
+# #1138-T02
+def test_the_other_containers_made_from_the_agent_image_have_no_socket_either() -> None:
+    # The readers run from the same image, as `User 0:0`: the group is in /etc/group of the image,
+    # the socket is made by the init, which only the agent's container runs.
+    for document in (
+        reader_document(AGENT_IMAGE_ID, WORK_VOLUME, writable=True, result=True),
+        reader_document(AGENT_IMAGE_ID, WORK_VOLUME, places=places_of(("a", "b"))),
+        ac.agent_document(AGENT_IMAGE_ID, WORK_VOLUME, 2560 * 1024 * 1024),
+    ):
+        assert "docker.sock" not in json.dumps(document)
+        assert not document["HostConfig"].get("Binds")
+
+
+# #1138-T03
+def test_the_door_s_ca_goes_into_the_system_store_through_a_root_exec_with_the_content_on_stdin(
+    rig: Rig,
+) -> None:
+    place = container(rig)
+    place.create()
+
+    place.install_system_trust(b"-----BEGIN CERTIFICATE-----\nDOOR\n-----END CERTIFICATE-----\n")
+
+    (made,) = [e for e in rig.execs if e[0][:3] == ["/bin/sh", "-c", ac.SYSTEM_TRUST_SCRIPT]]
+    assert made[0][-1] == ac.SYSTEM_TRUST_PATH
+    assert rig.written[ac.SYSTEM_TRUST_PATH].startswith(b"-----BEGIN CERTIFICATE-----")
+    assert "DOOR" not in json.dumps(made[0]), "the content is on stdin, not in argv"
+    assert "update-ca-certificates" in ac.SYSTEM_TRUST_SCRIPT
+    assert ac.SYSTEM_TRUST_PATH.startswith("/usr/local/share/ca-certificates/")
+    assert ac.SYSTEM_TRUST_PATH.endswith(".crt")
+    place.stop()
+
+
+# #1138-T03
+def test_a_system_store_that_cannot_be_written_ends_the_turn_free(rig: Rig) -> None:
+    place = container(rig)
+    place.create()
+    rig.engine.exec_behaviour = lambda made, stdin, stdout: 1
+
+    with pytest.raises(JobError) as refused:
+        place.install_system_trust(b"CA")
+
+    assert refused.value.code is ErrorCode.SETUP_FAILED
+    place.stop()
+
+
+# #1138-T03
+def test_the_reason_a_trust_install_failed_is_in_the_error_clipped(rig: Rig) -> None:
+    place = container(rig)
+    place.create()
+
+    def refuses(made: FakeExec, stdin: BinaryIO, stdout: Any) -> int:
+        stdin.read()
+        stdout.write("sh: 1: update-ca-certificates: not found\n" + "x" * 2000)
+        return 127
+
+    rig.engine.exec_behaviour = refuses
+
+    with pytest.raises(JobError) as refused:
+        place.install_system_trust(b"CA")
+
+    assert refused.value.code is ErrorCode.SETUP_FAILED
+    detail = refused.value.detail
+    assert "exit code 127: sh: 1: update-ca-certificates: not found" in detail
+    assert len(detail) < 600, "clipped"
+    assert "exec 2>&1" in ac.SYSTEM_TRUST_SCRIPT, "the tool's stderr is part of what is read"
+    place.stop()
+
+
+# #1138-T03
+def test_an_exec_that_did_not_answer_says_so_in_the_error(rig: Rig) -> None:
+    place = container(rig)
+    place.create()
+    place._api = cast("Any", _ExecNeverRuns(place._api))  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(JobError) as refused:
+        place.install_system_trust(b"CA")
+
+    assert refused.value.code is ErrorCode.SETUP_FAILED
+    assert "cannot run" in refused.value.detail
+    place.stop()
+
+
+class _ExecNeverRuns:
+    """The daemon that refuses to make an exec."""
+
+    def __init__(self, real: DockerApi) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def create_exec(self, container: str, document: dict[str, Any]) -> str:
+        raise DockerError(500, "no")
+
+
+# #1009-T04, #1138-T03
+def test_an_adopted_container_gets_the_door_s_ca_in_its_own_system_store(rig: Rig) -> None:
+    adopted = script_container(rig)
+    place = adopted_container(rig, adopted, LIST_RULE)
+    place.create()
+
+    place.install_system_trust(b"-----BEGIN CERTIFICATE-----\nDOOR\n-----END CERTIFICATE-----\n")
+
+    assert rig.written[ac.SYSTEM_TRUST_PATH].startswith(b"-----BEGIN CERTIFICATE-----")
+    assert rig.engine.container(AGENT_CONTAINER_NAME).identifier == adopted.container
+    trust = [e for e in rig.engine.execs.values() if e.document["Cmd"][3:4] == ["trust"]]
+    assert [e.container for e in trust] == [AGENT_CONTAINER_NAME], "in the setup's container"
+    assert trust[0].document.get("User") is None, "as root: the exec names no user"
+    place.stop()
+
+
+# #1009-T04, #1138-T03
+def test_an_adopted_container_that_cannot_take_the_ca_ends_the_turn_free(rig: Rig) -> None:
+    # A setup script that, as root, removed `ca-certificates` or made the directory read-only.
+    place = adopted_container(rig, script_container(rig), LIST_RULE)
+    place.create()
+
+    def missing(made: FakeExec, stdin: BinaryIO, stdout: Any) -> int:
+        stdin.read()
+        stdout.write("update-ca-certificates: command not found\n")
+        return 127
+
+    rig.engine.exec_behaviour = missing
+
+    with pytest.raises(JobError) as refused:
+        place.install_system_trust(b"CA")
+
+    assert refused.value.code is ErrorCode.SETUP_FAILED
+    assert "update-ca-certificates: command not found" in refused.value.detail
 
 
 # #745-T21

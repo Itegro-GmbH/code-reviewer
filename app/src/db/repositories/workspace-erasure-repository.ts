@@ -234,6 +234,10 @@ export function createWorkspaceErasureRepository(
         .execute();
 
       for (const table of [
+        // The AI apps connected to the factory MCP (#1144): codes and tokens first, they point at their grant.
+        "factory_oauth_tokens",
+        "factory_oauth_codes",
+        "factory_oauth_grants",
         "installation_link_requests",
         "invitations",
         "workspace_members",

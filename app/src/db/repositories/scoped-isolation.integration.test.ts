@@ -20,6 +20,8 @@ import { createIntegrationsRepository } from "./integrations-repository.ts";
 import { createInvitationsRepository } from "./invitations-repository.ts";
 import { createWorkspaceMembersRepository } from "./workspace-members-repository.ts";
 import { createWorkspaceEntitlementsRepository } from "./workspace-entitlements-repository.ts";
+import { createFactoryOAuthDirectoryRepository } from "./factory-oauth-directory-repository.ts";
+import { createFactoryOAuthRepository } from "./factory-oauth-repository.ts";
 import { createWorkspaceErasureRepository } from "./workspace-erasure-repository.ts";
 import { createWorkspaceSecretsRepository } from "./workspace-secrets-repository.ts";
 import { createJobsRepository } from "./jobs-repository.ts";
@@ -97,6 +99,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     jiraWebhooks: createJiraWebhooksRepository(db, workspaceId),
     mcp: createMcpServersRepository(db, workspaceId),
     mcpOAuth: createMcpOAuthRepository(db, workspaceId),
+    factoryOAuth: createFactoryOAuthRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -747,7 +750,67 @@ async function seed(
     scopes: [],
     connectedBy: null,
   });
+  // The AI apps connected to the factory MCP (#1144): a client, a consented and connected grant with its code and tokens.
+  const factoryDirectory = createFactoryOAuthDirectoryRepository(db);
+  const factoryAt = "2026-11-25T10:00:00.000Z";
+  await factoryDirectory.insertClient({
+    id: `factory-client-${tag}`,
+    name: `Client ${tag}`,
+    redirectUris: ["http://127.0.0.1:1/cb"],
+    createdAt: factoryAt,
+  });
+  await factoryDirectory.insertRequest({
+    id: `factory-request-${tag}`,
+    clientId: `factory-client-${tag}`,
+    redirectUri: "http://127.0.0.1:1/cb",
+    state: null,
+    codeChallenge: "c".repeat(43),
+    scopes: [],
+    resource: "https://factory.example.test/api/mcp",
+    createdAt: factoryAt,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  });
+  await repos.factoryOAuth.approve({
+    requestId: `factory-request-${tag}`,
+    grant: {
+      id: `factory-grant-${tag}`,
+      workspaceId,
+      userId: `user-${tag}`,
+      clientId: `factory-client-${tag}`,
+      scopes: ["factory:control"],
+      resource: "https://factory.example.test/api/mcp",
+      createdAt: factoryAt,
+      connectedAt: null,
+      lastUsedAt: null,
+      revokedAt: null,
+    },
+    code: {
+      codeHash: `factory-code-${tag}`,
+      grantId: `factory-grant-${tag}`,
+      workspaceId,
+      clientId: `factory-client-${tag}`,
+      redirectUri: "http://127.0.0.1:1/cb",
+      codeChallenge: "c".repeat(43),
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      usedAt: null,
+    },
+    now: factoryAt,
+  });
+  await repos.factoryOAuth.markConnected(`factory-grant-${tag}`, factoryAt);
+  await factoryDirectory.insertTokens([
+    {
+      tokenHash: `factory-token-${tag}`,
+      kind: "access",
+      grantId: `factory-grant-${tag}`,
+      workspaceId,
+      createdAt: factoryAt,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      usedAt: null,
+    },
+  ]);
   return {
+    factoryGrantId: `factory-grant-${tag}`,
+    factoryClientId: `factory-client-${tag}`,
     mcpOAuthServerId: `mcp-oauth-${tag}`,
     mcpServerId: `mcp-${tag}`,
     jiraWebhookId: `jira-webhook-${tag}`,
@@ -993,6 +1056,24 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
+      .execute(),
+    factoryOAuthGrants: await db
+      .selectFrom("factory_oauth_grants")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    factoryOAuthCodes: await db
+      .selectFrom("factory_oauth_codes")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("code_hash")
+      .execute(),
+    factoryOAuthTokens: await db
+      .selectFrom("factory_oauth_tokens")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("token_hash")
       .execute(),
     mcpOAuthConnections: await db
       .selectFrom("mcp_oauth_connections")
@@ -2549,6 +2630,12 @@ const CASES: Case[] = [
     run: (a, b) => a.workflows.listWithStatusTrigger(b.repository.id),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
+  // #1140: the lanes a schedule starts are read in the workspace of the tick's repositories only
+  {
+    name: "workflows.listWithScheduleTrigger",
+    run: (a) => a.workflows.listWithScheduleTrigger(),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
   // #1129: the lanes a label put on a Jira issue starts are read in the workspace of the registration only
   {
     name: "workflows.listProjectWithIssueTrigger",
@@ -3270,6 +3357,73 @@ const CASES: Case[] = [
     run: (a, b) => a.mcp.removeUnlessUsed(b.mcpServerId),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ removed: false, reason: "not_found" }),
+  },
+  // The AI apps connected to the factory MCP (#1144-T90): B's grants, codes and tokens are not A's to list, approve into or revoke.
+  {
+    name: "factoryOAuth.list",
+    run: (a) => a.factoryOAuth.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        expect.objectContaining({ id: a.factoryGrantId, userName: a.userId }),
+      ]),
+  },
+  {
+    // #1144-T243: B's grant is not A's to mark as connected or as used.
+    name: "factoryOAuth.markConnected",
+    run: (a, b) =>
+      a.factoryOAuth.markConnected(
+        b.factoryGrantId,
+        "2026-11-25T12:00:00.000Z",
+      ),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "factoryOAuth.touch",
+    run: (a, b) =>
+      a.factoryOAuth.touch(b.factoryGrantId, "2026-11-25T12:00:00.000Z", 0),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "factoryOAuth.revoke",
+    run: (a, b) =>
+      a.factoryOAuth.revoke(b.factoryGrantId, "2026-11-25T11:00:00.000Z"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "factoryOAuth.approve",
+    run: (a, b) =>
+      a.factoryOAuth
+        .approve({
+          requestId: "nothing",
+          grant: {
+            id: "hijack",
+            workspaceId: b.workspaceId,
+            userId: b.userId,
+            clientId: b.factoryClientId,
+            scopes: ["factory:control"],
+            resource: "https://factory.example.test/api/mcp",
+            createdAt: "2026-11-25T11:00:00.000Z",
+            connectedAt: null,
+            lastUsedAt: null,
+            revokedAt: null,
+          },
+          code: {
+            codeHash: "hijack",
+            grantId: "hijack",
+            workspaceId: b.workspaceId,
+            clientId: b.factoryClientId,
+            redirectUri: "http://127.0.0.1:1/cb",
+            codeChallenge: "c".repeat(43),
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            usedAt: null,
+          },
+          now: "2026-11-25T11:00:00.000Z",
+        })
+        .then(
+          () => "approved",
+          () => "refused",
+        ),
+    expectAnswer: (answer) => expect(answer).toBe("refused"),
   },
   // The OAuth connections of MCP servers (#1051-T01): B's client, discovery and sealed tokens are not A's to read, start, store or refresh
   {

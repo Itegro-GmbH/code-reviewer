@@ -64,6 +64,11 @@ import { WorkflowRunError } from "./errors.ts";
 import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
 import { RUN_QUIET_MS, SWEEP_RUNS_MAX } from "./limits.ts";
 import { createLabelTrigger, type LabelTrigger } from "./label-trigger.ts";
+import {
+  createScheduleRunner,
+  type ScheduleRunner,
+} from "./schedule-trigger.ts";
+import { createScheduleDirectory } from "../db/repositories/schedule-directory-repository.ts";
 import { createStatusTrigger, type StatusTrigger } from "./status-trigger.ts";
 import {
   createJiraStatusTrigger,
@@ -517,6 +522,40 @@ export function labelTriggerFor(workspaceId: string): LabelTrigger {
     },
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+  });
+}
+
+/**
+ * The runner of the hourly tick that starts the runs of schedule triggers (#1140): it goes over every workspace that has a scheduled lane
+ * and works on each through repositories created for that workspace. The repository's default branch is read from GitHub only when a lane
+ * is due. The first steps of a run run after the response, as for a label.
+ */
+export function scheduleRunnerFor(): ScheduleRunner {
+  const db = getDatabase();
+  return createScheduleRunner({
+    workspaces: () => createScheduleDirectory(db).listWorkspaces(),
+    forWorkspace(workspaceId) {
+      const repositories = createRepositoriesRepository(db, workspaceId);
+      const projects = createProjectsRepository(db, workspaceId);
+      const reads = githubReads(workspaceId);
+      return {
+        workflows: createWorkflowsRepository(db, workspaceId),
+        runs: createWorkflowRunsRepository(db, workspaceId),
+        async projectOf(projectId) {
+          const project = await projects.getById(projectId);
+          return project === undefined
+            ? undefined
+            : { active: project.active, repositoryId: project.repositoryId };
+        },
+        async repositoryOf(repositoryId) {
+          const repository = await repositories.get(repositoryId);
+          if (repository === undefined || !repository.active) return undefined;
+          return reads.resolveRepository(repository.fullName);
+        },
+        kick: (runId) =>
+          runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+      };
+    },
   });
 }
 

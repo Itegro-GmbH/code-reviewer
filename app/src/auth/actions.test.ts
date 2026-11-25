@@ -130,6 +130,50 @@ describe("the GitHub button", () => {
     );
   });
 
+  // #1144-T193: a pending authorization request of an AI app travels through GitHub the same way
+  it("brings a person who came from an AI app back to the consent page, and an invitation still wins", async () => {
+    mocks.methods.mockResolvedValue({ emailPassword: true, github: true });
+    const request = "B".repeat(32);
+
+    await run(() => signInWithGithub(formWith({ oauth: request })));
+    expect(mocks.signInSocial).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        body: {
+          provider: "github",
+          callbackURL: `/oauth/consent?request=${request}`,
+        },
+      }),
+    );
+
+    const token = "A".repeat(43);
+    await run(() =>
+      signInWithGithub(formWith({ oauth: request, invitation: token })),
+    );
+    expect(mocks.signInSocial).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        body: {
+          provider: "github",
+          callbackURL: `/invitation?token=${token}`,
+        },
+      }),
+    );
+  });
+
+  // #1144-T194
+  it("keeps the request on the login page when the sign in cannot start, and carries only a request id", async () => {
+    mocks.methods.mockResolvedValue({ emailPassword: true, github: false });
+    const request = "C".repeat(32);
+
+    expect(
+      await run(() => signInWithGithub(formWith({ oauth: request }))),
+    ).toBe(`/login?error=sign_in_method_disabled&oauth=${request}`);
+    expect(
+      await run(() =>
+        signInWithGithub(formWith({ oauth: "https://evil.example" })),
+      ),
+    ).toBe("/login?error=sign_in_method_disabled");
+  });
+
   it.each([
     "https://evil.example/phish",
     "//evil.example",

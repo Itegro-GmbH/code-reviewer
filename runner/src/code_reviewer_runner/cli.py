@@ -21,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from typing import NoReturn, TextIO
 
 from code_reviewer_runner import __version__
-from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+from code_reviewer_runner.job_loop.worker_api import IMAGE_FEATURES, WORKER_FEATURES
 from code_reviewer_runner.probe import run_probe
 from code_reviewer_runner.worker_cli import run_once as run_worker_once
 
@@ -32,10 +32,11 @@ MODES = (MODE_WORKER_ONCE, MODE_PROBE)
 
 
 class _PrintWorkerFeatures(argparse.Action):
-    """`--worker-features`: print what this image's Worker reads of a job (`WORKER_FEATURES`),
-    comma separated, and exit. The golden image build (`docker/incus/build-golden.sh`, #1093) asks
-    the Worker image this and records the answer in the image, so that a runner announces a claim
-    feature only when the image it starts really has it. No startup, no network, no secret."""
+    """`--worker-features`: print what this image's Worker reads of a job (`WORKER_FEATURES`, and
+    `IMAGE_FEATURES`, which only the golden image reports), comma separated, and exit. The golden
+    image build (`docker/incus/build-golden.sh`, #1093) asks the Worker image this and records the
+    answer in the image, so that a runner announces a claim feature only when the image it starts
+    really has it. No startup, no network, no secret."""
 
     def __init__(self, option_strings: Sequence[str], dest: str, **_: object) -> None:
         super().__init__(
@@ -52,7 +53,7 @@ class _PrintWorkerFeatures(argparse.Action):
         values: object,
         option_string: str | None = None,
     ) -> NoReturn:
-        sys.stdout.write(",".join(WORKER_FEATURES) + "\n")
+        sys.stdout.write(",".join((*WORKER_FEATURES, *IMAGE_FEATURES)) + "\n")
         parser.exit(0)
 
 

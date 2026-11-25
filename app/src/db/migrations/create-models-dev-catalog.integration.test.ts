@@ -46,6 +46,11 @@ const LATER_TABLES = [
   "mcp_servers",
   "job_mcp_calls",
   "mcp_oauth_connections",
+  "factory_oauth_clients",
+  "factory_oauth_requests",
+  "factory_oauth_grants",
+  "factory_oauth_codes",
+  "factory_oauth_tokens",
   "job_rings",
 ];
 

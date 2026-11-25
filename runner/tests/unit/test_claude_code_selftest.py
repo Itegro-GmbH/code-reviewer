@@ -26,7 +26,7 @@ from code_reviewer_runner.factory_runner.claude_code_selftest import (
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.implementer.agent import CommandOutcome
 from code_reviewer_runner.implementer.agent_container import AgentSeams
-from code_reviewer_runner.implementer.claude_code.command import AGENT_USER
+from code_reviewer_runner.implementer.claude_code.command import AGENT_EXEC_USER
 from code_reviewer_runner.implementer.claude_code.layer import LayerSpec, layer_labels, layer_tag
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.implementer.git_process import Outcome
@@ -318,7 +318,7 @@ def test_the_version_is_asked_in_a_throwaway_container_with_no_network_as_the_ag
     assert TOKEN not in json.dumps(document)
     assert "r1" in json.dumps(document["Labels"]), "labelled with the runner, so a sweep finds it"
     assert name == "code-reviewer-selftest-agent"
-    assert rig.commands.users[-1] == AGENT_USER
+    assert rig.commands.users[-1] == AGENT_EXEC_USER
     assert rig.daemon.removed == ["cid"], "the container is removed"
 
 
@@ -379,7 +379,7 @@ def test_the_tiny_turn_runs_only_when_asked_and_with_the_forced_door_and_the_log
     assert (memory, rule) == (2048, door.rule)
     assert seams.image == layer_tag(BASE, SPEC) and seams.no_new_privileges is True
     [run] = rig.place.runs
-    assert run.user == AGENT_USER and run.argv[0] == "claude" and "-p" in run.argv
+    assert run.user == AGENT_EXEC_USER and run.argv[0] == "claude" and "-p" in run.argv
     assert run.argv[run.argv.index("--model") + 1] == "haiku"
     assert float(run.argv[run.argv.index("--max-budget-usd") + 1]) <= 0.5
     assert TOKEN not in " ".join(run.argv) and TOKEN in run.environment.values()

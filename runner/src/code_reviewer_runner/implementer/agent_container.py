@@ -48,6 +48,7 @@ crash) is seen by `wait` and named (`AgentEnd`).
 
 import contextlib
 import logging
+import re
 import shlex
 import socket
 import threading
@@ -65,6 +66,7 @@ from code_reviewer_runner.dynamic_review.model_door_route import (
 )
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.outer_proxy import NODE_PROXY_VARIABLE
 from code_reviewer_runner.result import ErrorCode
 
 from .agent import CommandOutcome
@@ -98,6 +100,8 @@ AGENT_TMP: Final = "/tmp"
 # OpenCode's port, on the container's loopback.
 ENGINE_PORT: Final = 4096
 AGENT_PIDS_LIMIT: Final = 16384
+# The data root of the container's own Docker (#1136).
+INNER_DOCKER_DIRECTORY: Final = "/var/lib/docker"
 # The most the kernel's OOM killer can be told to prefer (-1000..1000). Some memory the kernel
 # spends on a process is not charged to its memory cgroup (about 260 bytes of the 720 of a timer
 # or epoll object, measured on the VM's kernel 6.18), so a flood of them can take the whole VM's
@@ -204,6 +208,21 @@ TRUST_BUNDLE_NAME: Final = "network-door-bundle.pem"
 TRUST_CA_PATH: Final = f"{AGENT_CONFIG_DIRECTORY}/{TRUST_CA_NAME}"
 TRUST_BUNDLE_PATH: Final = f"{AGENT_CONFIG_DIRECTORY}/{TRUST_BUNDLE_NAME}"
 SYSTEM_ROOTS_PATH: Final = "/etc/ssl/certs/ca-certificates.crt"
+# #1138: some tools bring their own list of roots and read neither of the variables above (Turbopack
+# in `next build`, which fetches the fonts of `next/font/google` at build time). The CA also goes
+# into the container's system store, as root before the agent starts: `update-ca-certificates` (the
+# image's `ca-certificates` package) adds it to `/etc/ssl/certs/ca-certificates.crt` and the hashed
+# directory OpenSSL reads. `NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS=1` (the variable Next
+# names in its own error) makes Turbopack use the system's roots. A native-roots loader of the
+# rustls kind reads `SSL_CERT_FILE` (`TRUST_BUNDLE_PATH`, which holds the CA) first, else the
+# system store; both hold the CA, so either way the door's certificate is trusted. The probe on a
+# runner is what proves it (docs/runner.md).
+SYSTEM_TRUST_PATH: Final = "/usr/local/share/ca-certificates/code-reviewer-network-door.crt"
+# `exec 2>&1`: `run_exec` drops the standard error, and the reason `update-ca-certificates` gave
+# (a missing tool, a read-only directory) is what the turn's error says, clipped.
+SYSTEM_TRUST_SCRIPT: Final = 'exec 2>&1; umask 022 && cat > "$1" && update-ca-certificates'
+SYSTEM_TRUST_REASON_CHARS: Final = 300
+TURBOPACK_SYSTEM_TLS_VARIABLE: Final = "NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS"
 
 
 def trust_environment(rule: NetworkRule) -> dict[str, str]:
@@ -219,6 +238,7 @@ def trust_environment(rule: NetworkRule) -> dict[str, str]:
         "CURL_CA_BUNDLE": TRUST_BUNDLE_PATH,
         "PIP_CERT": TRUST_BUNDLE_PATH,
         "CARGO_HTTP_CAINFO": TRUST_BUNDLE_PATH,
+        TURBOPACK_SYSTEM_TLS_VARIABLE: "1",
     }
 
 
@@ -241,8 +261,70 @@ def proxy_environment(
         "https_proxy": url,
         "NO_PROXY": no_proxy,
         "no_proxy": no_proxy,
-        "NODE_USE_ENV_PROXY": "1",
+        NODE_PROXY_VARIABLE: "1",
     }
+
+
+def inner_docker_mount() -> dict[str, Any]:
+    """The data root of the container's own Docker on a volume of its own (#1136, Incus only).
+
+    Under Sysbox the runtime backs `/var/lib/docker` with a file system of the host, so the inner
+    containerd can mount overlayfs on it. Instance B has no Sysbox: left in the container's
+    writable layer, the data root is an overlay on B's overlay, which the kernel refuses to use as
+    the upper layer of another (`failed to mount ... overlay ... err: invalid argument`, at the
+    second layer of any image). An anonymous volume of B's Docker is a directory of B's own file
+    system: no host path, no bind, and it goes with B."""
+    return {
+        "Type": "volume",
+        "Target": INNER_DOCKER_DIRECTORY,
+        "ReadOnly": False,
+        "VolumeOptions": {"NoCopy": True},
+    }
+
+
+_VOLUME_NAME = re.compile(r"[0-9a-f]{64}")
+# The data root of B's own Docker (the default; nothing configures another), where a local volume's
+# directory is.
+_VOLUMES_DIRECTORY = "/var/lib/docker/volumes"
+
+
+def _anonymous_local_volume(mount: dict[str, Any]) -> bool:
+    """What the daemon reports of an anonymous volume of the local driver: a 64 hex name and its
+    own directory under the daemon's volumes. A named volume, another driver, or a local volume
+    with `o=bind` options (whose `Source` is a path of the host) is none of them."""
+    name = mount.get("Name")
+    return (
+        mount.get("Type") == "volume"
+        and isinstance(name, str)
+        and _VOLUME_NAME.fullmatch(name) is not None
+        and mount.get("Driver") == "local"
+        and mount.get("Source") == f"{_VOLUMES_DIRECTORY}/{name}/_data"
+    )
+
+
+def mount_problems(mounts: object, allowed: set[str], *, split: bool) -> list[str]:
+    """What is wrong with the container's mounts as the daemon reports them: a destination that was
+    not asked for, or (split) the inner Docker's data root as anything but exactly one anonymous
+    volume of the local driver, or missing."""
+    destinations: set[object] = set()
+    problems: list[str] = []
+    data_roots: list[dict[str, Any]] = []
+    for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
+        given = as_object(mount)
+        destination = None if given is None else given.get("Destination")
+        destinations.add(destination)
+        if given is not None and destination == INNER_DOCKER_DIRECTORY:
+            data_roots.append(given)
+    # Expected on the split placement: a container without it has an inner Docker that fails at the
+    # second layer of an image (#1136).
+    if split and (len(data_roots) != 1 or not _anonymous_local_volume(data_roots[0])):
+        problems.append("mounts")
+    wanted: set[object] = set(allowed)
+    if split:
+        wanted.add(INNER_DOCKER_DIRECTORY)
+    if destinations - wanted:
+        problems.append("mounts")
+    return problems
 
 
 def agent_document(
@@ -278,6 +360,8 @@ def agent_document(
     ]
     if result:
         mounts.append(result_mount(work_volume, AGENT_RESULT_DIRECTORY, read_only=False))
+    if placement.split:
+        mounts.append(inner_docker_mount())
     limits: dict[str, Any] = {"NanoCpus": nano_cpus} if nano_cpus > 0 else {}
     # #856: the Claude Code agent runs as an unprivileged user with the device's login in its
     # environment; nothing it runs may gain privileges (a setuid program, a file capability). The
@@ -733,15 +817,10 @@ class AgentContainer:
             self._seams.no_new_privileges
         ):
             problems.append("no-new-privileges")
-        destinations: set[object] = set()
-        for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
-            given = as_object(mount)
-            destinations.add(None if given is None else given.get("Destination"))
         allowed = set(self._seams.places.agent_paths)
         if self._result:
             allowed.add(AGENT_RESULT_DIRECTORY)
-        if destinations - allowed:
-            problems.append("mounts")
+        problems.extend(mount_problems(mounts, allowed, split=self._seams.placement.split))
         if problems:
             self._kill()
             raise unavailable(
@@ -822,6 +901,33 @@ class AgentContainer:
             )
             if done.returncode != 0 or done.unanswered:
                 raise unavailable("a file of the engine's configuration could not be written")
+
+    def install_system_trust(self, ca: bytes) -> None:
+        """Put the door's certificate authority (public, PEM) into the container's system store
+        (#1138): the standard input of a root exec that runs a constant script; the path is a
+        constant of the runner, the content goes in no argument."""
+        container = self._container
+        if container is None:
+            raise unavailable("there is no container")
+        done = run_exec(
+            self._api,
+            container,
+            ["/bin/sh", "-c", SYSTEM_TRUST_SCRIPT, "trust", SYSTEM_TRUST_PATH],
+            stdin=ca,
+            timeout=60.0,
+            name="install the door's certificate authority",
+        )
+        if done.returncode != 0 or done.unanswered:
+            # A hard failure, on purpose: a tool that cannot trust the door fails every connection
+            # the door ends. The reason is the exec's own output (public: a tool's message, never
+            # the certificate, which is on stdin), or what `run_exec` says of an exec that did not
+            # answer.
+            if done.unanswered:
+                why = done.stderr
+            else:
+                output = " ".join(done.stdout.split())[:SYSTEM_TRUST_REASON_CHARS]
+                why = f"exit code {done.returncode}" + (f": {output}" if output else "")
+            raise unavailable(f"the door's certificate authority could not be installed ({why})")
 
     def _exec_environment(self, environment: Mapping[str, str]) -> dict[str, str]:
         """The environment of an exec of the engine or of a tool of it. A container made for the

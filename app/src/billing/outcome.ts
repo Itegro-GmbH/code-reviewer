@@ -220,6 +220,8 @@ export const ERROR_CODE_CLASSES = {
   subscription_auth: "free",
   subscription_limit: "free",
   subscription_model_refused: "free",
+  // #1142: an MCP server of the step was not connected before the first prompt (also after one reconnect), so the agent never ran: free.
+  mcp_unavailable: "free",
   agent_gave_up: AI_COST_FAILURE_CLASS,
   no_result: AI_COST_FAILURE_CLASS,
   push_rejected: AI_COST_FAILURE_CLASS,

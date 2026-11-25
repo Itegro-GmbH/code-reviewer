@@ -9,6 +9,7 @@ import { connection } from "next/server";
 import { Suspense } from "react";
 import { signInWithGithub, signInWithPassword } from "@/auth/actions";
 import { invitationTokenOf, pathCarrying } from "@/auth/invitation-return";
+import { oauthRequestIdOf } from "@/auth/oauth-return";
 import { loginErrorMessage } from "@/auth/login-errors";
 import { passwordResetAvailable } from "@/auth/password-reset-request";
 import { AuthCard } from "@/components/auth-card";
@@ -24,6 +25,8 @@ import { getProductIdentity } from "@/product-identity/current";
 export type LoginPageData = {
   /** The invitation link the person came from, or null. */
   invitation: string | null;
+  /** The pending authorization request of an AI app (the factory MCP, #1144) the person came from, or null. */
+  oauth: string | null;
   /** Whether email and password sign-in is on. */
   emailPassword: boolean;
   /** Whether the sign-in with GitHub is on. */
@@ -58,8 +61,13 @@ async function LoginBoundary({
 export async function loadLoginPage(
   searchParams: PageProps<"/login">["searchParams"],
 ): Promise<LoginPageData> {
-  const { invitation: rawInvitation, error: rawError } = await searchParams;
+  const {
+    invitation: rawInvitation,
+    oauth: rawOauth,
+    error: rawError,
+  } = await searchParams;
   const invitation = invitationTokenOf(rawInvitation);
+  const oauth = oauthRequestIdOf(rawOauth);
   // The state of the instance, read once: the ways to sign in that are on, the sign-up rule, whether mail
   // can be sent.
   const facts = await getSignUpFacts();
@@ -71,6 +79,7 @@ export async function loadLoginPage(
     : { open: false as const };
   return {
     invitation,
+    oauth,
     emailPassword: methods.emailPassword,
     github: methods.github,
     signUpOpen: signUp.open,
@@ -125,6 +134,9 @@ export function LoginPageContent({ data }: { data: LoginPageData }) {
           {data.invitation === null ? null : (
             <input type="hidden" name="invitation" value={data.invitation} />
           )}
+          {data.oauth === null ? null : (
+            <input type="hidden" name="oauth" value={data.oauth} />
+          )}
           <Button type="submit">Sign in</Button>
           {data.canReset ? (
             <p className="text-sm text-muted-foreground">
@@ -151,6 +163,9 @@ export function LoginPageContent({ data }: { data: LoginPageData }) {
         >
           {data.invitation === null ? null : (
             <input type="hidden" name="invitation" value={data.invitation} />
+          )}
+          {data.oauth === null ? null : (
+            <input type="hidden" name="oauth" value={data.oauth} />
           )}
           <Button type="submit" variant="secondary">
             Sign in with GitHub

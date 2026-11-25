@@ -63,6 +63,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/api/internal/tracker-resync", class: "core" },
   // The nightly extension of the Jira webhooks the factory registered (#1039). Core on purpose, for the same reason as the resync above.
   { route: "/api/internal/jira-webhooks", class: "core" },
+  // The hourly tick that starts the runs of schedule triggers (#1140). Core on purpose, for the same reason: the handler answers `skipped` where there is no factory.
+  { route: "/api/internal/schedule-runs", class: "core" },
   { route: "/api/invitations/accept", class: "core" },
   { route: "/api/operator/v1/[...path]", class: "core" },
   { route: "/api/operator/v1/entitlements/default", class: "core" },
@@ -262,6 +264,36 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/mcp/oauth/callback", class: "implementer" },
+  // The factory MCP (#1144, epic #1143): the endpoint, the discovery documents (RFC 9728, RFC 8414), the OAuth server (registration,
+  // authorization, consent, token, revocation) and the "Connected AI apps" of the settings. Only a factory has something to control.
+  { route: "/api/mcp", class: "implementer", exact: true },
+  {
+    route: "/.well-known/oauth-protected-resource",
+    class: "implementer",
+    exact: true,
+  },
+  {
+    route: "/.well-known/oauth-protected-resource/api/mcp",
+    class: "implementer",
+    exact: true,
+  },
+  {
+    route: "/.well-known/oauth-authorization-server",
+    class: "implementer",
+    exact: true,
+  },
+  { route: "/api/oauth/register", class: "implementer" },
+  { route: "/api/oauth/token", class: "implementer" },
+  { route: "/api/oauth/revoke", class: "implementer" },
+  { route: "/api/oauth/consent", class: "implementer" },
+  { route: "/oauth/authorize", class: "implementer" },
+  { route: "/oauth/consent", class: "implementer" },
+  { route: "/api/w/[workspace]/ai-apps", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/ai-apps/[grantId]/revoke",
+    class: "implementer",
+  },
+  { route: "/w/[workspace]/settings/ai-apps", class: "implementer" },
   // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, the tabs of a project's
   // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory), the tabs of the
   // settings that moved there from `/connections` and `/members` (those stay as they were without the factory), and the review

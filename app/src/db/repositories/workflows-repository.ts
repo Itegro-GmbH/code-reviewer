@@ -142,6 +142,14 @@ export type WorkflowsRepository = {
   listProjectWithIssueTrigger(
     projectId: string,
   ): Promise<{ workflow: StoredWorkflow; current: StoredWorkflowVersion }[]>;
+  /**
+   * The lanes of the workspace (#1140) that are not archived, in an active project, whose current version names a schedule trigger
+   * (`schedule`), whatever their ticket source. A text match as well: the caller reads the document and decides. For the hourly tick that
+   * starts scheduled runs (`workflow-runs/schedule-trigger.ts`).
+   */
+  listWithScheduleTrigger(): Promise<
+    { workflow: StoredWorkflow; current: StoredWorkflowVersion }[]
+  >;
   /** The workflow with its current version, also when it is archived (its versions stay readable). */
   get(
     id: string,
@@ -245,11 +253,13 @@ export function createWorkflowsRepository(
   async function listWithTrigger(
     // A repository whose project's tickets are its GitHub issues, or (#1039) one project by its id, whatever its ticket source: the lanes
     // of a Jira project that a status change in Jira starts.
-    scope: { repositoryId: string } | { projectId: string },
+    scope:
+      { repositoryId: string } | { projectId: string } | { workspace: true },
     patterns: readonly string[],
   ): Promise<{ workflow: StoredWorkflow; current: StoredWorkflowVersion }[]> {
-    const byProject = "projectId" in scope;
-    const rows = await db
+    // A project, or the whole workspace (#1140): the ticket source plays no part, the provider filter below is for a repository's scope.
+    const repositoryScope = "repositoryId" in scope ? scope : undefined;
+    let query = db
       .selectFrom("workflows")
       .innerJoin("projects", "projects.id", "workflows.project_id")
       .innerJoin("workflow_versions", (join) =>
@@ -270,12 +280,6 @@ export function createWorkflowsRepository(
       .where("workflows.workspace_id", "=", workspaceId)
       .where("workflow_versions.workspace_id", "=", workspaceId)
       .where("workflows.archived_at", "is", null)
-      // The project row is one per repository: its repository is the repository of its ticket source (`ticket_source.repositoryId`).
-      .where(
-        byProject ? "projects.id" : "projects.repository_id",
-        "=",
-        byProject ? scope.projectId : scope.repositoryId,
-      )
       .where("projects.active", "=", encodeBoolean(true))
       .where((eb) =>
         eb.or(
@@ -283,17 +287,27 @@ export function createWorkflowsRepository(
             eb("workflow_versions.document", "like", pattern),
           ),
         ),
-      )
+      );
+    // The project row is one per repository: its repository is the repository of its ticket source (`ticket_source.repositoryId`).
+    if ("projectId" in scope)
+      query = query.where("projects.id", "=", scope.projectId);
+    else if (repositoryScope !== undefined)
+      query = query.where(
+        "projects.repository_id",
+        "=",
+        repositoryScope.repositoryId,
+      );
+    const rows = await query
       .orderBy("workflows.created_at")
       .orderBy("workflows.id")
       .execute();
     return rows
       .filter(
         (row) =>
-          byProject ||
+          repositoryScope === undefined ||
           readTicketSource(
             row.source_ticket_source,
-            scope.repositoryId,
+            repositoryScope.repositoryId,
             row.source_project_id,
             // The project list and the claim warn about a damaged source already; a lane list stays quiet.
             () => undefined,
@@ -344,6 +358,9 @@ export function createWorkflowsRepository(
 
     listProjectWithStatusTrigger: (projectId) =>
       listWithTrigger({ projectId }, ['%"ticket.statusChanged"%']),
+
+    listWithScheduleTrigger: () =>
+      listWithTrigger({ workspace: true }, ['%"schedule"%']),
 
     async get(id) {
       const workflow = await db

@@ -20,6 +20,7 @@
     {
       "path": "/api/internal/jira-webhooks?retry=pending",
       "schedule": "*/15 * * * *"
-    }
+    },
+    { "path": "/api/internal/schedule-runs", "schedule": "0 * * * *" }
   ]
 }

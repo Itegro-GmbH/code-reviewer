@@ -7,3 +7,4 @@ playwright-report
 test-results
 next-env.d.ts
 pnpm-lock.yaml
+src/factory-mcp/lane-schema/guide.generated.json

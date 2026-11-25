@@ -1,0 +1,80 @@
+--- pull through the door (enableInternet=false, HTTPS interception):
+1.37: Pulling from docker/library/busybox
+68fe9bff2ad4: Pulling fs layer
+9177639ff916: Download complete
+68fe9bff2ad4: Download complete
+68fe9bff2ad4: Pull complete
+Digest: sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+Status: Downloaded newer image for public.ecr.aws/docker/library/busybox:1.37
+public.ecr.aws/docker/library/busybox:1.37
+   [2.6 s rc=0] docker pull public.ecr.aws/docker/library/busybox:1.37
+3.21: Pulling from docker/library/alpine
+871d48e9bf6b: Pulling fs layer
+55971c3da804: Download complete
+3544a6103257: Download complete
+871d48e9bf6b: Download complete
+871d48e9bf6b: Pull complete
+Digest: sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab
+Status: Downloaded newer image for public.ecr.aws/docker/library/alpine:3.21
+public.ecr.aws/docker/library/alpine:3.21
+   [1.9 s rc=0] docker pull public.ecr.aws/docker/library/alpine:3.21
+--- run on default bridge (own netns, veth, NAT):
+default via 172.17.0.1 dev eth0 
+172.17.0.0/16 dev eth0 scope link  src 172.17.0.2 
+hello-from-inner
+   [0.6 s rc=0] docker run --rm public.ecr.aws/docker/library/busybox:1.37 sh -c ip -br a; ip r; echo hello-from-inner
+--- inner container reaches the internet via NAT? (HTTP port 80, door should answer)
+<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data:,><meta name=viewport content="width=dev
+--- inner container HTTPS (no CA in busybox, expect cert error or door answer):
+apk rc=2
+   [0.59 s rc=127] docker run --rm public.ecr.aws/docker/library/alpine:3.21 sh -c apk add --no-cache ca-certificates curl >/dev/null 2>&1; echo apk rc=$?; curl
+--- user-defined bridge network, two inner containers talk to each other:
+ok
+   [0.64 s rc=0] docker run --rm --network spk-net public.ecr.aws/docker/library/busybox:1.37 wget -q -O- -T 4 http://srv:8080/i
+--- --internal network (no exit)
+   [0.53 s rc=1] docker run --rm --network spk-int public.ecr.aws/docker/library/busybox:1.37 wget -q -O- -T 4 http://example.com
+PING 10.0.0.254 (10.0.0.254): 56 data bytes
+no-route-to-gateway
+   [0.55 s rc=0] docker run --rm --network spk-int public.ecr.aws/docker/library/busybox:1.37 sh -c ping -c1 -W2 10.0.0.254 || echo no-route-to-gateway
+--- host network
+   [0.41 s rc=0] docker run --rm --network host public.ecr.aws/docker/library/busybox:1.37 sh -c ip -br a | head -4
+-A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
+-A OUTPUT ! -d 127.0.0.0/8 -m addrtype --dst-type LOCAL -j DOCKER
+-A POSTROUTING -s 172.18.0.0/16 ! -o br-97c6d47478c6 -j MASQUERADE
+-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+
+ERR: ss|route|link|tunnel|neigh|rule [ARGS]
+
+OPTIONS := -f[amily] inet|inet6|link | -o[neline]
+
+ip addr add|del IFADDR dev IFACE | show|flush [dev IFACE] [to PREFIX]
+ip route list|flush|add|del|change|append|replace|test ROUTE
+ip link set IFACE [up|down] [arp on|off] [multicast on|off]
+	[promisc on|off] [mtu NUM] [name NAME] [qlen NUM] [address MAC]
+	[master IFACE | nomaster] [netns PID] [type TYPE ARGS]
+ip tunnel add|change|del|show [NAME]
+	[mode ipip|gre|sit] [remote ADDR] [local ADDR] [ttl TTL]
+ip neigh show|flush [to PREFIX] [dev DEV] [nud STATE]
+ip rule [list] | add|del SELECTOR ACTION
+sh: curl: not found
+Error response from daemon: network with name spk-net already exists
+Error response from daemon: network with name spk-int already exists
+wget: bad address 'example.com'
+ping: sendto: Network is unreachable
+BusyBox v1.37.0 (2024-09-26 21:31:42 UTC) multi-call binary.
+
+Usage: ip [OPTIONS] address|route|link|tunnel|neigh|rule [ARGS]
+
+OPTIONS := -f[amily] inet|inet6|link | -o[neline]
+
+ip addr add|del IFADDR dev IFACE | show|flush [dev IFACE] [to PREFIX]
+ip route list|flush|add|del|change|append|replace|test ROUTE
+ip link set IFACE [up|down] [arp on|off] [multicast on|off]
+	[promisc on|off] [mtu NUM] [name NAME] [qlen NUM] [address MAC]
+	[master IFACE | nomaster] [netns PID] [type TYPE ARGS]
+ip tunnel add|change|del|show [NAME]
+	[mode ipip|gre|sit] [remote ADDR] [local ADDR] [ttl TTL]
+ip neigh show|flush [to PREFIX] [dev DEV] [nud STATE]
+ip rule [list] | add|del SELECTOR ACTION
+
+exit 0 ms 10015

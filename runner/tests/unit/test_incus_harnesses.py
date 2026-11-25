@@ -16,7 +16,8 @@ from incus_support import FakeIncus, short_directory
 
 from code_reviewer_runner.factory_runner import config
 from code_reviewer_runner.factory_runner.config import RunnerConfig
-from code_reviewer_runner.factory_runner.incus.client import IncusError
+from code_reviewer_runner.factory_runner.incus import prepare
+from code_reviewer_runner.factory_runner.incus.client import IncusClient, IncusError
 from code_reviewer_runner.factory_runner.incus.harnesses import (
     PROPERTY_AGENT_IMAGE,
     PROPERTY_CLAUDE_CODE,
@@ -26,6 +27,8 @@ from code_reviewer_runner.factory_runner.incus.harnesses import (
     golden_harnesses,
 )
 from code_reviewer_runner.factory_runner.incus.prepare import prepare_incus
+from code_reviewer_runner.factory_runner.incus.settings import IncusSettings
+from code_reviewer_runner.factory_runner.selftest import CHECK_AGENT_DOCKER, Check
 from code_reviewer_runner.implementer.claude_code.layer import (
     CLAUDE_CODE_VERSION,
     LayerSpec,
@@ -34,6 +37,18 @@ from code_reviewer_runner.implementer.claude_code.layer import (
 from code_reviewer_runner.implementer.claude_code.readiness import VERSION_VARIABLE
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _agent_docker_is_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about the image's properties; the probe instance of the agent's Docker
+    (#1136) has its own tests (`test_incus_probe.py`)."""
+
+    def passed(settings: IncusSettings, client: IncusClient) -> Check:
+        return Check(CHECK_AGENT_DOCKER, True)
+
+    monkeypatch.setattr(prepare, "agent_docker_check", passed)
+
 
 AGENT_ID = "sha256:" + "cd" * 32
 SPEC = LayerSpec()

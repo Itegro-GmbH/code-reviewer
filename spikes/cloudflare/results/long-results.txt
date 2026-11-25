@@ -1,0 +1,5 @@
+Long runs (checked 2026-11-25 13:56:32 UTC; both instances still running, same microVM, uptime 37-50k s, never restarted):
+box a: standard-2, started 12:37:53, 2 min inactivity timeout, alarm keep-alive every 45 s, a process calling the door every 30 s.
+  78.7 minutes: 157 heartbeats seen by the door (expected 157), 104 alarms, process alive.
+box b: standard-1, started 12:50:53, 2 min inactivity timeout, alarm keep-alive every 45 s, a SILENT process (no outbound traffic).
+  65.7 minutes: 87 alarms (expected 87), process alive (its file was written 2 s before the check).

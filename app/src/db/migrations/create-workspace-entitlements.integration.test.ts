@@ -61,6 +61,11 @@ async function snapshot(
       table.name === "jira_webhooks" ||
       table.name === "mcp_servers" ||
       table.name === "mcp_oauth_connections" ||
+      table.name === "factory_oauth_clients" ||
+      table.name === "factory_oauth_requests" ||
+      table.name === "factory_oauth_grants" ||
+      table.name === "factory_oauth_codes" ||
+      table.name === "factory_oauth_tokens" ||
       table.name === "job_mcp_calls" ||
       table.name === "job_rings" ||
       table.name === "implementer_turn_steps" ||

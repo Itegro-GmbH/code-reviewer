@@ -9,6 +9,10 @@ import {
   PORTAL_REWRITE_HEADER,
   PROXY_SKIPPED_PATHS,
 } from "./src/admin/paths.ts";
+import {
+  FRAME_PROTECTED_SOURCES,
+  FRAME_PROTECTION_HEADERS,
+} from "./src/factory-mcp/oauth/frame-protection.ts";
 import { SETUP_PAGE, SETUP_REWRITE_HEADER } from "./src/setup/paths.ts";
 
 const nextConfig: NextConfig = {
@@ -27,6 +31,12 @@ const nextConfig: NextConfig = {
         source: "/:path(invitation|login|sign-up)",
         headers: [{ key: "Referrer-Policy", value: "no-referrer" }],
       },
+      // The pages where a person decides what an AI app may do (the factory MCP, #1144) cannot be framed: a page that framed the consent
+      // page invisibly could click "Approve" for the person (RFC 9700, 4.16). One entry for each, so a test can hold each.
+      ...FRAME_PROTECTED_SOURCES.map((source) => ({
+        source,
+        headers: [...FRAME_PROTECTION_HEADERS],
+      })),
     ];
   },
   async rewrites() {

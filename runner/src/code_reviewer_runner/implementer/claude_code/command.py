@@ -35,6 +35,13 @@ from .login import ClaudeLogin
 # host's), a fixed number the layer creates (`layer.py`).
 AGENT_UID: Final = 10201
 AGENT_USER: Final = f"{AGENT_UID}:{AGENT_UID}"
+# What the exec runs as (#1138). Not `AGENT_USER`: a Docker exec given `uid:gid` drops the
+# supplementary groups of /etc/group (measured, Docker 29), and the layer puts the user in the
+# image's `docker` group, the group of the agent's own daemon's socket. The name loads them, and
+# fails (no such user) where a bare uid would run with primary group 0. `AGENT_USER` stays the
+# owner the work directories are handed to.
+AGENT_NAME: Final = "agent"
+AGENT_EXEC_USER: Final = AGENT_NAME
 AGENT_HOME: Final = "/home/agent"
 AGENT_TMP: Final = "/tmp"
 # Claude Code's configuration, its credentials file and its sessions live in one directory.

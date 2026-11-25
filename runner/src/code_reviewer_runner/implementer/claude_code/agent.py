@@ -31,6 +31,10 @@ from code_reviewer_runner.dynamic_review.adapter import EngineError
 from code_reviewer_runner.dynamic_review.budget import LimitError
 from code_reviewer_runner.implementer.agent import AgentTurn, CommandOutcome, ResumeOutcome
 from code_reviewer_runner.implementer.mcp_config import McpEndpoint
+from code_reviewer_runner.implementer.mcp_ready import (
+    unavailable_detail,
+    unavailable_in_claude_init,
+)
 from code_reviewer_runner.implementer.preface import ResumeMode
 from code_reviewer_runner.implementer.result_channel import (
     AGENT_RESULT_DIRECTORY,
@@ -42,7 +46,14 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
 from code_reviewer_runner.resume_wire import ResumeReason
 
-from .command import AGENT_PATH, AGENT_USER, ClaudeCommand, SessionChoice, claude_environment
+from .command import (
+    AGENT_EXEC_USER,
+    AGENT_PATH,
+    AGENT_USER,
+    ClaudeCommand,
+    SessionChoice,
+    claude_environment,
+)
 from .events import ClaudeEvents, ClaudeResult, LineSplitter, parse_result
 from .login import OAUTH_VARIABLE, ClaudeLogin
 
@@ -143,6 +154,9 @@ class ClaudeCodeAgent:
         self._messages = 0
         self._ignored_lines = 0
         self._events = ClaudeEvents(self.session_id)
+        # #1142: set when the `system/init` line of the running process shows a server of the step
+        # that is not connected; the watch of the turn ends the turn on it.
+        self._mcp_failure: EngineError | None = None
 
     # -- the estimate ---------------------------------------------------------
 
@@ -275,7 +289,7 @@ class ClaudeCodeAgent:
                     self._place.run_streaming(
                         argv,
                         environment,
-                        user=AGENT_USER,
+                        user=AGENT_EXEC_USER,
                         stdin=prompt.encode("utf-8"),
                         timeout=remaining + TIMEOUT_MARGIN_SECONDS,
                         consume=consume,
@@ -293,6 +307,7 @@ class ClaudeCodeAgent:
         worker.start()
         try:
             while not finished.wait(WATCH_INTERVAL_SECONDS):
+                self._raise_mcp_failure()
                 check()
                 self._check_deadline()
         finally:
@@ -303,6 +318,7 @@ class ClaudeCodeAgent:
             self._ignored_lines += splitter.ignored
         if failure:
             raise failure[0]
+        self._raise_mcp_failure()
         self._check_deadline()
         if ended:
             return ended[-1]
@@ -310,7 +326,20 @@ class ClaudeCodeAgent:
         note = self._place.engine_end_note() or f"Claude Code ended without a result (exit {code})"
         raise EngineError(ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE, note)
 
+    def _raise_mcp_failure(self) -> None:
+        """A server of the step that was not connected is the turn's end, before anything it did
+        with fewer tools counts (#1142). The process is ended with the container, right after."""
+        failure = self._mcp_failure
+        if failure is not None:
+            raise failure
+
     def _take(self, event: dict[str, Any], ended: list[ClaudeResult]) -> None:
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            missing = unavailable_in_claude_init(event, self._mcp_endpoints)
+            if missing and self._mcp_failure is None:
+                self._mcp_failure = EngineError(
+                    ErrorCode.MCP_UNAVAILABLE, unavailable_detail(missing)
+                )
         if event.get("type") == "result":
             ended.append(parse_result(event, self._events.take_api_error()))
             return

@@ -34,6 +34,17 @@ describe("which paths are public", () => {
     // #932: the nightly resync of the ticket mirror, with the same credential.
     "/api/internal/tracker-resync",
     "/api/internal/jira-webhooks",
+    // #1140: the hourly tick of the schedule triggers, with the same credential.
+    "/api/internal/schedule-runs",
+    // #1144-T207: the factory MCP checks its own OAuth token; discovery, registration, token and revocation have no session.
+    "/api/mcp",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/api/mcp",
+    "/.well-known/oauth-authorization-server",
+    "/api/oauth/register",
+    "/api/oauth/token",
+    "/api/oauth/revoke",
+    "/oauth/authorize",
   ])("lets %s through without a session", (pathname) => {
     expect(isPublicPath(pathname)).toBe(true);
   });
@@ -59,6 +70,11 @@ describe("which paths are public", () => {
     "/api/admin/workspaces",
     "/api/internal",
     "/api/internal/anything-new",
+    // #1144-T208: the callback of an agent MCP server's own OAuth, the consent page and its post keep the sign in.
+    "/api/mcp/oauth/callback",
+    "/oauth/consent",
+    "/api/oauth/consent",
+    "/api/w/acme/ai-apps",
   ])("requires a session for %s", (pathname) => {
     expect(isPublicPath(pathname)).toBe(false);
   });
@@ -91,6 +107,12 @@ describe("which paths are public", () => {
     "/api/operator//v1/workspaces",
     "/API/operator/v1/workspaces",
     "/api/%6fperator/v1/workspaces",
+    "/api/mcp/",
+    "/api/mcpx",
+    "/api/oauth/tokenx",
+    "/api/oauth/token/extra",
+    "/oauth/authorize/extra",
+    "/.well-known/oauth-authorization-server/extra",
   ])("does not treat the look-alike %s as public", (pathname) => {
     expect(isPublicPath(pathname)).toBe(false);
   });
@@ -120,6 +142,14 @@ describe("which paths are public", () => {
       { path: "/api/internal/dispatch-sweep", match: "exact" },
       { path: "/api/internal/tracker-resync", match: "exact" },
       { path: "/api/internal/jira-webhooks", match: "exact" },
+      { path: "/api/internal/schedule-runs", match: "exact" },
+      { path: "/api/mcp", match: "exact" },
+      { path: "/.well-known/oauth-protected-resource", match: "prefix" },
+      { path: "/.well-known/oauth-authorization-server", match: "exact" },
+      { path: "/api/oauth/register", match: "exact" },
+      { path: "/api/oauth/token", match: "exact" },
+      { path: "/api/oauth/revoke", match: "exact" },
+      { path: "/oauth/authorize", match: "exact" },
     ]);
   });
 });

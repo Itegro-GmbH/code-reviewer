@@ -1852,6 +1852,75 @@ export interface McpOauthConnectionsTable {
   updated_at: string;
 }
 
+/**
+ * The AI apps that registered themselves with the OAuth server of the factory MCP (#1144, RFC 7591). Public clients: no secret.
+ * Instance level, not customer data.
+ */
+export interface FactoryOauthClientsTable {
+  id: string;
+  name: string;
+  /** JSON text: the registered redirect URIs. */
+  redirect_uris: string;
+  created_at: string;
+}
+
+/** An authorization request that waits for the person's consent (#1144); deleted when answered or expired. Instance level. */
+export interface FactoryOauthRequestsTable {
+  id: string;
+  client_id: string;
+  redirect_uri: string;
+  state: string | null;
+  code_challenge: string;
+  /** The scopes the client asked for, separated by a space; empty when it named none. */
+  scope: string;
+  resource: string;
+  created_at: string;
+  expires_at: string;
+}
+
+/** What a person approved: one workspace, one scope, one client (#1144). Customer data, workspace scoped. */
+export interface FactoryOauthGrantsTable {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  client_id: string;
+  /** `factory:read` or `factory:control`. */
+  scope: string;
+  /** The audience of every token of the grant: the MCP endpoint's address. */
+  resource: string;
+  created_at: string;
+  connected_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+/** The authorization code of a grant, hashed (#1144). Single use. */
+export interface FactoryOauthCodesTable {
+  /** SHA-256 of the code, hex. */
+  code_hash: string;
+  grant_id: string;
+  workspace_id: string;
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  expires_at: string;
+  used_at: string | null;
+}
+
+/** The access and refresh tokens of a grant, hashed (#1144). */
+export interface FactoryOauthTokensTable {
+  /** SHA-256 of the token, hex. */
+  token_hash: string;
+  grant_id: string;
+  workspace_id: string;
+  /** `access` or `refresh`. */
+  kind: string;
+  created_at: string;
+  expires_at: string;
+  /** A spent refresh token (rotation); null for an access token. */
+  used_at: string | null;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1877,6 +1946,11 @@ export interface Database {
   jira_webhooks: JiraWebhooksTable;
   mcp_servers: McpServersTable;
   mcp_oauth_connections: McpOauthConnectionsTable;
+  factory_oauth_clients: FactoryOauthClientsTable;
+  factory_oauth_requests: FactoryOauthRequestsTable;
+  factory_oauth_grants: FactoryOauthGrantsTable;
+  factory_oauth_codes: FactoryOauthCodesTable;
+  factory_oauth_tokens: FactoryOauthTokensTable;
   workspace_entitlements: WorkspaceEntitlementsTable;
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;

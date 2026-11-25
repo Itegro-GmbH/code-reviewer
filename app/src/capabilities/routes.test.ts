@@ -116,6 +116,7 @@ describe("the route classification", () => {
       "/api/internal/dispatch-sweep": "core",
       "/api/internal/tracker-resync": "core",
       "/api/internal/jira-webhooks": "core",
+      "/api/internal/schedule-runs": "core",
       "/instance-portal/billing/reviews": "billing",
       "/api/instance-portal/billing/webhook-endpoint": "billing",
       "/instance-portal/runs/[id]": "review",
