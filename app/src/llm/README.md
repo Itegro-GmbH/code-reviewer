@@ -296,6 +296,14 @@ additional authenticated data, a ciphertext moved to another provider's name, or
 - **Who.** `manage_llm_key` (Admin and Owner) sets, tests and removes it; every member reads the state.
 - **The rules for a key** are the legacy variable's (`checkLlmApiKey`): surrounding whitespace is ignored,
   whitespace or control characters inside and more than 4096 characters are refused (`api_key_invalid`).
+- **The Claude Code OAuth token (#1150).** A workspace may store what `claude setup-token` prints as a slot of the same encrypted store
+  (`claude-code-token.ts`, name `claude_code_oauth_token`, binding `claude-code`), set on the same page next to the provider keys: set, replace, test, remove, shown by
+  its last four characters, write-only, masked in results with the keys, in no log. It is **not a provider** (not in the registry, no models, price or address of ours),
+  so no list of providers shows it; routes `GET|PUT|DELETE /api/w/:workspace/llm-keys/claude-code` and `POST .../claude-code/test`
+  (`claude-code-token-http.ts`; static siblings of `[provider]`), `manage_llm_key` as for the keys, **no further restriction** (owner decision 2026-11-25).
+  **The test checks the shape of the token and sends nothing to Anthropic** (the card says so). Only runs of the harness `claude-code` read it
+  (`tokenForJob`); the order of the logins, what the agent can see and the hosted VMs are in [`docs/runner.md`](../../../docs/runner.md#claude-code-on-the-token-of-the-workspace-1150).
+
 - **Test key of a catalog provider and the pin (#588).** The test of a catalog provider is held to the addresses the workspace's
   projects pinned for it (`review-settings/pinned-addresses.ts`): when any pin of a project that uses the provider (switched on, Dynamic) is not the address the
   catalog trusts now, nothing is sent and the answer is `llm_provider_address_changed`, as the claim's is `provider_address_changed`. The

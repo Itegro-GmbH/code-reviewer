@@ -155,3 +155,13 @@ The Dispatcher has one Trigger, the Webhook-Trigger, and one Launcher, the Sandb
 | Golden snapshot pipeline | `pnpm --dir dispatcher snapshot:build`, workflow `golden-snapshot.yml` | exists |
 | Deploy canary | `pnpm --dir dispatcher probe:canary`, workflow `dispatcher-canary.yml` | exists |
 | Reaper for VMs that outlived a job | a Dispatcher cron, `/api/cron/reap-sandboxes` | exists (#364) |
+
+## Claude Code on the Sandbox-Launcher (#1150)
+
+The platform's own manifest (`PLATFORM_ACCESS`, `app/src/runner-identity/access.ts`) has an entry `claude-code` with `auth: app-key` besides OpenCode's: a hosted
+Sandbox VM can run a turn on the harness `claude-code` on the **Claude Code OAuth token the workspace stores under LLM keys**, which the App puts into the
+input the Worker fetches (never into the claim the Dispatcher reads). The claim of such a turn names `access: {harness: "claude-code", auth: "app-key", model}`, the
+size like any hosted turn, and the **model host `api.anthropic.com`**, so the network the Dispatcher narrows the VM to after the setup (the App, GitHub, the rule's hosts)
+also lets Claude Code reach its API. Only a Dispatcher's claim (`worker_credential`) can take such a turn; a claim that is not one leaves it queued. The VM holds no Claude
+Code in its image (we ship none): its Worker builds the layer on first use, before the narrowing. How the token and the logins are ordered, and what the agent can see:
+[`runner.md`](runner.md#claude-code-on-the-token-of-the-workspace-1150).
