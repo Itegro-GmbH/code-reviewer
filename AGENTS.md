@@ -20,6 +20,7 @@ and `CONTRIBUTING.md`.
 | `dispatcher/` | TypeScript on Hono (pnpm): claims jobs and starts Workers in Sandbox VMs (#316), and the golden snapshot pipeline; a project of the root pnpm workspace |
 | `fakes/` | Fake servers and fixtures shared by all test suites |
 | `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `package.json` | The pnpm workspace of `app/` and `dispatcher/`: one lockfile, a `catalog:` for the versions both share (#724) |
+| `cloudflare/sandbox/` | The Cloudflare Worker `cr-sandbox` and its Container image (#1159): one Durable Object and one Container per VM, the cf-sandbox API of `contracts/cf-sandbox.v1.json`; a pnpm project of its own like `website/`, built and deployed by `.github/workflows/cloudflare-sandbox.yml` (`cloudflare/sandbox/README.md`) |
 | `website/` | The code-review.com landing page: Astro, its own pnpm project (not part of the workspace), deployed by Cloudflare (`website/README.md`, `website/AGENTS.md`) |
 | `TESTING.md` | The testing strategy; source of truth for tests |
 | `Makefile` | One entry point per task for all parts |

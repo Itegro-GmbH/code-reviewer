@@ -1,0 +1,44 @@
+// cr-sandbox (#1159, epic #1157): the Worker of the Cloudflare placement. Everything this project creates in the account is named
+// cr-sandbox* (the Worker, the Durable Object classes, the container application, the image repository); the spike's cr-spike-* and the other
+// apps of the account are never touched. Deployed by .github/workflows/cloudflare-sandbox.yml, never by hand.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cr-sandbox",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "containers": [
+    {
+      "class_name": "CrSandboxVm",
+      "scheduling_policy": "durable_object",
+      // Layout P1 (docs/runner.md, "Cloudflare placement"): one Container per VM that holds Control, the doors and the agent under Sysbox.
+      // The image is built in CI (image/prepare-context.sh and image/build-inner.sh make image/generated/, the Dockerfile reads it); never on a developer machine.
+      "images": {
+        "base": {
+          "dockerfile": "./image/Dockerfile",
+          "build_context": "./image",
+        },
+      },
+    },
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "VM", "class_name": "CrSandboxVm" },
+      { "name": "REGISTRY", "class_name": "CrSandboxRegistry" },
+    ],
+  },
+  "exports": {
+    "CrSandboxVm": { "type": "durable-object", "storage": "sqlite" },
+    "CrSandboxRegistry": { "type": "durable-object", "storage": "sqlite" },
+  },
+  // Configuration only (docs/runner.md, "Cloudflare placement"): a larger size is a name here, and its resources in CUSTOM_INSTANCE_TYPES when it is
+  // not one of Cloudflare's own types. IMAGE_VERSION, WORKER_FEATURES, WORKER_IMAGE_ID and AGENT_IMAGE_ID are given by the workflow's `--var`
+  // flags (the git SHA and what the build read from the images). The secret CF_SANDBOX_TOKEN is set by `wrangler secret put`.
+  "vars": {
+    "INSTANCE_TYPES": "standard-4",
+    "MAX_VMS": "8",
+    "IMAGE_VERSION": "unknown",
+    "WORKER_FEATURES": "none",
+  },
+  "observability": { "enabled": false },
+}

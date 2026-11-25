@@ -1,0 +1,5 @@
+node_modules
+dist
+.wrangler
+image/generated
+pnpm-lock.yaml

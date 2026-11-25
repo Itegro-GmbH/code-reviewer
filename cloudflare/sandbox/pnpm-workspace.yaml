@@ -1,0 +1,5 @@
+# The Worker is a pnpm project of its own, like website/: not a member of the workspace at the repository root (#724), with its own
+# lockfile (cloudflare/sandbox/pnpm-lock.yaml), so that the app's and the Dispatcher's installs never pull wrangler and workerd.
+# Without this file pnpm walks up to the root pnpm-workspace.yaml and installs the root workspace instead.
+packages:
+  - "."
