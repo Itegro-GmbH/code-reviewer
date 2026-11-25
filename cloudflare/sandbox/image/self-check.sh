@@ -17,7 +17,7 @@ log="$(mktemp)"
 status=0
 docker run --name "$name" --privileged --cgroupns=private -e CR_SANDBOX_SELF_CHECK=1 \
   --volume /var/lib/docker --volume /var/lib/containerd \
-  "$image" /usr/local/sbin/cr-sandbox-boot.sh > "$log" 2> "$log.err" || status=$?
+  --entrypoint /usr/local/sbin/cr-sandbox-boot.sh "$image" > "$log" 2> "$log.err" || status=$?
 tail -n 40 "$log.err" >&2
 if [ "$status" != 0 ]; then echo "self-check: the boot script ended with $status" >&2; exit "$status"; fi
 cat "$log" >&2
