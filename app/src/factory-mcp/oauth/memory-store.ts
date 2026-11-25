@@ -36,7 +36,11 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
     tokens: new Map(),
   };
   const userOf = (id: string): MemoryUser =>
-    users.find((user) => user.id === id) ?? { id, name: id, email: `${id}@example.test` };
+    users.find((user) => user.id === id) ?? {
+      id,
+      name: id,
+      email: `${id}@example.test`,
+    };
 
   function dropGrantRows(grantId: string): void {
     for (const [hash, code] of state.codes)
@@ -62,8 +66,12 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
         for (const client of [...state.clients.values()]) {
           if (client.createdAt >= cutoff) continue;
           const used =
-            [...state.grants.values()].some((grant) => grant.clientId === client.id) ||
-            [...state.requests.values()].some((request) => request.clientId === client.id);
+            [...state.grants.values()].some(
+              (grant) => grant.clientId === client.id,
+            ) ||
+            [...state.requests.values()].some(
+              (request) => request.clientId === client.id,
+            );
           if (used) continue;
           state.clients.delete(client.id);
           removed += 1;
@@ -75,7 +83,9 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
       },
       async findRequest(id, now) {
         const request = state.requests.get(id);
-        return request !== undefined && request.expiresAt > now ? request : null;
+        return request !== undefined && request.expiresAt > now
+          ? request
+          : null;
       },
       async deleteRequest(id) {
         state.requests.delete(id);
@@ -86,8 +96,11 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
       },
       async findCode(codeHash): Promise<CodeLookup | null> {
         const code = state.codes.get(codeHash);
-        const grant = code === undefined ? undefined : state.grants.get(code.grantId);
-        return code === undefined || grant === undefined ? null : { code, grant };
+        const grant =
+          code === undefined ? undefined : state.grants.get(code.grantId);
+        return code === undefined || grant === undefined
+          ? null
+          : { code, grant };
       },
       async markCodeUsed(codeHash, now) {
         const code = state.codes.get(codeHash);
@@ -100,14 +113,27 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
       },
       async findToken(tokenHash): Promise<TokenLookup | null> {
         const token = state.tokens.get(tokenHash);
-        const grant = token === undefined ? undefined : state.grants.get(token.grantId);
-        const client = grant === undefined ? undefined : state.clients.get(grant.clientId);
-        if (token === undefined || grant === undefined || client === undefined) return null;
-        return { token, grant, client: { id: client.id, name: client.name }, user: userOf(grant.userId) };
+        const grant =
+          token === undefined ? undefined : state.grants.get(token.grantId);
+        const client =
+          grant === undefined ? undefined : state.clients.get(grant.clientId);
+        if (token === undefined || grant === undefined || client === undefined)
+          return null;
+        return {
+          token,
+          grant,
+          client: { id: client.id, name: client.name },
+          user: userOf(grant.userId),
+        };
       },
       async markRefreshUsed(tokenHash, now) {
         const token = state.tokens.get(tokenHash);
-        if (token === undefined || token.kind !== "refresh" || token.usedAt !== null) return false;
+        if (
+          token === undefined ||
+          token.kind !== "refresh" ||
+          token.usedAt !== null
+        )
+          return false;
         state.tokens.set(tokenHash, { ...token, usedAt: now });
         return true;
       },
@@ -119,7 +145,8 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
       async touchGrant(grantId, now, minIntervalMs) {
         const grant = state.grants.get(grantId);
         if (grant === undefined) return;
-        const last = grant.lastUsedAt === null ? 0 : Date.parse(grant.lastUsedAt);
+        const last =
+          grant.lastUsedAt === null ? 0 : Date.parse(grant.lastUsedAt);
         if (Date.parse(now) - last >= minIntervalMs)
           state.grants.set(grantId, { ...grant, lastUsedAt: now });
       },
@@ -127,10 +154,15 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
     scoped(workspaceId) {
       return {
         async approve({ requestId, grant, code, now }) {
-          if (grant.workspaceId !== workspaceId || code.workspaceId !== workspaceId)
+          if (
+            grant.workspaceId !== workspaceId ||
+            code.workspaceId !== workspaceId
+          )
             throw new Error("a grant of another workspace");
           if (!state.requests.delete(requestId)) return false;
-          const staleBefore = new Date(Date.parse(now) - 60 * 60 * 1000).toISOString();
+          const staleBefore = new Date(
+            Date.parse(now) - 60 * 60 * 1000,
+          ).toISOString();
           for (const [id, other] of state.grants)
             if (
               other.workspaceId === workspaceId &&
@@ -152,7 +184,9 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
                 grant.revokedAt === null &&
                 grant.connectedAt !== null,
             )
-            .sort((a, b) => (b.connectedAt ?? "").localeCompare(a.connectedAt ?? ""))
+            .sort((a, b) =>
+              (b.connectedAt ?? "").localeCompare(a.connectedAt ?? ""),
+            )
             .map((grant) => ({
               id: grant.id,
               clientId: grant.clientId,
@@ -166,7 +200,11 @@ export function createMemoryStore(users: readonly MemoryUser[]): MemoryStore {
         },
         async revoke(grantId, now) {
           const grant = state.grants.get(grantId);
-          if (grant === undefined || grant.workspaceId !== workspaceId || grant.revokedAt !== null)
+          if (
+            grant === undefined ||
+            grant.workspaceId !== workspaceId ||
+            grant.revokedAt !== null
+          )
             return false;
           state.grants.set(grantId, { ...grant, revokedAt: now });
           dropGrantRows(grantId);

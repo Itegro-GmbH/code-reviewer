@@ -49,7 +49,11 @@ export function chapterMarkdown(section: GuideSection): string {
 export function splitGuide(markdown: string): Guide {
   const intro: string[] = [];
   const sections: GuideSection[] = [];
-  let section: { title: string; lead: string[]; children: { title: string; lines: string[] }[] } | null = null;
+  let section: {
+    title: string;
+    lead: string[];
+    children: { title: string; lines: string[] }[];
+  } | null = null;
   let inFence = false;
 
   const closeSection = () => {
@@ -61,9 +65,14 @@ export function splitGuide(markdown: string): Guide {
       lead: section.lead.join("\n").trim(),
       children: section.children.map((child) => {
         let id = slugOf(child.title);
-        for (let n = 2; used.has(id); n += 1) id = `${slugOf(child.title)}-${n}`;
+        for (let n = 2; used.has(id); n += 1)
+          id = `${slugOf(child.title)}-${n}`;
         used.add(id);
-        return { id, title: child.title, markdown: child.lines.join("\n").trim() };
+        return {
+          id,
+          title: child.title,
+          markdown: child.lines.join("\n").trim(),
+        };
       }),
     });
   };
@@ -74,11 +83,18 @@ export function splitGuide(markdown: string): Guide {
     const part = inFence ? null : /^### (.+)$/.exec(line);
     if (chapter !== null) {
       closeSection();
-      section = { title: (chapter[1] as string).trim(), lead: [line], children: [] };
+      section = {
+        title: (chapter[1] as string).trim(),
+        lead: [line],
+        children: [],
+      };
     } else if (section === null) {
       intro.push(line);
     } else if (part !== null) {
-      section.children.push({ title: (part[1] as string).trim(), lines: [line] });
+      section.children.push({
+        title: (part[1] as string).trim(),
+        lines: [line],
+      });
     } else {
       const last = section.children[section.children.length - 1];
       (last === undefined ? section.lead : last.lines).push(line);

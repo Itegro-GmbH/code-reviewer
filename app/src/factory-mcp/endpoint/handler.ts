@@ -56,7 +56,10 @@ const JSON_RPC_PARSE_ERROR = {
   id: null,
 };
 
-function withHeaders(response: Response, extra: Record<string, string>): Response {
+function withHeaders(
+  response: Response,
+  extra: Record<string, string>,
+): Response {
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(extra)) headers.set(name, value);
   return new Response(response.body, { status: response.status, headers });
@@ -80,25 +83,47 @@ export function createMcpEndpoint({
   const metadata = resourceMetadataUrl(baseUrl);
 
   function challenge(parts: string[]): string {
-    return ["Bearer", [...parts, `resource_metadata="${metadata}"`].join(", ")].join(" ");
+    return [
+      "Bearer",
+      [...parts, `resource_metadata="${metadata}"`].join(", "),
+    ].join(" ");
   }
 
-  function unauthorized(problem: { error: string; description: string } | null): Response {
+  function unauthorized(
+    problem: { error: string; description: string } | null,
+  ): Response {
     const parts =
       problem === null
         ? ['scope="factory:read"']
-        : [`error="${problem.error}"`, `error_description="${problem.description}"`];
+        : [
+            `error="${problem.error}"`,
+            `error_description="${problem.description}"`,
+          ];
     return Response.json(
       problem === null
-        ? { error: "unauthorized", message: "Send an access token: Authorization: Bearer <token>." }
+        ? {
+            error: "unauthorized",
+            message: "Send an access token: Authorization: Bearer <token>.",
+          }
         : { error: problem.error, message: problem.description },
-      { status: 401, headers: { ...CORS, "cache-control": "no-store", "www-authenticate": challenge(parts) } },
+      {
+        status: 401,
+        headers: {
+          ...CORS,
+          "cache-control": "no-store",
+          "www-authenticate": challenge(parts),
+        },
+      },
     );
   }
 
   function insufficientScope(needed: string, name: string): Response {
     return Response.json(
-      { error: "insufficient_scope", message: `The tool ${name} needs the scope ${needed}. Connect again and approve ${needed}.`, requiredScope: needed },
+      {
+        error: "insufficient_scope",
+        message: `The tool ${name} needs the scope ${needed}. Connect again and approve ${needed}.`,
+        requiredScope: needed,
+      },
       {
         status: 403,
         headers: {
@@ -134,7 +159,10 @@ export function createMcpEndpoint({
   function serverFor(principal: Principal): Server {
     const server = new Server(
       { name: SERVER_NAME, version: SERVER_VERSION },
-      { capabilities: { tools: { listChanged: false } }, instructions: SERVER_INSTRUCTIONS },
+      {
+        capabilities: { tools: { listChanged: false } },
+        instructions: SERVER_INSTRUCTIONS,
+      },
     );
     const context = contextOf(principal);
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -143,31 +171,47 @@ export function createMcpEndpoint({
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema as { type: "object" },
-        annotations: { title: tool.title, readOnlyHint: tool.scope === "factory:read" },
+        annotations: {
+          title: tool.title,
+          readOnlyHint: tool.scope === "factory:read",
+        },
       })),
     }));
-    server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
-      const outcome = await registry.call(request.params.name, context, request.params.arguments);
-      if (outcome.ok)
+    server.setRequestHandler(
+      CallToolRequestSchema,
+      async (request): Promise<CallToolResult> => {
+        const outcome = await registry.call(
+          request.params.name,
+          context,
+          request.params.arguments,
+        );
+        if (outcome.ok)
+          return {
+            content: [{ type: "text", text: JSON.stringify(outcome.data) }],
+            structuredContent: outcome.data,
+          };
         return {
-          content: [{ type: "text", text: JSON.stringify(outcome.data) }],
-          structuredContent: outcome.data,
+          isError: true,
+          content: [{ type: "text", text: JSON.stringify(outcome.failure) }],
+          structuredContent: outcome.failure,
         };
-      return {
-        isError: true,
-        content: [{ type: "text", text: JSON.stringify(outcome.failure) }],
-        structuredContent: outcome.failure,
-      };
-    });
+      },
+    );
     return server;
   }
 
   /** The first `tools/call` in the body that names a tool the scopes do not allow, if any. */
-  function deniedCall(parsed: unknown, principal: Principal): { name: string; scope: string } | null {
+  function deniedCall(
+    parsed: unknown,
+    principal: Principal,
+  ): { name: string; scope: string } | null {
     const messages = Array.isArray(parsed) ? parsed : [parsed];
     for (const message of messages) {
       if (typeof message !== "object" || message === null) continue;
-      const { method, params } = message as { method?: unknown; params?: { name?: unknown } };
+      const { method, params } = message as {
+        method?: unknown;
+        params?: { name?: unknown };
+      };
       if (method !== "tools/call" || typeof params?.name !== "string") continue;
       const tool = registry.get(params.name);
       if (tool !== undefined && !scopeSatisfies(principal.scopes, tool.scope))
@@ -178,34 +222,55 @@ export function createMcpEndpoint({
 
   return {
     async handle(request: Request): Promise<Response> {
-      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+      if (request.method === "OPTIONS")
+        return new Response(null, { status: 204, headers: CORS });
 
       const authenticated = await service.authenticate(bearerOf(request));
       if (authenticated.kind === "error")
         return unauthorized(
           authenticated.error === "invalid_request"
             ? null
-            : { error: authenticated.error, description: authenticated.description },
+            : {
+                error: authenticated.error,
+                description: authenticated.description,
+              },
         );
 
       // Stateless: there is no stream to open and no session to end.
       if (request.method !== "POST")
         return Response.json(
-          { error: "method_not_allowed", message: "Send MCP messages with POST." },
-          { status: 405, headers: { ...CORS, allow: "POST, OPTIONS", "cache-control": "no-store" } },
+          {
+            error: "method_not_allowed",
+            message: "Send MCP messages with POST.",
+          },
+          {
+            status: 405,
+            headers: {
+              ...CORS,
+              allow: "POST, OPTIONS",
+              "cache-control": "no-store",
+            },
+          },
         );
 
       const body = await readLimitedBody(request, MCP_BODY_MAX_BYTES);
       if (!body.ok)
         return Response.json(
-          { jsonrpc: "2.0", error: { code: -32600, message: "The request is too large." }, id: null },
+          {
+            jsonrpc: "2.0",
+            error: { code: -32600, message: "The request is too large." },
+            id: null,
+          },
           { status: 413, headers: { ...CORS, "cache-control": "no-store" } },
         );
       let parsed: unknown;
       try {
         parsed = JSON.parse(body.text);
       } catch {
-        return Response.json(JSON_RPC_PARSE_ERROR, { status: 400, headers: { ...CORS, "cache-control": "no-store" } });
+        return Response.json(JSON_RPC_PARSE_ERROR, {
+          status: 400,
+          headers: { ...CORS, "cache-control": "no-store" },
+        });
       }
 
       const denied = deniedCall(parsed, authenticated.principal);
@@ -219,7 +284,9 @@ export function createMcpEndpoint({
       });
       try {
         await server.connect(transport);
-        const response = await transport.handleRequest(request, { parsedBody: parsed });
+        const response = await transport.handleRequest(request, {
+          parsedBody: parsed,
+        });
         return withHeaders(response, { ...CORS, "cache-control": "no-store" });
       } finally {
         await server.close().catch(() => undefined);

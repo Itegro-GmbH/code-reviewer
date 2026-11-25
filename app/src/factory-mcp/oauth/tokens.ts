@@ -3,7 +3,13 @@
 // The secrets of the OAuth server and the PKCE check. Every secret is 256 random bits with a prefix that names its kind (so a secret
 // scanner and a person reading a log can tell what leaked); the database keeps only the SHA-256 of it, so a copy of the table is no
 // credential. PKCE is S256 only (OAuth 2.1): the verifier's hash must equal the challenge of the authorization request.
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { REQUEST_ID_PATTERN } from "../../auth/oauth-return.ts";
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 
 export const SECRET_PREFIXES = {
   access: "fmcp_at_",
@@ -35,7 +41,7 @@ export function newRequestId(): string {
   return randomBytes(24).toString("base64url");
 }
 
-export const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{32}$/;
+export { REQUEST_ID_PATTERN };
 
 export function newRowId(): string {
   return randomUUID();

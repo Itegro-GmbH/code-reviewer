@@ -25,7 +25,9 @@ const USER: SessionUser = {
   image: null,
 };
 
-function setup(options: { signedIn?: boolean; registrationAllowed?: boolean } = {}) {
+function setup(
+  options: { signedIn?: boolean; registrationAllowed?: boolean } = {},
+) {
   const world = createWorld();
   const handlers = createOAuthHandlers({
     service: world.service,
@@ -37,11 +39,22 @@ function setup(options: { signedIn?: boolean; registrationAllowed?: boolean } = 
 }
 
 const jsonRequest = (url: string, body: unknown) =>
-  new Request(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-const formRequest = (url: string, params: URLSearchParams, headers: Record<string, string> = {}) =>
   new Request(url, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+const formRequest = (
+  url: string,
+  params: URLSearchParams,
+  headers: Record<string, string> = {},
+) =>
+  new Request(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      ...headers,
+    },
     body: params.toString(),
   });
 
@@ -63,7 +76,10 @@ describe("discovery documents", () => {
   // #1144-T101
   it("states what the authorization server does and does not support (RFC 8414)", async () => {
     const { handlers } = setup();
-    const metadata = (await handlers.authorizationServer().json()) as Record<string, unknown>;
+    const metadata = (await handlers.authorizationServer().json()) as Record<
+      string,
+      unknown
+    >;
     expect(metadata).toMatchObject({
       issuer: ISSUER,
       authorization_endpoint: `${ISSUER}/oauth/authorize`,
@@ -84,31 +100,52 @@ describe("registration endpoint", () => {
   it("answers 201 with the client and never caches it", async () => {
     const { handlers } = setup();
     const response = await handlers.register(
-      jsonRequest(`${ISSUER}/api/oauth/register`, { client_name: "Cursor", redirect_uris: [REDIRECT] }),
+      jsonRequest(`${ISSUER}/api/oauth/register`, {
+        client_name: "Cursor",
+        redirect_uris: [REDIRECT],
+      }),
     );
     expect(response.status).toBe(201);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toMatchObject({ client_name: "Cursor", token_endpoint_auth_method: "none" });
+    expect(await response.json()).toMatchObject({
+      client_name: "Cursor",
+      token_endpoint_auth_method: "none",
+    });
   });
 
   // #1144-T103
   it("refuses a bad body with an RFC 7591 error", async () => {
     const { handlers } = setup();
     const wrongType = await handlers.register(
-      new Request(`${ISSUER}/api/oauth/register`, { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" }),
+      new Request(`${ISSUER}/api/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: "{}",
+      }),
     );
     expect(wrongType.status).toBe(400);
     const notJson = await handlers.register(
-      new Request(`${ISSUER}/api/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" }),
+      new Request(`${ISSUER}/api/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{",
+      }),
     );
     expect(notJson.status).toBe(400);
     const badUri = await handlers.register(
-      jsonRequest(`${ISSUER}/api/oauth/register`, { redirect_uris: ["http://evil.example/cb"] }),
+      jsonRequest(`${ISSUER}/api/oauth/register`, {
+        redirect_uris: ["http://evil.example/cb"],
+      }),
     );
     expect(badUri.status).toBe(400);
-    expect(await badUri.json()).toMatchObject({ error: "invalid_redirect_uri" });
+    expect(await badUri.json()).toMatchObject({
+      error: "invalid_redirect_uri",
+    });
     const huge = await handlers.register(
-      jsonRequest(`${ISSUER}/api/oauth/register`, { client_name: "x".repeat(20_000), redirect_uris: [REDIRECT] }),
+      jsonRequest(`${ISSUER}/api/oauth/register`, {
+        client_name: "x".repeat(20_000),
+        redirect_uris: [REDIRECT],
+      }),
     );
     expect(huge.status).toBe(400);
   });
@@ -117,7 +154,9 @@ describe("registration endpoint", () => {
   it("answers 429 when the instance's counter says no, and registers nothing", async () => {
     const { handlers, world } = setup({ registrationAllowed: false });
     const response = await handlers.register(
-      jsonRequest(`${ISSUER}/api/oauth/register`, { redirect_uris: [REDIRECT] }),
+      jsonRequest(`${ISSUER}/api/oauth/register`, {
+        redirect_uris: [REDIRECT],
+      }),
     );
     expect(response.status).toBe(429);
     expect(world.store.state.clients.size).toBe(0);
@@ -125,7 +164,8 @@ describe("registration endpoint", () => {
 });
 
 describe("authorization endpoint", () => {
-  const url = (params: URLSearchParams) => new Request(`${ISSUER}/oauth/authorize?${params}`);
+  const url = (params: URLSearchParams) =>
+    new Request(`${ISSUER}/oauth/authorize?${params}`);
 
   // #1144-T105
   it("shows an error page, without any redirect, for an unknown client or an unregistered redirect URI", async () => {
@@ -146,14 +186,22 @@ describe("authorization endpoint", () => {
   it("sends a person with no session to the sign in, carrying the request, and a signed in one to the consent page", async () => {
     const out = setup({ signedIn: false });
     const { clientId } = await registerClient(out.world);
-    const toLogin = await out.handlers.authorize(url(authorizeParams(clientId)));
+    const toLogin = await out.handlers.authorize(
+      url(authorizeParams(clientId)),
+    );
     expect(toLogin.status).toBe(303);
-    expect(toLogin.headers.get("location")).toMatch(/^\/login\?oauth=[A-Za-z0-9_-]{32}$/);
+    expect(toLogin.headers.get("location")).toMatch(
+      /^\/login\?oauth=[A-Za-z0-9_-]{32}$/,
+    );
 
     const inn = setup();
     const client = await registerClient(inn.world);
-    const toConsent = await inn.handlers.authorize(url(authorizeParams(client.clientId)));
-    expect(toConsent.headers.get("location")).toMatch(/^\/oauth\/consent\?request=[A-Za-z0-9_-]{32}$/);
+    const toConsent = await inn.handlers.authorize(
+      url(authorizeParams(client.clientId)),
+    );
+    expect(toConsent.headers.get("location")).toMatch(
+      /^\/oauth\/consent\?request=[A-Za-z0-9_-]{32}$/,
+    );
   });
 
   // #1144-T107
@@ -161,19 +209,34 @@ describe("authorization endpoint", () => {
     const { handlers, world } = setup();
     const { clientId } = await registerClient(world);
     const response = await handlers.authorize(
-      url(authorizeParams(clientId, { code_challenge: undefined, code_challenge_method: undefined })),
+      url(
+        authorizeParams(clientId, {
+          code_challenge: undefined,
+          code_challenge_method: undefined,
+        }),
+      ),
     );
     const target = new URL(response.headers.get("location") as string);
-    expect(target.origin + target.pathname).toBe("http://127.0.0.1:33418/callback");
+    expect(target.origin + target.pathname).toBe(
+      "http://127.0.0.1:33418/callback",
+    );
     expect(target.searchParams.get("error")).toBe("invalid_request");
     expect(target.searchParams.get("state")).toBe("xyz");
   });
 });
 
 describe("consent and token endpoints, end to end", () => {
-  async function toConsent(handlers: ReturnType<typeof setup>["handlers"], clientId: string) {
-    const response = await handlers.authorize(new Request(`${ISSUER}/oauth/authorize?${authorizeParams(clientId)}`));
-    return new URL(response.headers.get("location") as string, ISSUER).searchParams.get("request") as string;
+  async function toConsent(
+    handlers: ReturnType<typeof setup>["handlers"],
+    clientId: string,
+  ) {
+    const response = await handlers.authorize(
+      new Request(`${ISSUER}/oauth/authorize?${authorizeParams(clientId)}`),
+    );
+    return new URL(
+      response.headers.get("location") as string,
+      ISSUER,
+    ).searchParams.get("request") as string;
   }
 
   // #1144-T108
@@ -182,32 +245,78 @@ describe("consent and token endpoints, end to end", () => {
     const { clientId } = await registerClient(world);
     const requestId = await toConsent(handlers, clientId);
     const consent = await handlers.consent(
-      formRequest(`${ISSUER}/api/oauth/consent`, new URLSearchParams({
-        request: requestId, decision: "approve", workspace: ACME.id, scope: "factory:control",
-      }), { "sec-fetch-site": "same-origin" }),
+      formRequest(
+        `${ISSUER}/api/oauth/consent`,
+        new URLSearchParams({
+          request: requestId,
+          decision: "approve",
+          workspace: ACME.id,
+          scope: "factory:control",
+        }),
+        { "sec-fetch-site": "same-origin" },
+      ),
       USER,
     );
     expect(consent.status).toBe(303);
-    const code = new URL(consent.headers.get("location") as string).searchParams.get("code") as string;
+    const code = new URL(
+      consent.headers.get("location") as string,
+    ).searchParams.get("code") as string;
 
-    const token = await handlers.token(formRequest(`${ISSUER}/api/oauth/token`, new URLSearchParams({
-      grant_type: "authorization_code", code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: VERIFIER, resource: RESOURCE,
-    })));
+    const token = await handlers.token(
+      formRequest(
+        `${ISSUER}/api/oauth/token`,
+        new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: REDIRECT,
+          client_id: clientId,
+          code_verifier: VERIFIER,
+          resource: RESOURCE,
+        }),
+      ),
+    );
     expect(token.status).toBe(200);
     expect(token.headers.get("cache-control")).toBe("no-store");
-    const body = (await token.json()) as { access_token: string; refresh_token: string; token_type: string; scope: string };
-    expect(body).toMatchObject({ token_type: "Bearer", scope: "factory:control" });
+    const body = (await token.json()) as {
+      access_token: string;
+      refresh_token: string;
+      token_type: string;
+      scope: string;
+    };
+    expect(body).toMatchObject({
+      token_type: "Bearer",
+      scope: "factory:control",
+    });
 
-    const refreshed = await handlers.token(formRequest(`${ISSUER}/api/oauth/token`, new URLSearchParams({
-      grant_type: "refresh_token", refresh_token: body.refresh_token, client_id: clientId,
-    })));
+    const refreshed = await handlers.token(
+      formRequest(
+        `${ISSUER}/api/oauth/token`,
+        new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: body.refresh_token,
+          client_id: clientId,
+        }),
+      ),
+    );
     expect(refreshed.status).toBe(200);
 
-    const revoked = await handlers.revoke(formRequest(`${ISSUER}/api/oauth/revoke`, new URLSearchParams({ token: body.access_token })));
+    const revoked = await handlers.revoke(
+      formRequest(
+        `${ISSUER}/api/oauth/revoke`,
+        new URLSearchParams({ token: body.access_token }),
+      ),
+    );
     expect(revoked.status).toBe(200);
-    const after = await handlers.token(formRequest(`${ISSUER}/api/oauth/token`, new URLSearchParams({
-      grant_type: "refresh_token", refresh_token: body.refresh_token, client_id: clientId,
-    })));
+    const after = await handlers.token(
+      formRequest(
+        `${ISSUER}/api/oauth/token`,
+        new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: body.refresh_token,
+          client_id: clientId,
+        }),
+      ),
+    );
     expect(after.status).toBe(400);
     expect(await after.json()).toMatchObject({ error: "invalid_grant" });
   });
@@ -217,19 +326,32 @@ describe("consent and token endpoints, end to end", () => {
     const { handlers, world } = setup();
     const { clientId } = await registerClient(world);
     const requestId = await toConsent(handlers, clientId);
-    const params = new URLSearchParams({ request: requestId, decision: "approve", workspace: ACME.id, scope: "factory:read" });
+    const params = new URLSearchParams({
+      request: requestId,
+      decision: "approve",
+      workspace: ACME.id,
+      scope: "factory:read",
+    });
     const crossSite = await handlers.consent(
-      formRequest(`${ISSUER}/api/oauth/consent`, params, { "sec-fetch-site": "cross-site" }),
+      formRequest(`${ISSUER}/api/oauth/consent`, params, {
+        "sec-fetch-site": "cross-site",
+      }),
       USER,
     );
     expect(crossSite.status).toBe(403);
     expect(world.store.state.grants.size).toBe(0);
     const noDecision = await handlers.consent(
-      formRequest(`${ISSUER}/api/oauth/consent`, new URLSearchParams({ request: requestId })),
+      formRequest(
+        `${ISSUER}/api/oauth/consent`,
+        new URLSearchParams({ request: requestId }),
+      ),
       USER,
     );
     expect(noDecision.status).toBe(400);
-    const json = await handlers.consent(jsonRequest(`${ISSUER}/api/oauth/consent`, {}), USER);
+    const json = await handlers.consent(
+      jsonRequest(`${ISSUER}/api/oauth/consent`, {}),
+      USER,
+    );
     expect(json.status).toBe(400);
   });
 
@@ -239,12 +361,20 @@ describe("consent and token endpoints, end to end", () => {
     const { clientId } = await registerClient(world);
     const requestId = await toConsent(handlers, clientId);
     const response = await handlers.consent(
-      formRequest(`${ISSUER}/api/oauth/consent`, new URLSearchParams({
-        request: requestId, decision: "approve", workspace: "ws-not-mine", scope: "factory:read",
-      })),
+      formRequest(
+        `${ISSUER}/api/oauth/consent`,
+        new URLSearchParams({
+          request: requestId,
+          decision: "approve",
+          workspace: "ws-not-mine",
+          scope: "factory:read",
+        }),
+      ),
       USER,
     );
-    expect(response.headers.get("location")).toBe(`/oauth/consent?request=${requestId}&error=workspace_invalid`);
+    expect(response.headers.get("location")).toBe(
+      `/oauth/consent?request=${requestId}&error=workspace_invalid`,
+    );
     expect(world.store.state.grants.size).toBe(0);
   });
 
@@ -252,12 +382,23 @@ describe("consent and token endpoints, end to end", () => {
   it("answers token errors as RFC 6749 JSON, and refuses the wrong content type", async () => {
     const { handlers } = setup();
     const wrongType = await handlers.token(
-      new Request(`${ISSUER}/api/oauth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
+      new Request(`${ISSUER}/api/oauth/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
     );
     expect(wrongType.status).toBe(400);
     expect(await wrongType.json()).toMatchObject({ error: "invalid_request" });
-    const unsupported = await handlers.token(formRequest(`${ISSUER}/api/oauth/token`, new URLSearchParams({ grant_type: "password" })));
-    expect(await unsupported.json()).toMatchObject({ error: "unsupported_grant_type" });
+    const unsupported = await handlers.token(
+      formRequest(
+        `${ISSUER}/api/oauth/token`,
+        new URLSearchParams({ grant_type: "password" }),
+      ),
+    );
+    expect(await unsupported.json()).toMatchObject({
+      error: "unsupported_grant_type",
+    });
   });
 
   // #1144-T112

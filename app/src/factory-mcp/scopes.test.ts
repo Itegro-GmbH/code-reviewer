@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it } from "vitest";
-import {
-  formatScopeList,
-  parseScopeList,
-  scopeSatisfies,
-} from "./scopes.ts";
+import { formatScopeList, parseScopeList, scopeSatisfies } from "./scopes.ts";
 
 describe("scopes", () => {
   // #1144-T01

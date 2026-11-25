@@ -43,7 +43,11 @@ async function setup() {
     config: { issuer: "https://factory.example.test", resource: RESOURCE },
     now: () => clock.now,
   });
-  async function connect(userId: string, workspaceId: string, scope = "factory:control") {
+  async function connect(
+    userId: string,
+    workspaceId: string,
+    scope = "factory:control",
+  ) {
     const registered = await service.registerClient({
       client_name: "Claude Code",
       redirect_uris: [REDIRECT],
@@ -70,7 +74,8 @@ async function setup() {
         code_verifier: VERIFIER,
       }),
     );
-    if (exchanged.kind !== "ok") throw new Error(`exchange: ${exchanged.error}`);
+    if (exchanged.kind !== "ok")
+      throw new Error(`exchange: ${exchanged.error}`);
     return { clientId, code, requestId: started.requestId, ...exchanged.body };
   }
   return { db, acme, other, directory, service, clock, connect };
@@ -102,7 +107,12 @@ describe("the OAuth server over Postgres", () => {
       await db.selectFrom("factory_oauth_codes").selectAll().execute(),
       await db.selectFrom("factory_oauth_tokens").selectAll().execute(),
     ]);
-    for (const secret of [flow.code, flow.access_token, flow.refresh_token, VERIFIER])
+    for (const secret of [
+      flow.code,
+      flow.access_token,
+      flow.refresh_token,
+      VERIFIER,
+    ])
       expect(rows).not.toContain(secret);
     expect(rows).toContain(hashSecret(flow.access_token));
   });
@@ -120,7 +130,9 @@ describe("the OAuth server over Postgres", () => {
         scope: "factory:read",
       }),
     ).toMatchObject({ kind: "invalid", code: "request_not_found" });
-    expect(await db.selectFrom("factory_oauth_grants").selectAll().execute()).toHaveLength(1);
+    expect(
+      await db.selectFrom("factory_oauth_grants").selectAll().execute(),
+    ).toHaveLength(1);
   });
 
   // #1144-T94
@@ -133,7 +145,12 @@ describe("the OAuth server over Postgres", () => {
       directory.markRefreshUsed(refreshHash, "2026-11-25T10:00:01.000Z"),
     ]);
     expect([first, second].filter(Boolean)).toHaveLength(1);
-    expect(await directory.markCodeUsed(hashSecret(flow.code), "2026-11-25T10:00:01.000Z")).toBe(false);
+    expect(
+      await directory.markCodeUsed(
+        hashSecret(flow.code),
+        "2026-11-25T10:00:01.000Z",
+      ),
+    ).toBe(false);
   });
 
   // #1144-T95
@@ -143,14 +160,32 @@ describe("the OAuth server over Postgres", () => {
     const elsewhere = await connect("ada", other, "factory:read");
     const grants = createFactoryOAuthRepository(db, acme);
     const [row] = await grants.list();
-    expect(row).toMatchObject({ clientName: "Claude Code", userName: "Ada", scopes: ["factory:control"] });
-    expect(await createFactoryOAuthRepository(db, other).revoke(row!.id, "2026-11-25T11:00:00.000Z")).toBe(false);
+    expect(row).toMatchObject({
+      clientName: "Claude Code",
+      userName: "Ada",
+      scopes: ["factory:control"],
+    });
+    expect(
+      await createFactoryOAuthRepository(db, other).revoke(
+        row!.id,
+        "2026-11-25T11:00:00.000Z",
+      ),
+    ).toBe(false);
     expect(await grants.revoke(row!.id, "2026-11-25T11:00:00.000Z")).toBe(true);
-    expect(await grants.revoke(row!.id, "2026-11-25T11:00:00.000Z")).toBe(false);
+    expect(await grants.revoke(row!.id, "2026-11-25T11:00:00.000Z")).toBe(
+      false,
+    );
     expect(await grants.list()).toEqual([]);
-    expect(await service.authenticate(flow.access_token)).toMatchObject({ kind: "error" });
-    expect(await service.authenticate(elsewhere.access_token)).toMatchObject({ kind: "ok" });
-    const left = await db.selectFrom("factory_oauth_tokens").select("workspace_id").execute();
+    expect(await service.authenticate(flow.access_token)).toMatchObject({
+      kind: "error",
+    });
+    expect(await service.authenticate(elsewhere.access_token)).toMatchObject({
+      kind: "ok",
+    });
+    const left = await db
+      .selectFrom("factory_oauth_tokens")
+      .select("workspace_id")
+      .execute();
     expect(left.every((token) => token.workspace_id === other)).toBe(true);
   });
 
@@ -159,8 +194,12 @@ describe("the OAuth server over Postgres", () => {
     const { db, connect, acme } = await setup();
     await connect("bob", acme);
     await db.deleteFrom("users").where("id", "=", "bob").execute();
-    expect(await db.selectFrom("factory_oauth_grants").selectAll().execute()).toEqual([]);
-    expect(await db.selectFrom("factory_oauth_tokens").selectAll().execute()).toEqual([]);
+    expect(
+      await db.selectFrom("factory_oauth_grants").selectAll().execute(),
+    ).toEqual([]);
+    expect(
+      await db.selectFrom("factory_oauth_tokens").selectAll().execute(),
+    ).toEqual([]);
   });
 
   // #1144-T97
@@ -170,7 +209,9 @@ describe("the OAuth server over Postgres", () => {
     const idle = await service.registerClient({ redirect_uris: [REDIRECT] });
     if (idle.kind !== "ok") throw new Error("register");
     clock.now = new Date(clock.now.getTime() + 25 * 3600 * 1000);
-    const removed = await directory.deleteUnusedClientsBefore(clock.now.toISOString());
+    const removed = await directory.deleteUnusedClientsBefore(
+      clock.now.toISOString(),
+    );
     expect(removed).toBe(1);
     expect(await directory.findClient(idle.response.client_id)).toBeNull();
     expect(await directory.countClients()).toBe(1);
@@ -181,19 +222,36 @@ describe("the OAuth server over Postgres", () => {
     const { db, directory, service, connect, acme, clock } = await setup();
     const live = await connect("ada", acme);
     const dead = await connect("bob", acme);
-    const [bobGrant] = await createFactoryOAuthRepository(db, acme).list().then((rows) => rows.filter((r) => r.userName === "Bob"));
-    await createFactoryOAuthRepository(db, acme).revoke(bobGrant!.id, "2026-11-25T10:00:00.000Z");
+    const [bobGrant] = await createFactoryOAuthRepository(db, acme)
+      .list()
+      .then((rows) => rows.filter((r) => r.userName === "Bob"));
+    await createFactoryOAuthRepository(db, acme).revoke(
+      bobGrant!.id,
+      "2026-11-25T10:00:00.000Z",
+    );
     clock.now = new Date(clock.now.getTime() + 20 * 60 * 1000);
     const removed = await directory.deleteExpired("2026-11-25T10:30:00.000Z");
     expect(removed).toBeGreaterThan(0);
     // The access tokens are gone (15 minutes), the refresh token and the live grant are not.
-    expect(await service.authenticate(live.access_token)).toMatchObject({ kind: "error" });
+    expect(await service.authenticate(live.access_token)).toMatchObject({
+      kind: "error",
+    });
     expect(
       await service.exchange(
-        new URLSearchParams({ grant_type: "refresh_token", refresh_token: live.refresh_token, client_id: live.clientId }),
+        new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: live.refresh_token,
+          client_id: live.clientId,
+        }),
       ),
     ).toMatchObject({ kind: "ok" });
-    expect(await db.selectFrom("factory_oauth_grants").select("id").where("id", "=", bobGrant!.id).execute()).toHaveLength(1);
+    expect(
+      await db
+        .selectFrom("factory_oauth_grants")
+        .select("id")
+        .where("id", "=", bobGrant!.id)
+        .execute(),
+    ).toHaveLength(1);
     expect(dead.refresh_token).toBeTruthy();
   });
 

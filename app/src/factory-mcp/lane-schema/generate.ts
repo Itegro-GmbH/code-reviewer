@@ -19,7 +19,8 @@ export type GuideData = {
 export const GENERATED_FILE = "guide.generated.json";
 
 export function generateGuideData(repositoryRoot: string): GuideData {
-  const read = (...path: string[]) => readFileSync(join(repositoryRoot, ...path), "utf8");
+  const read = (...path: string[]) =>
+    readFileSync(join(repositoryRoot, ...path), "utf8");
   const guide = splitGuide(read("docs", "workflows.md"));
   return {
     generatedBy:
@@ -28,7 +29,9 @@ export function generateGuideData(repositoryRoot: string): GuideData {
     sections: guide.sections,
     workflowSchema: JSON.parse(read("contracts", "workflow.v1.json")),
     resultSchema: JSON.parse(read("contracts", "result-schema.v1.json")),
-    example: JSON.parse(read("contracts", "examples", "workflow", "Workflow.json")),
+    example: JSON.parse(
+      read("contracts", "examples", "workflow", "Workflow.json"),
+    ),
   };
 }
 

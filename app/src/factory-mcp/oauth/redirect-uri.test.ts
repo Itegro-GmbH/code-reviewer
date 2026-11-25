@@ -53,33 +53,54 @@ describe("redirectUriMatches", () => {
       redirectUriMatches(registered, "https://claude.ai/api/mcp/auth_callback"),
     ).toBe(true);
     expect(
-      redirectUriMatches(registered, "https://claude.ai/api/mcp/auth_callback/"),
+      redirectUriMatches(
+        registered,
+        "https://claude.ai/api/mcp/auth_callback/",
+      ),
     ).toBe(false);
     expect(
-      redirectUriMatches(registered, "https://claude.ai/api/mcp/auth_callback?x=1"),
+      redirectUriMatches(
+        registered,
+        "https://claude.ai/api/mcp/auth_callback?x=1",
+      ),
     ).toBe(false);
     expect(
-      redirectUriMatches(registered, "https://claude.ai.evil.com/api/mcp/auth_callback"),
+      redirectUriMatches(
+        registered,
+        "https://claude.ai.evil.com/api/mcp/auth_callback",
+      ),
     ).toBe(false);
   });
 
   // #1144-T14
   it("lets a loopback client choose another port, and nothing else", () => {
     const registered = ["http://127.0.0.1:1111/callback"];
-    expect(redirectUriMatches(registered, "http://127.0.0.1:54321/callback")).toBe(true);
-    expect(redirectUriMatches(registered, "http://127.0.0.1:54321/other")).toBe(false);
-    expect(redirectUriMatches(registered, "http://localhost:54321/callback")).toBe(false);
-    expect(redirectUriMatches(registered, "https://127.0.0.1:54321/callback")).toBe(false);
+    expect(
+      redirectUriMatches(registered, "http://127.0.0.1:54321/callback"),
+    ).toBe(true);
+    expect(redirectUriMatches(registered, "http://127.0.0.1:54321/other")).toBe(
+      false,
+    );
+    expect(
+      redirectUriMatches(registered, "http://localhost:54321/callback"),
+    ).toBe(false);
+    expect(
+      redirectUriMatches(registered, "https://127.0.0.1:54321/callback"),
+    ).toBe(false);
   });
 });
 
 describe("redirectTargetLabel", () => {
   // #1144-T15
   it("names the host of a web address and the scheme of an app", () => {
-    expect(redirectTargetLabel("https://claude.ai/api/mcp/auth_callback")).toBe("claude.ai");
-    expect(redirectTargetLabel("http://localhost:6274/cb")).toBe("localhost:6274");
-    expect(redirectTargetLabel("cursor://anysphere.cursor-retrieval/oauth")).toBe(
-      "cursor://anysphere.cursor-retrieval",
+    expect(redirectTargetLabel("https://claude.ai/api/mcp/auth_callback")).toBe(
+      "claude.ai",
     );
+    expect(redirectTargetLabel("http://localhost:6274/cb")).toBe(
+      "localhost:6274",
+    );
+    expect(
+      redirectTargetLabel("cursor://anysphere.cursor-retrieval/oauth"),
+    ).toBe("cursor://anysphere.cursor-retrieval");
   });
 });

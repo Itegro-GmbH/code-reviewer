@@ -21,7 +21,9 @@ export const getLaneSchema = defineTool({
       .min(1)
       .max(200)
       .optional()
-      .describe("A section name from the overview's `sections` list. Leave out for the overview."),
+      .describe(
+        "A section name from the overview's `sections` list. Leave out for the overview.",
+      ),
   },
   async handler(_context, { section }) {
     if (section === undefined) return laneSchemaOverview();

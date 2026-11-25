@@ -38,9 +38,7 @@ export type RedirectUriCheck =
 
 function isLoopbackHost(hostname: string): boolean {
   return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "[::1]"
+    hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]"
   );
 }
 
@@ -54,7 +52,8 @@ export function checkRedirectUri(value: unknown): RedirectUriCheck {
   if (/[\u0000- \u007f\\]/.test(value))
     return {
       ok: false,
-      reason: "A redirect URI may not hold spaces, control characters or backslashes.",
+      reason:
+        "A redirect URI may not hold spaces, control characters or backslashes.",
     };
   let url: URL;
   try {

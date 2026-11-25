@@ -19,9 +19,7 @@
 // - Every use re-reads the person's membership: a token never outlives the person's access to the workspace, and the role is the one
 //   they have now.
 import { formatTimestamp } from "../../db/codecs.ts";
-import type {
-  Membership,
-} from "../../db/repositories/workspaces-repository.ts";
+import type { Membership } from "../../db/repositories/workspaces-repository.ts";
 import type { WorkspaceRole } from "../../db/workspace-roles.ts";
 import {
   FACTORY_SCOPES,
@@ -30,7 +28,11 @@ import {
   parseScopeList,
   type FactoryScope,
 } from "../scopes.ts";
-import { checkRedirectUri, redirectTargetLabel, redirectUriMatches } from "./redirect-uri.ts";
+import {
+  checkRedirectUri,
+  redirectTargetLabel,
+  redirectUriMatches,
+} from "./redirect-uri.ts";
 import type {
   AuthorizationRequest,
   Grant,
@@ -210,11 +212,15 @@ export function cleanClientName(value: unknown): string {
     .replace(CONTROL_AND_DIRECTION_CHARACTERS, " ")
     .replace(/\s+/g, " ")
     .trim();
-  const cut = Array.from(cleaned).slice(0, CLIENT_NAME_MAX_LENGTH).join("").trim();
+  const cut = Array.from(cleaned)
+    .slice(0, CLIENT_NAME_MAX_LENGTH)
+    .join("")
+    .trim();
   return cut === "" ? "Unnamed app" : cut;
 }
 
-type Single = { kind: "value"; value: string } | { kind: "absent" } | { kind: "repeated" };
+type Single =
+  { kind: "value"; value: string } | { kind: "absent" } | { kind: "repeated" };
 
 function single(params: URLSearchParams, name: string): Single {
   const all = params.getAll(name);
@@ -236,10 +242,12 @@ export function createOAuthService({
 }: OAuthServiceDependencies) {
   const { directory } = store;
   const resourceKey = normalizeResource(config.resource);
-  if (resourceKey === null) throw new Error("The MCP resource address is not a valid address.");
+  if (resourceKey === null)
+    throw new Error("The MCP resource address is not a valid address.");
 
   const at = (date = now()): string => formatTimestamp(date);
-  const after = (ms: number): string => formatTimestamp(new Date(now().getTime() + ms));
+  const after = (ms: number): string =>
+    formatTimestamp(new Date(now().getTime() + ms));
 
   function redirectError(
     redirectUri: string,
@@ -251,10 +259,16 @@ export function createOAuthService({
     target.searchParams.set("error", error);
     target.searchParams.set("error_description", description);
     if (state !== null) target.searchParams.set("state", state);
-    return { kind: "redirect_error", redirectTo: withIssuer(target, config.issuer).toString() };
+    return {
+      kind: "redirect_error",
+      redirectTo: withIssuer(target, config.issuer).toString(),
+    };
   }
 
-  function tokenError(error: TokenErrorCode, description: string): ExchangeOutcome {
+  function tokenError(
+    error: TokenErrorCode,
+    description: string,
+  ): ExchangeOutcome {
     return { kind: "error", error, description };
   }
 
@@ -264,7 +278,10 @@ export function createOAuthService({
     const refresh = newSecret("refresh");
     const created = at();
     const grantEnd = Date.parse(grant.createdAt) + GRANT_MAX_AGE_MS;
-    const refreshEnd = Math.min(now().getTime() + REFRESH_TOKEN_IDLE_TTL_MS, grantEnd);
+    const refreshEnd = Math.min(
+      now().getTime() + REFRESH_TOKEN_IDLE_TTL_MS,
+      grantEnd,
+    );
     const records: TokenRecord[] = [
       {
         tokenHash: hashSecret(access),
@@ -295,13 +312,18 @@ export function createOAuthService({
     };
   }
 
-  async function revokeGrant(grant: Pick<Grant, "id" | "workspaceId">): Promise<void> {
+  async function revokeGrant(
+    grant: Pick<Grant, "id" | "workspaceId">,
+  ): Promise<void> {
     await store.scoped(grant.workspaceId).revoke(grant.id, at());
   }
 
   /** Whether the person still belongs to the workspace of the grant; if not, the grant ends. */
   async function stillMember(grant: Grant): Promise<Membership | undefined> {
-    const membership = await memberships.findMembershipById(grant.userId, grant.workspaceId);
+    const membership = await memberships.findMembershipById(
+      grant.userId,
+      grant.workspaceId,
+    );
     if (membership === undefined) await revokeGrant(grant);
     return membership;
   }
@@ -326,34 +348,64 @@ export function createOAuthService({
 
       const uris = meta.redirect_uris;
       if (!Array.isArray(uris) || uris.length === 0)
-        return { kind: "error", error: "invalid_redirect_uri", description: "redirect_uris must be a list with at least one address." };
+        return {
+          kind: "error",
+          error: "invalid_redirect_uri",
+          description:
+            "redirect_uris must be a list with at least one address.",
+        };
       if (uris.length > REDIRECT_URIS_MAX)
-        return { kind: "error", error: "invalid_redirect_uri", description: `At most ${REDIRECT_URIS_MAX} redirect URIs.` };
+        return {
+          kind: "error",
+          error: "invalid_redirect_uri",
+          description: `At most ${REDIRECT_URIS_MAX} redirect URIs.`,
+        };
       const redirectUris: string[] = [];
       for (const uri of uris) {
         const checked = checkRedirectUri(uri);
         if (!checked.ok)
-          return { kind: "error", error: "invalid_redirect_uri", description: checked.reason };
+          return {
+            kind: "error",
+            error: "invalid_redirect_uri",
+            description: checked.reason,
+          };
         if (!redirectUris.includes(checked.uri)) redirectUris.push(checked.uri);
       }
 
-      const grantTypes = meta.grant_types ?? ["authorization_code", "refresh_token"];
+      const grantTypes = meta.grant_types ?? [
+        "authorization_code",
+        "refresh_token",
+      ];
       if (
         !Array.isArray(grantTypes) ||
         !grantTypes.includes("authorization_code") ||
-        !grantTypes.every((type) => type === "authorization_code" || type === "refresh_token")
+        !grantTypes.every(
+          (type) => type === "authorization_code" || type === "refresh_token",
+        )
       )
-        return invalid("grant_types may hold authorization_code and refresh_token only, and must hold authorization_code.");
+        return invalid(
+          "grant_types may hold authorization_code and refresh_token only, and must hold authorization_code.",
+        );
       const responseTypes = meta.response_types ?? ["code"];
-      if (!Array.isArray(responseTypes) || responseTypes.length !== 1 || responseTypes[0] !== "code")
-        return invalid("response_types must be [\"code\"].");
+      if (
+        !Array.isArray(responseTypes) ||
+        responseTypes.length !== 1 ||
+        responseTypes[0] !== "code"
+      )
+        return invalid('response_types must be ["code"].');
       const method = meta.token_endpoint_auth_method ?? "none";
       if (method !== "none")
-        return invalid("Only public clients are supported: token_endpoint_auth_method must be none (PKCE protects the code).");
+        return invalid(
+          "Only public clients are supported: token_endpoint_auth_method must be none (PKCE protects the code).",
+        );
       let scope = formatScopeList(FACTORY_SCOPES);
       if (meta.scope !== undefined) {
-        const parsed = typeof meta.scope === "string" ? parseScopeList(meta.scope) : null;
-        if (parsed === null) return invalid("scope may name factory:read and factory:control only.");
+        const parsed =
+          typeof meta.scope === "string" ? parseScopeList(meta.scope) : null;
+        if (parsed === null)
+          return invalid(
+            "scope may name factory:read and factory:control only.",
+          );
         if (parsed.length > 0) scope = formatScopeList(parsed);
       }
 
@@ -388,22 +440,37 @@ export function createOAuthService({
       };
     },
 
-    async beginAuthorization(params: URLSearchParams): Promise<AuthorizeOutcome> {
+    async beginAuthorization(
+      params: URLSearchParams,
+    ): Promise<AuthorizeOutcome> {
       const clientId = single(params, "client_id");
       const client =
-        clientId.kind === "value" ? await directory.findClient(clientId.value) : null;
+        clientId.kind === "value"
+          ? await directory.findClient(clientId.value)
+          : null;
       if (client === null)
-        return { kind: "page_error", code: "invalid_client", description: "The client is not registered." };
+        return {
+          kind: "page_error",
+          code: "invalid_client",
+          description: "The client is not registered.",
+        };
       const requested = single(params, "redirect_uri");
       if (requested.kind === "repeated")
-        return { kind: "page_error", code: "invalid_redirect_uri", description: "redirect_uri is given more than once." };
+        return {
+          kind: "page_error",
+          code: "invalid_redirect_uri",
+          description: "redirect_uri is given more than once.",
+        };
       const redirectUri =
         requested.kind === "value"
           ? requested.value
           : client.redirectUris.length === 1
             ? (client.redirectUris[0] as string)
             : null;
-      if (redirectUri === null || !redirectUriMatches(client.redirectUris, redirectUri))
+      if (
+        redirectUri === null ||
+        !redirectUriMatches(client.redirectUris, redirectUri)
+      )
         return {
           kind: "page_error",
           code: "invalid_redirect_uri",
@@ -412,15 +479,27 @@ export function createOAuthService({
 
       // From here on the redirect URI is trusted and errors go to the client.
       const stateParam = single(params, "state");
-      if (stateParam.kind === "repeated" || (stateParam.kind === "value" && stateParam.value.length > STATE_MAX_LENGTH))
-        return redirectError(redirectUri, null, "invalid_request", "state is given more than once or too long.");
+      if (
+        stateParam.kind === "repeated" ||
+        (stateParam.kind === "value" &&
+          stateParam.value.length > STATE_MAX_LENGTH)
+      )
+        return redirectError(
+          redirectUri,
+          null,
+          "invalid_request",
+          "state is given more than once or too long.",
+        );
       const state = stateParam.kind === "value" ? stateParam.value : null;
       const fail = (error: string, description: string) =>
         redirectError(redirectUri, state, error, description);
 
       const responseType = single(params, "response_type");
       if (responseType.kind !== "value" || responseType.value !== "code")
-        return fail("unsupported_response_type", "Only response_type=code is supported.");
+        return fail(
+          "unsupported_response_type",
+          "Only response_type=code is supported.",
+        );
       const challenge = single(params, "code_challenge");
       const method = single(params, "code_challenge_method");
       if (
@@ -429,15 +508,26 @@ export function createOAuthService({
         method.kind !== "value" ||
         method.value !== "S256"
       )
-        return fail("invalid_request", "PKCE with code_challenge_method=S256 is required.");
+        return fail(
+          "invalid_request",
+          "PKCE with code_challenge_method=S256 is required.",
+        );
       const scopeParam = single(params, "scope");
       if (scopeParam.kind === "repeated")
         return fail("invalid_scope", "scope is given more than once.");
-      const scopes = parseScopeList(scopeParam.kind === "value" ? scopeParam.value : null);
+      const scopes = parseScopeList(
+        scopeParam.kind === "value" ? scopeParam.value : null,
+      );
       if (scopes === null)
-        return fail("invalid_scope", "Only factory:read and factory:control exist.");
+        return fail(
+          "invalid_scope",
+          "Only factory:read and factory:control exist.",
+        );
       if (checkResource(params) === "invalid")
-        return fail("invalid_target", `The only resource is ${config.resource}.`);
+        return fail(
+          "invalid_target",
+          `The only resource is ${config.resource}.`,
+        );
 
       await directory.deleteExpiredRequests(at());
       const request: AuthorizationRequest = {
@@ -456,7 +546,10 @@ export function createOAuthService({
     },
 
     /** What the consent page shows, or null when the request is unknown or has expired. */
-    async describeRequest(requestId: string, userId: string): Promise<ConsentView | null> {
+    async describeRequest(
+      requestId: string,
+      userId: string,
+    ): Promise<ConsentView | null> {
       if (!REQUEST_ID_PATTERN.test(requestId)) return null;
       const request = await directory.findRequest(requestId, at());
       if (request === null) return null;
@@ -468,7 +561,8 @@ export function createOAuthService({
         client: { id: client.id, name: client.name },
         redirectTarget: redirectTargetLabel(request.redirectUri),
         requestedScopes: request.scopes,
-        allowedScopes: request.scopes.length > 0 ? request.scopes : [...FACTORY_SCOPES],
+        allowedScopes:
+          request.scopes.length > 0 ? request.scopes : [...FACTORY_SCOPES],
         workspaces: memberOf.map(({ workspace, role }) => ({
           id: workspace.id,
           slug: workspace.slug,
@@ -489,7 +583,8 @@ export function createOAuthService({
       if (!REQUEST_ID_PATTERN.test(input.requestId))
         return { kind: "invalid", code: "request_not_found" };
       const request = await directory.findRequest(input.requestId, at());
-      const client = request === null ? null : await directory.findClient(request.clientId);
+      const client =
+        request === null ? null : await directory.findClient(request.clientId);
       if (request === null || client === null)
         return { kind: "invalid", code: "request_not_found" };
 
@@ -497,20 +592,38 @@ export function createOAuthService({
         await directory.deleteRequest(request.id);
         const target = new URL(request.redirectUri);
         target.searchParams.set("error", "access_denied");
-        target.searchParams.set("error_description", "The user denied the request.");
-        if (request.state !== null) target.searchParams.set("state", request.state);
-        return { kind: "redirect", redirectTo: withIssuer(target, config.issuer).toString() };
+        target.searchParams.set(
+          "error_description",
+          "The user denied the request.",
+        );
+        if (request.state !== null)
+          target.searchParams.set("state", request.state);
+        return {
+          kind: "redirect",
+          redirectTo: withIssuer(target, config.issuer).toString(),
+        };
       }
 
       const membership =
         input.workspaceId === undefined || input.workspaceId === ""
           ? undefined
-          : await memberships.findMembershipById(input.userId, input.workspaceId);
-      if (membership === undefined) return { kind: "invalid", code: "workspace_invalid" };
-      const allowed = request.scopes.length > 0 ? request.scopes : [...FACTORY_SCOPES];
-      const chosen = input.scope === undefined ? null : parseScopeList(input.scope);
-      const scope = chosen !== null && chosen.length === 1 ? chosen[0] : undefined;
-      if (scope === undefined || !isFactoryScope(scope) || !allowed.includes(scope))
+          : await memberships.findMembershipById(
+              input.userId,
+              input.workspaceId,
+            );
+      if (membership === undefined)
+        return { kind: "invalid", code: "workspace_invalid" };
+      const allowed =
+        request.scopes.length > 0 ? request.scopes : [...FACTORY_SCOPES];
+      const chosen =
+        input.scope === undefined ? null : parseScopeList(input.scope);
+      const scope =
+        chosen !== null && chosen.length === 1 ? chosen[0] : undefined;
+      if (
+        scope === undefined ||
+        !isFactoryScope(scope) ||
+        !allowed.includes(scope)
+      )
         return { kind: "invalid", code: "scope_invalid" };
 
       const code = newSecret("code");
@@ -544,8 +657,12 @@ export function createOAuthService({
       if (!approved) return { kind: "invalid", code: "request_not_found" };
       const target = new URL(request.redirectUri);
       target.searchParams.set("code", code);
-      if (request.state !== null) target.searchParams.set("state", request.state);
-      return { kind: "redirect", redirectTo: withIssuer(target, config.issuer).toString() };
+      if (request.state !== null)
+        target.searchParams.set("state", request.state);
+      return {
+        kind: "redirect",
+        redirectTo: withIssuer(target, config.issuer).toString(),
+      };
     },
 
     /** The token endpoint: `authorization_code` and `refresh_token`. */
@@ -553,21 +670,43 @@ export function createOAuthService({
       const grantType = single(params, "grant_type");
       if (grantType.kind !== "value")
         return tokenError("invalid_request", "grant_type is required once.");
-      if (grantType.value !== "authorization_code" && grantType.value !== "refresh_token")
-        return tokenError("unsupported_grant_type", "Only authorization_code and refresh_token are supported.");
+      if (
+        grantType.value !== "authorization_code" &&
+        grantType.value !== "refresh_token"
+      )
+        return tokenError(
+          "unsupported_grant_type",
+          "Only authorization_code and refresh_token are supported.",
+        );
       if (checkResource(params) === "invalid")
-        return tokenError("invalid_target", `The only resource is ${config.resource}.`);
+        return tokenError(
+          "invalid_target",
+          `The only resource is ${config.resource}.`,
+        );
       const clientId = single(params, "client_id");
       if (clientId.kind !== "value")
-        return tokenError("invalid_request", "client_id is required once (public clients have no other authentication).");
+        return tokenError(
+          "invalid_request",
+          "client_id is required once (public clients have no other authentication).",
+        );
 
       if (grantType.value === "authorization_code") {
         const code = single(params, "code");
         const verifier = single(params, "code_verifier");
         const redirect = single(params, "redirect_uri");
-        if (code.kind !== "value" || verifier.kind !== "value" || redirect.kind === "repeated")
-          return tokenError("invalid_grant", "The code, the code verifier or the redirect URI is missing or repeated.");
-        const invalidGrant = tokenError("invalid_grant", "The authorization code is invalid, expired or already used.");
+        if (
+          code.kind !== "value" ||
+          verifier.kind !== "value" ||
+          redirect.kind === "repeated"
+        )
+          return tokenError(
+            "invalid_grant",
+            "The code, the code verifier or the redirect URI is missing or repeated.",
+          );
+        const invalidGrant = tokenError(
+          "invalid_grant",
+          "The authorization code is invalid, expired or already used.",
+        );
         if (!looksLikeSecret("code", code.value)) return invalidGrant;
         const hash = hashSecret(code.value);
         const found = await directory.findCode(hash);
@@ -578,14 +717,20 @@ export function createOAuthService({
           await revokeGrant(found.grant);
           return invalidGrant;
         }
-        if (found.code.expiresAt <= at() || found.grant.revokedAt !== null) return invalidGrant;
-        if (redirect.kind === "value" && redirect.value !== found.code.redirectUri) return invalidGrant;
+        if (found.code.expiresAt <= at() || found.grant.revokedAt !== null)
+          return invalidGrant;
+        if (
+          redirect.kind === "value" &&
+          redirect.value !== found.code.redirectUri
+        )
+          return invalidGrant;
         if (!(await directory.markCodeUsed(hash, at()))) {
           await revokeGrant(found.grant);
           return invalidGrant;
         }
         // The code is spent whatever the verifier says, so a guess cannot be repeated.
-        if (!verifyPkce(verifier.value, found.code.codeChallenge)) return invalidGrant;
+        if (!verifyPkce(verifier.value, found.code.codeChallenge))
+          return invalidGrant;
         if ((await stillMember(found.grant)) === undefined) return invalidGrant;
         const body = await issueTokens(found.grant);
         await directory.markGrantConnected(found.grant.id, at());
@@ -594,25 +739,51 @@ export function createOAuthService({
 
       if (grantType.value === "refresh_token") {
         const presented = single(params, "refresh_token");
-        const invalidGrant = tokenError("invalid_grant", "The refresh token is invalid, expired or already used.");
-        if (presented.kind !== "value" || !looksLikeSecret("refresh", presented.value)) return invalidGrant;
+        const invalidGrant = tokenError(
+          "invalid_grant",
+          "The refresh token is invalid, expired or already used.",
+        );
+        if (
+          presented.kind !== "value" ||
+          !looksLikeSecret("refresh", presented.value)
+        )
+          return invalidGrant;
         const hash = hashSecret(presented.value);
         const found = await directory.findToken(hash);
-        if (found === null || found.token.kind !== "refresh") return invalidGrant;
-        if (found.grant.clientId !== clientId.value || found.grant.revokedAt !== null) return invalidGrant;
+        if (found === null || found.token.kind !== "refresh")
+          return invalidGrant;
+        if (
+          found.grant.clientId !== clientId.value ||
+          found.grant.revokedAt !== null
+        )
+          return invalidGrant;
         if (found.token.usedAt !== null) {
-          if (now().getTime() - Date.parse(found.token.usedAt) > REFRESH_REUSE_GRACE_MS)
+          if (
+            now().getTime() - Date.parse(found.token.usedAt) >
+            REFRESH_REUSE_GRACE_MS
+          )
             await revokeGrant(found.grant);
           return invalidGrant;
         }
         if (found.token.expiresAt <= at()) return invalidGrant;
-        if (Date.parse(found.grant.createdAt) + GRANT_MAX_AGE_MS <= now().getTime()) return invalidGrant;
+        if (
+          Date.parse(found.grant.createdAt) + GRANT_MAX_AGE_MS <=
+          now().getTime()
+        )
+          return invalidGrant;
         const scopeParam = single(params, "scope");
-        if (scopeParam.kind === "repeated") return tokenError("invalid_scope", "scope is given more than once.");
+        if (scopeParam.kind === "repeated")
+          return tokenError("invalid_scope", "scope is given more than once.");
         if (scopeParam.kind === "value") {
           const wanted = parseScopeList(scopeParam.value);
-          if (wanted === null || !wanted.every((scope) => found.grant.scopes.includes(scope)))
-            return tokenError("invalid_scope", "A refresh cannot widen what was approved.");
+          if (
+            wanted === null ||
+            !wanted.every((scope) => found.grant.scopes.includes(scope))
+          )
+            return tokenError(
+              "invalid_scope",
+              "A refresh cannot widen what was approved.",
+            );
         }
         if ((await stillMember(found.grant)) === undefined) return invalidGrant;
         if (!(await directory.markRefreshUsed(hash, at()))) return invalidGrant;
@@ -621,7 +792,10 @@ export function createOAuthService({
         return { kind: "ok", body };
       }
 
-      return tokenError("unsupported_grant_type", "Only authorization_code and refresh_token are supported.");
+      return tokenError(
+        "unsupported_grant_type",
+        "Only authorization_code and refresh_token are supported.",
+      );
     },
 
     /** RFC 7009: ends the grant the token belongs to. Never an error: an unknown token is already as good as revoked. */
@@ -640,23 +814,36 @@ export function createOAuthService({
     /** Who is calling the MCP endpoint with this bearer token, or why not. */
     async authenticate(bearer: string | null): Promise<AuthenticateOutcome> {
       if (bearer === null || bearer === "")
-        return { kind: "error", error: "invalid_request", description: "No access token." };
+        return {
+          kind: "error",
+          error: "invalid_request",
+          description: "No access token.",
+        };
       const invalid = (description: string): AuthenticateOutcome => ({
         kind: "error",
         error: "invalid_token",
         description,
       });
-      if (!looksLikeSecret("access", bearer)) return invalid("The access token is not valid.");
+      if (!looksLikeSecret("access", bearer))
+        return invalid("The access token is not valid.");
       const found = await directory.findToken(hashSecret(bearer));
-      if (found === null || found.token.kind !== "access") return invalid("The access token is not valid.");
-      if (found.token.expiresAt <= at()) return invalid("The access token has expired.");
-      if (found.grant.revokedAt !== null) return invalid("The access was revoked.");
+      if (found === null || found.token.kind !== "access")
+        return invalid("The access token is not valid.");
+      if (found.token.expiresAt <= at())
+        return invalid("The access token has expired.");
+      if (found.grant.revokedAt !== null)
+        return invalid("The access was revoked.");
       // Audience binding (RFC 8707): the token was made for one resource and this is the only one that accepts it.
       if (normalizeResource(found.grant.resource) !== resourceKey)
         return invalid("The access token was not issued for this server.");
       const membership = await stillMember(found.grant);
-      if (membership === undefined) return invalid("The access to the workspace ended.");
-      await directory.touchGrant(found.grant.id, at(), LAST_USED_WRITE_INTERVAL_MS);
+      if (membership === undefined)
+        return invalid("The access to the workspace ended.");
+      await directory.touchGrant(
+        found.grant.id,
+        at(),
+        LAST_USED_WRITE_INTERVAL_MS,
+      );
       return {
         kind: "ok",
         principal: {

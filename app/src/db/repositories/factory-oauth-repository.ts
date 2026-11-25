@@ -9,7 +9,7 @@ import type { Kysely } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
-import type { GrantView, ScopedGrants } from "../../factory-mcp/oauth/store.ts";
+import type { GrantView, ScopedGrants } from "../factory-oauth-types.ts";
 import { scopesOfRow } from "./factory-oauth-directory-repository.ts";
 
 /** A grant whose code was never exchanged is removed after this long. */
@@ -24,7 +24,9 @@ export function createFactoryOAuthRepository(
   return {
     async approve({ requestId, grant, code, now }) {
       if (grant.workspaceId !== workspaceId || code.workspaceId !== workspaceId)
-        throw new Error("A grant can only be made in the workspace of this repository.");
+        throw new Error(
+          "A grant can only be made in the workspace of this repository.",
+        );
       const run = async (executor: Kysely<Database>): Promise<boolean> => {
         // The request is answered once: whoever deletes the row owns the answer.
         const taken = await executor
@@ -39,7 +41,9 @@ export function createFactoryOAuthRepository(
           .where(
             "created_at",
             "<",
-            formatTimestamp(new Date(Date.parse(now) - UNCONNECTED_GRANT_TTL_MS)),
+            formatTimestamp(
+              new Date(Date.parse(now) - UNCONNECTED_GRANT_TTL_MS),
+            ),
           )
           .execute();
         await executor

@@ -30,10 +30,7 @@ export type TestWorld = {
   advance(ms: number): void;
 };
 
-function membershipOf(
-  workspace: typeof ACME,
-  role: WorkspaceRole,
-): Membership {
+function membershipOf(workspace: typeof ACME, role: WorkspaceRole): Membership {
   return {
     role,
     workspace: {
@@ -94,7 +91,8 @@ export async function registerClient(
     redirect_uris: [REDIRECT],
     ...overrides,
   });
-  if (result.kind !== "ok") throw new Error(`registration failed: ${result.error}`);
+  if (result.kind !== "ok")
+    throw new Error(`registration failed: ${result.error}`);
   return { clientId: result.response.client_id };
 }
 
@@ -136,8 +134,11 @@ export async function connect(
   } = {},
 ): Promise<Connected> {
   const clientId = options.clientId ?? (await registerClient(world)).clientId;
-  const started = await world.service.beginAuthorization(authorizeParams(clientId));
-  if (started.kind !== "request") throw new Error(`authorize failed: ${started.kind}`);
+  const started = await world.service.beginAuthorization(
+    authorizeParams(clientId),
+  );
+  if (started.kind !== "request")
+    throw new Error(`authorize failed: ${started.kind}`);
   const decided = await world.service.decide({
     requestId: started.requestId,
     userId: options.user ?? ADA.id,
@@ -145,7 +146,8 @@ export async function connect(
     workspaceId: options.workspaceId ?? ACME.id,
     scope: options.scope ?? "factory:control",
   });
-  if (decided.kind !== "redirect") throw new Error(`consent failed: ${decided.kind}`);
+  if (decided.kind !== "redirect")
+    throw new Error(`consent failed: ${decided.kind}`);
   const code = new URL(decided.redirectTo).searchParams.get("code");
   if (code === null) throw new Error("no code in the redirect");
   const exchanged = await world.service.exchange(
@@ -158,7 +160,8 @@ export async function connect(
       resource: RESOURCE,
     }),
   );
-  if (exchanged.kind !== "ok") throw new Error(`exchange failed: ${exchanged.error}`);
+  if (exchanged.kind !== "ok")
+    throw new Error(`exchange failed: ${exchanged.error}`);
   return {
     clientId,
     accessToken: exchanged.body.access_token,

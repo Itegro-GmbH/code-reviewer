@@ -78,9 +78,6 @@ export function defineTool<Shape extends z.ZodRawShape>(
       };
     },
     run: (context, args) =>
-      definition.handler(
-        context,
-        args as z.infer<z.ZodObject<Shape>>,
-      ),
+      definition.handler(context, args as z.infer<z.ZodObject<Shape>>),
   };
 }

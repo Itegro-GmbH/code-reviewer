@@ -18,8 +18,8 @@ import type {
   OAuthDirectory,
   TokenLookup,
   TokenKind,
-} from "../../factory-mcp/oauth/store.ts";
-import { parseScopeList, type FactoryScope } from "../../factory-mcp/scopes.ts";
+} from "../factory-oauth-types.ts";
+import { parseScopeList, type FactoryScope } from "../factory-oauth-types.ts";
 
 /** The scopes of a stored space-separated value; a value this code did not write reads as none, so it grants nothing. */
 export function scopesOfRow(value: string): FactoryScope[] {
@@ -185,7 +185,10 @@ export function createFactoryOAuthDirectoryRepository(
     },
 
     async deleteRequest(id) {
-      await db.deleteFrom("factory_oauth_requests").where("id", "=", id).execute();
+      await db
+        .deleteFrom("factory_oauth_requests")
+        .where("id", "=", id)
+        .execute();
     },
 
     async deleteExpiredRequests(now) {
@@ -358,7 +361,10 @@ export function createFactoryOAuthDirectoryRepository(
         .where((eb) =>
           eb.or([
             eb("revoked_at", "<", cutoff),
-            eb.and([eb("connected_at", "is", null), eb("created_at", "<", cutoff)]),
+            eb.and([
+              eb("connected_at", "is", null),
+              eb("created_at", "<", cutoff),
+            ]),
           ]),
         )
         .executeTakeFirst();

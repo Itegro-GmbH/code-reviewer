@@ -5,34 +5,24 @@
 // token with control may call every read tool. The user's role in the workspace applies on top of the scope, per tool
 // (`tools/define.ts`): a scope never gives more than the role allows.
 
-export const FACTORY_SCOPES = ["factory:read", "factory:control"] as const;
-export type FactoryScope = (typeof FACTORY_SCOPES)[number];
+import {
+  FACTORY_SCOPES,
+  formatScopeList,
+  isFactoryScope,
+  parseScopeList,
+  type FactoryScope,
+} from "../db/factory-oauth-types.ts";
 
-export function isFactoryScope(value: unknown): value is FactoryScope {
-  return FACTORY_SCOPES.some((scope) => scope === value);
-}
+export {
+  FACTORY_SCOPES,
+  formatScopeList,
+  isFactoryScope,
+  parseScopeList,
+  type FactoryScope,
+};
 
 /** What the person is asked to approve when the client names no scope: look only. */
 export const DEFAULT_SCOPE: FactoryScope = "factory:read";
-
-/** The scopes of a space-separated value; `null` when it names anything that is not ours (nothing is dropped silently). */
-export function parseScopeList(
-  value: string | null | undefined,
-): FactoryScope[] | null {
-  if (value === null || value === undefined) return [];
-  const names = value.split(" ").filter((name) => name !== "");
-  const scopes: FactoryScope[] = [];
-  for (const name of names) {
-    if (!isFactoryScope(name)) return null;
-    if (!scopes.includes(name)) scopes.push(name);
-  }
-  return scopes;
-}
-
-/** The space-separated text of a list, in the order of `FACTORY_SCOPES`. */
-export function formatScopeList(scopes: readonly FactoryScope[]): string {
-  return FACTORY_SCOPES.filter((scope) => scopes.includes(scope)).join(" ");
-}
 
 /** Whether a token that was granted `granted` may use something that needs `needed` (control includes read). */
 export function scopeSatisfies(

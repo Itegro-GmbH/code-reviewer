@@ -41,11 +41,23 @@ export type OAuthHttpDependencies = {
 
 export type OAuthHandlers = ReturnType<typeof createOAuthHandlers>;
 
-function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
-  return Response.json(body, { status, headers: { ...NO_STORE, ...CORS, ...extra } });
+function json(
+  body: unknown,
+  status = 200,
+  extra: Record<string, string> = {},
+): Response {
+  return Response.json(body, {
+    status,
+    headers: { ...NO_STORE, ...CORS, ...extra },
+  });
 }
 
-function oauthError(status: number, error: string, description: string, extra: Record<string, string> = {}): Response {
+function oauthError(
+  status: number,
+  error: string,
+  description: string,
+  extra: Record<string, string> = {},
+): Response {
   return json({ error, error_description: description }, status, extra);
 }
 
@@ -60,7 +72,8 @@ function errorPage(title: string, message: string): Response {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'; style-src 'none'; frame-ancestors 'none'",
+      "content-security-policy":
+        "default-src 'none'; style-src 'none'; frame-ancestors 'none'",
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
     },
@@ -87,27 +100,49 @@ export function createOAuthHandlers({
     },
 
     protectedResource(): Response {
-      return json(protectedResourceMetadata(baseUrl), 200, { "cache-control": "public, max-age=300" });
+      return json(protectedResourceMetadata(baseUrl), 200, {
+        "cache-control": "public, max-age=300",
+      });
     },
 
     authorizationServer(): Response {
-      return json(authorizationServerMetadata(baseUrl), 200, { "cache-control": "public, max-age=300" });
+      return json(authorizationServerMetadata(baseUrl), 200, {
+        "cache-control": "public, max-age=300",
+      });
     },
 
     /** POST /api/oauth/register (RFC 7591). */
     async register(request: Request): Promise<Response> {
       if (!isJsonRequest(request))
-        return oauthError(400, "invalid_client_metadata", "The body must be application/json.");
+        return oauthError(
+          400,
+          "invalid_client_metadata",
+          "The body must be application/json.",
+        );
       const body = await readLimitedBody(request, BODY_MAX_BYTES);
-      if (!body.ok) return oauthError(400, "invalid_client_metadata", "The body is too large.");
+      if (!body.ok)
+        return oauthError(
+          400,
+          "invalid_client_metadata",
+          "The body is too large.",
+        );
       let parsed: unknown;
       try {
         parsed = JSON.parse(body.text);
       } catch {
-        return oauthError(400, "invalid_client_metadata", "The body is not valid JSON.");
+        return oauthError(
+          400,
+          "invalid_client_metadata",
+          "The body is not valid JSON.",
+        );
       }
       if (!(await allowRegistration()))
-        return oauthError(429, "temporarily_unavailable", "Too many registrations; try again later.", { "retry-after": "600" });
+        return oauthError(
+          429,
+          "temporarily_unavailable",
+          "Too many registrations; try again later.",
+          { "retry-after": "600" },
+        );
       const outcome = await service.registerClient(parsed);
       if (outcome.kind === "ok") return json(outcome.response, 201);
       return oauthError(
@@ -119,7 +154,9 @@ export function createOAuthHandlers({
 
     /** GET /oauth/authorize: a browser navigation. */
     async authorize(request: Request): Promise<Response> {
-      const outcome = await service.beginAuthorization(new URL(request.url).searchParams);
+      const outcome = await service.beginAuthorization(
+        new URL(request.url).searchParams,
+      );
       if (outcome.kind === "page_error")
         return errorPage("Cannot connect this app", outcome.description);
       if (outcome.kind === "redirect_error")
@@ -135,13 +172,23 @@ export function createOAuthHandlers({
     /** POST /api/oauth/consent: the person's answer. */
     async consent(request: Request, user: SessionUser): Promise<Response> {
       if (isCrossSite(request))
-        return new Response("The request does not come from this site.", { status: 403, headers: { "cache-control": "no-store" } });
+        return new Response("The request does not come from this site.", {
+          status: 403,
+          headers: { "cache-control": "no-store" },
+        });
       const form = await readForm(request);
-      if (form === null) return new Response("Bad request.", { status: 400, headers: { "cache-control": "no-store" } });
+      if (form === null)
+        return new Response("Bad request.", {
+          status: 400,
+          headers: { "cache-control": "no-store" },
+        });
       const requestId = form.get("request") ?? "";
       const decision = form.get("decision");
       if (decision !== "approve" && decision !== "deny")
-        return new Response("Bad request.", { status: 400, headers: { "cache-control": "no-store" } });
+        return new Response("Bad request.", {
+          status: 400,
+          headers: { "cache-control": "no-store" },
+        });
       const outcome = await service.decide({
         requestId,
         userId: user.id,
@@ -162,7 +209,11 @@ export function createOAuthHandlers({
     async token(request: Request): Promise<Response> {
       const form = await readForm(request);
       if (form === null)
-        return oauthError(400, "invalid_request", "The body must be application/x-www-form-urlencoded and small.");
+        return oauthError(
+          400,
+          "invalid_request",
+          "The body must be application/x-www-form-urlencoded and small.",
+        );
       const outcome = await service.exchange(form);
       if (outcome.kind === "ok") return json(outcome.body);
       return oauthError(400, outcome.error, outcome.description);
@@ -172,7 +223,11 @@ export function createOAuthHandlers({
     async revoke(request: Request): Promise<Response> {
       const form = await readForm(request);
       if (form === null)
-        return oauthError(400, "invalid_request", "The body must be application/x-www-form-urlencoded and small.");
+        return oauthError(
+          400,
+          "invalid_request",
+          "The body must be application/x-www-form-urlencoded and small.",
+        );
       const token = form.get("token");
       if (token === null || token === "")
         return oauthError(400, "invalid_request", "token is required.");
@@ -186,6 +241,10 @@ export function createOAuthHandlers({
 function redirect(location: string): Response {
   return new Response(null, {
     status: 303,
-    headers: { location, "cache-control": "no-store", "referrer-policy": "no-referrer" },
+    headers: {
+      location,
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    },
   });
 }

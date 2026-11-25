@@ -49,5 +49,9 @@ export type ToolFailure = {
 } & Record<string, unknown>;
 
 export function failureOf(error: ToolError): ToolFailure {
-  return { ...(error.details ?? {}), error: error.code, message: error.message };
+  return {
+    ...(error.details ?? {}),
+    error: error.code,
+    message: error.message,
+  };
 }
