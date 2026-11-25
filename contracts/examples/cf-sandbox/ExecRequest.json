@@ -1,0 +1,7 @@
+{
+  "label": "vm-prepare",
+  "cmd": "/usr/local/sbin/vm-prepare.sh",
+  "args": [],
+  "sudo": true,
+  "timeoutMs": 60000
+}

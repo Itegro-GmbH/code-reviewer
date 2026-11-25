@@ -1,0 +1,12 @@
+{
+  "label": "docker-run",
+  "cmd": "docker",
+  "args": [
+    "run",
+    "--interactive",
+    "--rm",
+    "code-reviewer-worker:golden",
+    "worker-once"
+  ],
+  "sudo": true
+}

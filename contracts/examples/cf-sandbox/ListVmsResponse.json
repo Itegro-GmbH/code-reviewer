@@ -1,0 +1,16 @@
+{
+  "vms": [
+    {
+      "name": "cr-implementer-0f8fad5b-d9cb-469f-a165-70867728950e-cf-1a2b3c4d",
+      "createdAtMs": 1795640000000,
+      "status": "running",
+      "timeoutMs": 4200000,
+      "tags": {
+        "app": "code-reviewer",
+        "kind": "implementer",
+        "job": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "tenant": "reviewer"
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "policy": {
+    "allow": [
+      "github.com",
+      "api.github.com",
+      "api.anthropic.com",
+      "*.example.com"
+    ]
+  }
+}

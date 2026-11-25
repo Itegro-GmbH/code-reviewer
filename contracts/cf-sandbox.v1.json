@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/cf-sandbox.v1.json",
+  "title": "Code Reviewer cf-sandbox API, version 1",
+  "description": "The HTTP API between the Dispatcher (`dispatcher/src/launchers/cf-sandbox.ts`, issue #1158) and the Cloudflare Worker `cr-sandbox` (`cloudflare/sandbox/`, issue #1159): one Durable Object and one Cloudflare Container (a microVM) per VM. It is the Dispatcher's port `SandboxService` + `SandboxFleet` (`dispatcher/src/launchers/sandbox-service.ts`) over HTTPS. Every request except `GET /health` carries `Authorization: Bearer <CF_SANDBOX_TOKEN>` (at least 32 characters, compared in constant time); a missing or wrong one is `401` with no body detail. JSON in and out. An error is `{\"error\": <SandboxFailureKind>}` (`ErrorResponse`) with the matching status: 400 `rejected`, 401 `auth_failed`, 404 `not_ready`, 429 `rate_limited`, 503 `unavailable`; the text of any other failure is never sent. A reader ignores fields it does not know. The paths are in `Paths` below (JSON Schema has no place for them): `POST /v1/vms` (CreateVmRequest -> 201 CreateVmResponse), `POST /v1/vms/{name}/exec` (ExecRequest -> 200 ExecResponse), `POST /v1/vms/{name}/processes` (StartProcessRequest -> 201 StartProcessResponse; the process outlives the HTTP request), `POST /v1/vms/{name}/processes/{id}/stdin` (StdinRequest -> 204), `POST /v1/vms/{name}/processes/{id}/stdin/close` (no body -> 204), `GET /v1/vms/{name}/processes/{id}?waitMs=<0..25000>` (-> 200 ProcessState, answered when the process ended or after waitMs), `PUT /v1/vms/{name}/network` (NetworkRequest -> 204, effective for the next request the VM makes), `DELETE /v1/vms/{name}` (-> 204; a VM that is gone or never existed is not an error), `GET /v1/vms?namePrefix=&tag=k:v` (-> 200 ListVmsResponse; one tag at most), `GET /health` (no auth -> 200 HealthResponse). A VM ends by itself at its `timeoutMs` (the Durable Object's alarm destroys the Container).\n\nWhat the image must hold, so that the Dispatcher's VM steps (the ones of the Vercel golden snapshot, `docs/runner.md` \"Cloudflare placement\") work unchanged: `/usr/local/sbin/vm-prepare.sh` and `/usr/local/sbin/sysbox-prepare.sh` (as in the golden snapshot), Docker with the Worker image loaded under the tag `code-reviewer-worker:golden`, `mkfs.ext4`, `fallocate`, `mount`. `POST /v1/vms` answers 201 only after the image's own boot is done: the intercept CA of the outbound handler (`/etc/cloudflare/certs/cloudflare-containers-ca.crt`, which Cloudflare writes when the Container starts) is in the system store, so `/etc/ssl/certs/ca-certificates.crt` of the VM holds the public roots and that CA. The Dispatcher binds that one file, read-only, over the same path in the Worker container and sets `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO` to it. `HealthResponse.workerImageDigest` is the image id (`sha256:...`) of the Worker image in the Container image, which the Dispatcher compares with `docker image inspect` in the VM (`image_mismatch` otherwise), and `sysboxProof` is `proven` only when the image's build proved the patched Sysbox the way the golden snapshot's record does.",
+  "version": 1,
+  "$defs": {
+    "VmName": {
+      "description": "Unique for one launch: a name is never reused. The Dispatcher's names are `cr-<kind>-<job id>-cf-<8 hex>` (63 characters at most).",
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,63}$"
+    },
+    "SandboxFailureKind": {
+      "description": "`SANDBOX_FAILURE_KINDS` of dispatcher/src/launchers/sandbox-service.ts; a test of the Dispatcher holds the two equal.",
+      "enum": [
+        "rate_limited",
+        "quota_exceeded",
+        "network",
+        "unavailable",
+        "snapshot_missing",
+        "region_mismatch",
+        "not_ready",
+        "rejected",
+        "auth_failed"
+      ]
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error"],
+      "properties": {
+        "error": { "$ref": "#/$defs/SandboxFailureKind" }
+      }
+    },
+    "InstanceType": {
+      "description": "A Cloudflare Containers instance type the Worker is configured with (`standard-4` today; a larger custom type is configuration only).",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "Tags": {
+      "description": "Free labels of the VM; the Dispatcher sets `app`, `kind`, `job` and `tenant`. Values are plain text without a colon problem: a filter is `k:v`.",
+      "type": "object",
+      "maxProperties": 16,
+      "additionalProperties": { "type": "string", "maxLength": 128 }
+    },
+    "CreateVmRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "instanceType", "timeoutMs", "tags"],
+      "properties": {
+        "name": { "$ref": "#/$defs/VmName" },
+        "instanceType": { "$ref": "#/$defs/InstanceType" },
+        "timeoutMs": {
+          "description": "The backstop: the VM is destroyed this long after it was created if nobody deleted it.",
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 86400000
+        },
+        "tags": { "$ref": "#/$defs/Tags" }
+      }
+    },
+    "CreateVmResponse": {
+      "description": "201 once the Container runs, the image's boot is done and it accepts `exec`.",
+      "type": "object",
+      "required": ["name", "instanceType"],
+      "properties": {
+        "name": { "$ref": "#/$defs/VmName" },
+        "instanceType": { "$ref": "#/$defs/InstanceType" }
+      }
+    },
+    "ExecRequest": {
+      "description": "A command is an argument vector, never shell text. `sudo` means run as root (the Container's processes run as root anyway; the field is kept for parity with the Vercel port). `label` is a stable name of the step for logs, never the command text.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "cmd", "args"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "cmd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "args": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "type": "string", "maxLength": 65536 }
+        },
+        "sudo": { "type": "boolean" },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 3600000 }
+      }
+    },
+    "ExecResponse": {
+      "description": "The command ran to its end (or to `timeoutMs`, then exitCode is 124 and stderr says nothing more). `stdout` and `stderr` are each cut to the last 1048576 bytes (1 MiB).",
+      "type": "object",
+      "required": ["exitCode", "stdout", "stderr"],
+      "properties": {
+        "exitCode": { "type": "integer" },
+        "stdout": { "type": "string", "maxLength": 1048576 },
+        "stderr": { "type": "string", "maxLength": 1048576 }
+      }
+    },
+    "StartProcessRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "cmd", "args"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "cmd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "args": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "type": "string", "maxLength": 65536 }
+        },
+        "sudo": { "type": "boolean" }
+      }
+    },
+    "StartProcessResponse": {
+      "description": "201: the process runs with its stdin open and outlives the HTTP request (the Durable Object holds it and keeps the Container alive with an alarm).",
+      "type": "object",
+      "required": ["processId"],
+      "properties": {
+        "processId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" }
+      }
+    },
+    "StdinRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data"],
+      "properties": {
+        "data": { "type": "string", "maxLength": 1048576 }
+      }
+    },
+    "ProcessState": {
+      "description": "`running: false` carries the exit code (a VM that is stopped under the process: 137). `running: true` after waitMs.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["running", "exitCode"],
+          "properties": {
+            "running": { "const": false },
+            "exitCode": { "type": "integer" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["running"],
+          "properties": { "running": { "const": true } }
+        }
+      ]
+    },
+    "NetworkPolicy": {
+      "description": "`NetworkPolicy` of dispatcher/src/network/rule.ts: everything, nothing, or a list of host names (`*.example.com` is a suffix). The handler of the Container's outbound traffic reads it for every request; private addresses stay refused whatever it says.",
+      "oneOf": [
+        { "const": "allow-all" },
+        { "const": "deny-all" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allow"],
+          "properties": {
+            "allow": {
+              "type": "array",
+              "maxItems": 500,
+              "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+            }
+          }
+        }
+      ]
+    },
+    "NetworkRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy"],
+      "properties": { "policy": { "$ref": "#/$defs/NetworkPolicy" } }
+    },
+    "ListedVm": {
+      "description": "`ListedVm` of dispatcher/src/launchers/sandbox-service.ts for the reaper. `status` is the Worker's own word (`running`, `pending`, `stopping`, `stopped`, `failed`); the Dispatcher never assumes one it does not know, and reaps `stopped` and `failed` ones with DELETE.",
+      "type": "object",
+      "required": ["name", "createdAtMs", "status", "timeoutMs", "tags"],
+      "properties": {
+        "name": { "$ref": "#/$defs/VmName" },
+        "createdAtMs": { "type": "integer", "minimum": 0 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "timeoutMs": { "type": "integer", "minimum": 0 },
+        "tags": { "$ref": "#/$defs/Tags" }
+      }
+    },
+    "ListVmsResponse": {
+      "type": "object",
+      "required": ["vms"],
+      "properties": {
+        "vms": { "type": "array", "items": { "$ref": "#/$defs/ListedVm" } }
+      }
+    },
+    "HealthResponse": {
+      "description": "No authentication. `workerFeatures`: the claim features (`KnownClaimFeature` of runner-api.v1.json) the Worker image inside the Container image supports, read from that image at build time like the golden snapshot's manifest; the Dispatcher names an image-gated claim feature only when it is listed here and in its own snapshot. `imageVersion`: the git SHA of the build, logged by the Dispatcher. `instanceTypes`: the types the Worker accepts in CreateVmRequest. `workerImageDigest`: see the description of the document. `sysboxProof`: `proven` or `unproven`.",
+      "type": "object",
+      "required": [
+        "ok",
+        "imageVersion",
+        "workerFeatures",
+        "instanceTypes",
+        "workerImageDigest",
+        "sysboxProof"
+      ],
+      "properties": {
+        "ok": { "const": true },
+        "imageVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "workerFeatures": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 64 }
+        },
+        "instanceTypes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InstanceType" }
+        },
+        "workerImageDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "sysboxProof": { "enum": ["proven", "unproven"] }
+      }
+    },
+    "Paths": {
+      "description": "Not a body: the routes of the API, so that the Worker and the Dispatcher test the same list (`dispatcher/src/launchers/cf-sandbox.test.ts` reads it).",
+      "const": [
+        "POST /v1/vms",
+        "POST /v1/vms/{name}/exec",
+        "POST /v1/vms/{name}/processes",
+        "POST /v1/vms/{name}/processes/{id}/stdin",
+        "POST /v1/vms/{name}/processes/{id}/stdin/close",
+        "GET /v1/vms/{name}/processes/{id}",
+        "PUT /v1/vms/{name}/network",
+        "DELETE /v1/vms/{name}",
+        "GET /v1/vms",
+        "GET /health"
+      ]
+    }
+  }
+}

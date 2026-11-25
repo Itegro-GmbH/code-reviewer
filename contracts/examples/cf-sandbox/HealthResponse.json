@@ -1,0 +1,8 @@
+{
+  "ok": true,
+  "imageVersion": "7f5dca66",
+  "workerFeatures": ["implementer_multi_repo", "implementer_workspace_token"],
+  "instanceTypes": ["standard-4"],
+  "workerImageDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "sysboxProof": "proven"
+}
