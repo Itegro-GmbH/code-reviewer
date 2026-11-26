@@ -370,6 +370,9 @@ export type RunLock = {
   touch(): Promise<void>;
 };
 
+/** The most sessions of a lane `laneWorkedOnBranch` reads (the newest ones): a lane with more runs than this forgets its oldest branches. */
+const LANE_BRANCH_LOOKUP_SESSIONS = 500;
+
 export type WorkflowRunsRepository = {
   /**
    * Writes the run, or answers the run that this request id made before (`existing`), or, for a start with a trigger key, the running
@@ -907,10 +910,9 @@ export function createWorkflowRunsRepository(
     },
 
     async laneWorkedOnBranch(workflowId, repositoryId, branch) {
-      // A session of several repositories (and the one-entry list of a `pushBranch` step) keeps its repositories as JSON text; the
-      // containment holds when one entry of the list is this repository with this working branch.
-      const wanted = JSON.stringify([{ repositoryId, branch }]);
-      const found = await db
+      // The list of a session of several repositories (and the one-entry list of a `pushBranch` step) is JSON text. It is read here and not
+      // compared in SQL, so that a list that cannot be read (one row, never expected) is skipped instead of failing the question.
+      const rows = await db
         .selectFrom("workflow_step_runs")
         .innerJoin("workflow_runs", (join) =>
           join
@@ -943,16 +945,32 @@ export function createWorkflowRunsRepository(
               "implementer_turns.workspace_id",
             ),
         )
-        .select("implementer_sessions.id")
+        .select("implementer_sessions.repos")
         .where("workflow_step_runs.workspace_id", "=", workspaceId)
         .where("workflow_runs.workflow_id", "=", workflowId)
+        .where("implementer_sessions.repository_id", "=", repositoryId)
         .where("implementer_sessions.repos", "is not", null)
-        .where(
-          sql<boolean>`implementer_sessions.repos::jsonb @> ${wanted}::jsonb`,
-        )
-        .limit(1)
-        .executeTakeFirst();
-      return found !== undefined;
+        .orderBy("implementer_sessions.created_at", "desc")
+        .limit(LANE_BRANCH_LOOKUP_SESSIONS)
+        .execute();
+      return rows.some((row) => {
+        try {
+          const list: unknown = JSON.parse(row.repos ?? "null");
+          return (
+            Array.isArray(list) &&
+            list.some(
+              (entry: unknown) =>
+                typeof entry === "object" &&
+                entry !== null &&
+                (entry as Record<string, unknown>).repositoryId ===
+                  repositoryId &&
+                (entry as Record<string, unknown>).branch === branch,
+            )
+          );
+        } catch {
+          return false;
+        }
+      });
     },
 
     async findByRequest(clientRequestId) {
