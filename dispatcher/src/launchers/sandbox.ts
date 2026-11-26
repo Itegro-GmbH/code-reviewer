@@ -117,6 +117,28 @@ export const SANDBOX_IMAGE_REFERENCE = "code-reviewer-worker:golden";
 /** The VM sizes the platform has: 1 or an even number up to 8 vCPUs, 2 GB of memory per vCPU (spike #317). */
 export const SANDBOX_VCPUS = [1, 2, 4, 6, 8] as const;
 export const SANDBOX_MEMORY_PER_VCPU_MB = 2048;
+
+/**
+ * The memory of the Vercel VM of this size: 2048 MB per vCPU. The Cloudflare placement does not use it (#1178): its memory is the
+ * instance type's (`CloudflarePlacement.memoryMb`), 12 GiB (`cloudflareVmMemoryMb`) for the 4 vCPU of standard-4 and not 8 GiB.
+ */
+export function vercelVmMemoryMb(vcpus: number): number {
+  return vcpus * SANDBOX_MEMORY_PER_VCPU_MB;
+}
+/**
+ * The share of an instance type's memory that the VM's kernel shows as `MemTotal` and the Dispatcher plans with (#1178). Measured in the spike #1149 on the
+ * instance types: standard-4 (12 GiB) shows 12,650 MB, 98.2 %; standard-3 98.8 %, standard-2 99.4 %. The rest is the kernel's and the hypervisor's, not the VM's:
+ * planning with the nominal memory would leave the guard (8 % of `MemTotal`) less than its floor when the agent uses its whole limit. 98 is the cautious round figure.
+ */
+export const CLOUDFLARE_USABLE_MEMORY_PERCENT = 98;
+
+/** The memory a Cloudflare VM of an instance type with `instanceMemoryMib` has for the plan of its containers (`CLOUDFLARE_USABLE_MEMORY_PERCENT` of it, rounded down). */
+export function cloudflareVmMemoryMb(instanceMemoryMib: number): number {
+  return Math.floor(
+    (instanceMemoryMib * CLOUDFLARE_USABLE_MEMORY_PERCENT) / 100,
+  );
+}
+
 /** What the OS, dockerd and containerd need besides the container (the spike measured about 140 MB). */
 const VM_HEADROOM_MB = 256;
 /**
@@ -156,14 +178,17 @@ export const READER_COUNT = 2;
 export const MEMORY_GUARD_MIN_FLOOR_MB = 512;
 export const MEMORY_GUARD_FLOOR_PERCENT = 8;
 
-/** The guard's floor for a VM of this many vCPUs, in MB (rounded up). */
-export function memoryGuardFloorMb(vcpus: number): number {
+/** The guard's floor for a VM with this much memory, in MB (rounded up). The guard reads the VM's own `MemTotal`, so it is a share of the real memory. */
+export function memoryGuardFloorOfMb(vmMemoryMb: number): number {
   return Math.max(
     MEMORY_GUARD_MIN_FLOOR_MB,
-    Math.ceil(
-      (vcpus * SANDBOX_MEMORY_PER_VCPU_MB * MEMORY_GUARD_FLOOR_PERCENT) / 100,
-    ),
+    Math.ceil((vmMemoryMb * MEMORY_GUARD_FLOOR_PERCENT) / 100),
   );
+}
+
+/** The guard's floor for a Vercel VM of this many vCPUs, in MB (rounded up). */
+export function memoryGuardFloorMb(vcpus: number): number {
+  return memoryGuardFloorOfMb(vercelVmMemoryMb(vcpus));
 }
 
 /**
@@ -173,14 +198,19 @@ export function memoryGuardFloorMb(vcpus: number): number {
  * and 8 vCPU that is 656, 984 and 1,311 MB, and an agent inside its own limit must not be able to bring the VM below it. Every figure
  * is in the table of "The agent's container" in docs/implementer.md, with the measurements behind the limits. The Worker refuses a
  * value below its minimum (`MIN_AGENT_MEMORY_MB` of the runner's job_run.py) with the free `sandbox_size_unsupported`; this function
- * only does the sum.
+ * only does the sum. `vmMemoryMb` is the VM's memory, 2 GB per vCPU unless the placement has its own (#1178: a Cloudflare Container has the memory
+ * of its instance type, 12 GiB at 4 vCPU); every deduction is the same for both.
  */
-export function agentMemoryMb(vcpus: number, controlMb: number): number {
+export function agentMemoryMb(
+  vcpus: number,
+  controlMb: number,
+  vmMemoryMb: number = vercelVmMemoryMb(vcpus),
+): number {
   return Math.max(
     0,
-    vcpus * SANDBOX_MEMORY_PER_VCPU_MB -
+    vmMemoryMb -
       IMPLEMENTER_VM_HEADROOM_MB -
-      (memoryGuardFloorMb(vcpus) - MEMORY_GUARD_MIN_FLOOR_MB) -
+      (memoryGuardFloorOfMb(vmMemoryMb) - MEMORY_GUARD_MIN_FLOOR_MB) -
       controlMb -
       MODEL_DOOR_MEMORY_MB -
       NETWORK_DOOR_MEMORY_MB -
@@ -259,6 +289,11 @@ export type CloudflarePlacement = {
   health(): Promise<CfHealth | undefined>;
   /** The sizes in vCPUs the Dispatcher has an instance type for (`CF_SANDBOX_INSTANCE_TYPES`). */
   sizes: readonly number[];
+  /**
+   * #1178: the memory in MiB of the instance type of each size (the type's own, `:<MiB>` of its entry in `CF_SANDBOX_INSTANCE_TYPES`, or 2048 per vCPU for a type
+   * the Dispatcher does not know the memory of). The agent's share is planned from it, not from the Vercel ratio.
+   */
+  memoryMb: ReadonlyMap<number, number>;
   /** The Sysbox verdict for this placement (`CF_SANDBOX_SYSBOX_PROOF`): the image has no pipeline that records one. */
   sysboxProof: SysboxProof;
 };
@@ -341,7 +376,11 @@ function megabytes(size: string): number {
 }
 
 /** The VM size and the container memory of a launch: the kind's defaults, then the configuration over them. */
-function planOf(spec: LaunchSpec): Plan {
+function planOf(
+  spec: LaunchSpec,
+  /** The memory of the VM of a size on the placement of the job (#1178); Vercel's 2048 MB per vCPU unless the launch names another. */
+  vmMemoryOf: (vcpus: number) => number = vercelVmMemoryMb,
+): Plan {
   const defaults = SANDBOX_KIND_DEFAULTS[spec.kind];
   const config: LaunchConfig = spec.config;
 
@@ -361,7 +400,7 @@ function planOf(spec: LaunchSpec): Plan {
   const memory = { ...defaults.memory, ...config.container?.memory };
   if (
     jobSize !== undefined &&
-    agentMemoryMb(jobSize, megabytes(memory.limit)) <
+    agentMemoryMb(jobSize, megabytes(memory.limit), vmMemoryOf(jobSize)) <
       IMPLEMENTER_MIN_AGENT_MEMORY_MB
   )
     throw new LaunchError("sandbox_size_unsupported");
@@ -381,12 +420,14 @@ function planOf(spec: LaunchSpec): Plan {
       ? IMPLEMENTER_VM_HEADROOM_MB
       : VM_HEADROOM_MB;
     const controlMb = megabytes(rendered.memory.limit);
-    if (controlMb > vcpus * SANDBOX_MEMORY_PER_VCPU_MB - headroomMb - doorMb)
-      throw configInvalid();
+    const vmMemoryMb = vmMemoryOf(vcpus);
+    if (controlMb > vmMemoryMb - headroomMb - doorMb) throw configInvalid();
     return {
       vcpus,
       overrides,
-      agentMemoryMb: implementer ? agentMemoryMb(vcpus, controlMb) : 0,
+      agentMemoryMb: implementer
+        ? agentMemoryMb(vcpus, controlMb, vmMemoryMb)
+        : 0,
     };
   } catch (error) {
     if (error instanceof ContainerSpecError) throw configInvalid();
@@ -663,7 +704,20 @@ export function createSandboxLauncher(
     },
 
     async launch(spec, signal) {
-      const plan = planOf(spec);
+      // #1178: the memory of the VM is the placement's: a Cloudflare job is planned with its instance type's memory (a size without one is refused
+      // below), everything else with Vercel's ratio.
+      const cloudflareMemory = options.cloudflare?.memoryMb;
+      const plan = planOf(
+        spec,
+        spec.placement === "cloudflare" && cloudflareMemory !== undefined
+          ? (vcpus) => {
+              const instance = cloudflareMemory.get(vcpus);
+              return instance === undefined
+                ? vercelVmMemoryMb(vcpus)
+                : cloudflareVmMemoryMb(instance);
+            }
+          : vercelVmMemoryMb,
+      );
       // #1158: the placement of the job. Vercel is everything that is not named; a Cloudflare job needs the configuration, the Implementer's kind
       // (a review is never placed there), a size the Dispatcher has an instance type for and a Worker whose health says which image the VM has.
       let cloudflareImage: string | undefined;
