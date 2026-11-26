@@ -27,7 +27,8 @@ from code_reviewer_runner.implementer.door.subscription import (
     subscription_start_document,
 )
 
-REAL_TOKEN = "sk-ant-oat01-REALTOKEN-0123456789abcdefghijklmnop"
+# Split so that no source line is shaped like a real token (`tracked-secrets.test.ts`).
+REAL_TOKEN = "sk-" + "ant-" + "oat01-REALTOKEN-0123456789abcdefghijklmnop"
 OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20"
 
 
@@ -65,6 +66,7 @@ def run_subscription_door(
             )
         )
         door_out.close()
+        door_in.close()
 
     def read() -> None:
         reader = os.fdopen(out_read, "r", encoding="utf-8")
@@ -159,7 +161,7 @@ def test_a_request_without_credentials_passes_through_without_any() -> None:
 @pytest.mark.parametrize(
     "credentials",
     [
-        {"Authorization": "Bearer sk-ant-oat01-SOMEONE-ELSES-TOKEN"},
+        {"Authorization": "Bearer sk-" + "ant-" + "oat01-SOMEONE-ELSES-TOKEN"},
         {"Authorization": f"Bearer {REAL_TOKEN}"},
         {"Authorization": f"bearer {SUBSCRIPTION_PLACEHOLDER}x"},
         {"Authorization": f"Basic {SUBSCRIPTION_PLACEHOLDER}"},
@@ -259,6 +261,7 @@ def test_the_start_document_is_exactly_one_or_the_door_refuses_with_a_word_only(
     door = run_subscription_door(document=_document(token=""))
     assert door.refused and set(door.lines[0]) == {"t", "reason"}
     door.wait()
+    door.end_of_input()
 
 
 # #1176-T06

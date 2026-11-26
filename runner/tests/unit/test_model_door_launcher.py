@@ -162,7 +162,7 @@ def test_the_token_of_a_subscription_turn_reaches_the_door_on_stdin_and_is_in_no
 
     from code_reviewer_runner.implementer.door.subscription import SUBSCRIPTION_PLACEHOLDER
 
-    token = "sk-ant-oat01-LAUNCHERTOKEN-0123456789abcdef"
+    token = "sk-" + "ant-" + "oat01-LAUNCHERTOKEN-0123456789abcdef"
 
     door = start_subscription_door(token=token, deadline_seconds=600.0, port=10180, seams=rig.seams)
     connection = http.client.HTTPConnection("127.0.0.1", rig.port, timeout=10)

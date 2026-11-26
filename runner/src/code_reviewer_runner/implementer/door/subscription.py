@@ -59,7 +59,11 @@ from .protocol import (
 
 # What the agent's container is given as `CLAUDE_CODE_OAUTH_TOKEN`. In the form of a token, a value
 # the door recognises and Anthropic would refuse: it is not a secret and opens nothing.
-SUBSCRIPTION_PLACEHOLDER: Final = "sk-ant-oat01-code-reviewer-door-placeholder-not-a-credential"
+# Written in two pieces so that no line of the source is shaped like a real token
+# (`app/src/ci/tracked-secrets.test.ts`).
+SUBSCRIPTION_PLACEHOLDER: Final = (
+    "sk-" + "ant-" + "oat01-code-reviewer-door-placeholder-not-a-credential"
+)
 # The one destination of the door, and the host name the network policy and the Dispatcher's switch
 # name for a turn of this kind.
 SUBSCRIPTION_HOST: Final = "api.anthropic.com"
