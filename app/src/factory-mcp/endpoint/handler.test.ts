@@ -118,6 +118,8 @@ describe("authentication of /api/mcp", () => {
       `resource_metadata="${ISSUER}/.well-known/oauth-protected-resource/api/mcp"`,
     );
     expect(challenge).not.toContain("error=");
+    // #1167: both scopes, so the consent page offers control too (a client requests what the challenge names).
+    expect(challenge).toContain('scope="factory:read factory:control"');
   });
 
   // #1144-T161
