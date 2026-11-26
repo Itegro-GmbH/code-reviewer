@@ -196,6 +196,17 @@ export async function buildMultiRepo(
       branchExists.push(false);
       continue;
     }
+    // #1177: the first turn of a `pushBranch` entry follows what the start of the session decided (`expectExisting`): asking the platform
+    // again would continue a branch that appeared in between and push onto work that is not the lane's. The runner then ends the turn
+    // `branch_exists` (it was told the branch is new and finds it) or `clone_failed` (it was told the branch is there and it is gone).
+    if (
+      input.resume === null &&
+      item.entry.pushOnly === true &&
+      item.entry.expectExisting !== undefined
+    ) {
+      branchExists.push(item.entry.expectExisting);
+      continue;
+    }
     const pushedBefore =
       resumeRepos?.[index]?.branches.some(
         (branch) => branch.name === item.entry.branch,
@@ -245,6 +256,8 @@ export async function buildMultiRepo(
     branch: item.entry.branch,
     branchExists: branchExists[index] === true,
     tokenId: tokenIdOf.get(item.integration.id) as string,
+    // #1177: the runner pushes this branch only (`select_branches`); every other entry keeps the rule of all branches.
+    ...(item.entry.pushOnly === true ? { pushOnly: true } : {}),
   }));
   const times = ledger.map((entry) => entry.expiresAt).sort();
   return {

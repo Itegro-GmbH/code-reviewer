@@ -3,7 +3,7 @@
 // Pins down the checks on what a runner sends: the job id in the path, the runner id header and the
 // bodies of heartbeat and complete. A refusal names fields and reasons, never the values.
 import { describe, expect, it } from "vitest";
-import { IMPLEMENTER_RESUME_REASONS } from "./contract.ts";
+import { CLAIM_FEATURES, IMPLEMENTER_RESUME_REASONS } from "./contract.ts";
 import {
   callerLlmProviders,
   parseClaimRequest,
@@ -740,6 +740,16 @@ describe("the features of a claim (#279)", () => {
     ).toEqual({
       ok: true,
       value: { engines: ["opencode"], features: ["dynamic_capabilities"] },
+    });
+  });
+
+  // #1177-T77: a claimant that names every feature the app knows is not refused for the length of its list.
+  it("accepts a claim that names all the known features", () => {
+    const all = CLAIM_FEATURES.slice();
+    expect(all.length).toBeGreaterThan(16);
+    expect(parseClaimRequest({ features: all })).toEqual({
+      ok: true,
+      value: { features: all },
     });
   });
 

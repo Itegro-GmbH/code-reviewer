@@ -33,7 +33,26 @@ describe("the claim features that depend on the Worker image", () => {
     expect(IMAGE_GATED_CLAIM_FEATURES).toEqual([
       "implementer_multi_repo",
       "implementer_workspace_token",
+      "implementer_push_allowlist",
     ]);
+  });
+
+  // #1177-T76
+  it("names implementer_push_allowlist only when the image lists it: an older snapshot never gets a turn of a step that names its branch", () => {
+    expect(
+      imageClaimFeatures("implementer_multi_repo,implementer_push_allowlist"),
+    ).toEqual(["implementer_multi_repo", "implementer_push_allowlist"]);
+    expect(imageClaimFeatures("implementer_multi_repo")).toEqual([
+      "implementer_multi_repo",
+    ]);
+    // One claim may be given a job of either placement: Cloudflare's image must list it too.
+    expect(
+      claimFeaturesForPlacements(
+        ["implementer_multi_repo", "implementer_push_allowlist"],
+        ["implementer_multi_repo"],
+        true,
+      ),
+    ).toEqual(["implementer_multi_repo", "placement_cloudflare"]);
   });
 
   // #1150-T19

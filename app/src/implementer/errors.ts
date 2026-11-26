@@ -27,6 +27,11 @@ export const IMPLEMENTER_ERROR_CODES = [
    */
   "IMPLEMENTER_BRANCH_EXISTS",
   /**
+   * #1177: the branch a lane step is to push to is protected on the platform (a protection rule applies). Refused before the agent starts;
+   * a protected branch is never pushed to by a lane, whoever made it. 409.
+   */
+  "IMPLEMENTER_BRANCH_PROTECTED",
+  /**
    * The new name is a folder of a branch that exists, or a branch of the repository is a folder of the new name (git holds a
    * name as a file or as a folder, not both: `foo` and `foo/bar`). Found in the first 100 branches the platform lists. 409.
    */
@@ -89,6 +94,7 @@ export const IMPLEMENTER_ERROR_STATUS: Record<
   IMPLEMENTER_WRITE_NOT_GRANTED: 409,
   IMPLEMENTER_BASE_BRANCH_NOT_FOUND: 404,
   IMPLEMENTER_BRANCH_EXISTS: 409,
+  IMPLEMENTER_BRANCH_PROTECTED: 409,
   IMPLEMENTER_BRANCH_CONFLICT: 409,
   IMPLEMENTER_REQUEST_REUSED: 409,
   IMPLEMENTER_ENVIRONMENT_NOT_FOUND: 404,

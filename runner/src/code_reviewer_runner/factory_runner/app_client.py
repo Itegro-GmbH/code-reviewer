@@ -59,6 +59,9 @@ FEATURE_WORKER_CREDENTIAL = "worker_credential"
 # `implementer.repos`, so a job of several repositories is a candidate for it (a runner without the
 # feature never claims one).
 FEATURE_MULTI_REPO = "implementer_multi_repo"
+# #1177: named only when the Workers this runner starts push just the branch of an entry marked
+# `pushOnly`, so a job of a step that names its branch is a candidate only for such a runner.
+FEATURE_PUSH_ALLOWLIST = "implementer_push_allowlist"
 # Why a dispatcher gives a claim back (`KnownReleaseReason` of the runner API contract).
 RELEASE_LAUNCH_FAILED = "launch_failed"
 RELEASE_WORKER_EXITED = "worker_exited"
@@ -150,14 +153,15 @@ class AppClient:
         # only when the Workers this runner starts have them.
         self._features: tuple[str, ...] = (FEATURE_WORKER_CREDENTIAL,)
 
-    def use_features(self, *, multi_repo: bool) -> None:
+    def use_features(self, *, multi_repo: bool, push_allowlist: bool = False) -> None:
         """Name `implementer_multi_repo` in the claim only when the Workers this runner starts read
         `implementer.repos`. Without it the app never hands this runner a job of several
-        repositories: such a job waits for a runner that has the feature."""
+        repositories: such a job waits for a runner that has the feature. The same for
+        `implementer_push_allowlist` (#1177) and a job of a step that names its branch."""
         self._features = (
-            (FEATURE_WORKER_CREDENTIAL, FEATURE_MULTI_REPO)
-            if multi_repo
-            else (FEATURE_WORKER_CREDENTIAL,)
+            FEATURE_WORKER_CREDENTIAL,
+            *((FEATURE_MULTI_REPO,) if multi_repo else ()),
+            *((FEATURE_PUSH_ALLOWLIST,) if push_allowlist else ()),
         )
 
     def use_credential(self, credential: str) -> None:

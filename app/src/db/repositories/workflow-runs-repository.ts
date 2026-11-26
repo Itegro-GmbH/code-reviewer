@@ -370,6 +370,11 @@ export type RunLock = {
   touch(): Promise<void>;
 };
 
+/** The text of a LIKE pattern that matches `text` itself (`%`, `_` and the escape character `\` are escaped). */
+function likeLiteral(text: string): string {
+  return text.replace(/[\\%_]/g, "\\$&");
+}
+
 export type WorkflowRunsRepository = {
   /**
    * Writes the run, or answers the run that this request id made before (`existing`), or, for a start with a trigger key, the running
@@ -377,6 +382,16 @@ export type WorkflowRunsRepository = {
    */
   createRun(input: NewWorkflowRun): Promise<CreateRunOutcome>;
   getRun(id: string): Promise<StoredWorkflowRun | undefined>;
+  /**
+   * #1177: whether a session of a run of this workflow (any run of it, the running one included) worked on the branch `branch` of the
+   * repository, as the working branch of its repositories list (`pushBranch` of an agent step). It says the lane made the branch (or was
+   * going to), which is what lets a step continue a branch that exists on the platform; it does not ask the platform.
+   */
+  laneWorkedOnBranch(
+    workflowId: string,
+    repositoryId: string,
+    branch: string,
+  ): Promise<boolean>;
   /** The run a client request id made, or undefined. */
   findByRequest(
     clientRequestId: string,
@@ -894,6 +909,100 @@ export function createWorkflowRunsRepository(
     async getRun(id) {
       const row = await selectRun(db, id).executeTakeFirst();
       return row === undefined ? undefined : runFrom(row);
+    },
+
+    async laneWorkedOnBranch(workflowId, repositoryId, branch) {
+      // The list of a `pushBranch` step's session is JSON text. The rows are narrowed in SQL to the sessions that name this branch as a
+      // named one (the app writes the list without spaces, and the branch as JSON text), then read here, so that a list that cannot be read
+      // (one row, never expected) is skipped instead of failing the question. There is no cap on the sessions: a lane that is old must not
+      // forget a branch it made and be refused it as foreign.
+      const named = likeLiteral(`"branch":${JSON.stringify(branch)}`);
+      const rows = await db
+        .selectFrom("workflow_step_runs")
+        .innerJoin("workflow_runs", (join) =>
+          join
+            .onRef("workflow_runs.id", "=", "workflow_step_runs.run_id")
+            .onRef(
+              "workflow_runs.workspace_id",
+              "=",
+              "workflow_step_runs.workspace_id",
+            ),
+        )
+        .innerJoin("implementer_turns", (join) =>
+          join
+            .onRef("implementer_turns.id", "=", "workflow_step_runs.turn_id")
+            .onRef(
+              "implementer_turns.workspace_id",
+              "=",
+              "workflow_step_runs.workspace_id",
+            ),
+        )
+        .innerJoin("implementer_sessions", (join) =>
+          join
+            .onRef(
+              "implementer_sessions.id",
+              "=",
+              "implementer_turns.session_id",
+            )
+            .onRef(
+              "implementer_sessions.workspace_id",
+              "=",
+              "implementer_turns.workspace_id",
+            ),
+        )
+        .select("implementer_sessions.repos")
+        .where("workflow_step_runs.workspace_id", "=", workspaceId)
+        .where("workflow_runs.workflow_id", "=", workflowId)
+        .where("implementer_sessions.repos", "like", `%${named}%`)
+        .where("implementer_sessions.repos", "like", '%"pushOnly":true%')
+        // A session whose first turn found the branch already there (it appeared in between, made by somebody else) did not make it.
+        .where(({ not, exists, selectFrom }) =>
+          not(
+            exists(
+              selectFrom("implementer_turns as refused")
+                .innerJoin("jobs as refused_job", (join) =>
+                  join
+                    .onRef("refused_job.id", "=", "refused.job_id")
+                    .onRef(
+                      "refused_job.workspace_id",
+                      "=",
+                      "refused.workspace_id",
+                    ),
+                )
+                .select(sql<number>`1`.as("one"))
+                .whereRef("refused.session_id", "=", "implementer_sessions.id")
+                .whereRef(
+                  "refused.workspace_id",
+                  "=",
+                  "implementer_sessions.workspace_id",
+                )
+                .where("refused_job.error_code", "=", "branch_exists"),
+            ),
+          ),
+        )
+        .execute();
+      // Made by the lane: a `pushBranch` entry that started on a branch that did not exist, in this repository (any entry of the list).
+      return rows.some((row) => {
+        try {
+          const list: unknown = JSON.parse(row.repos ?? "null");
+          return (
+            Array.isArray(list) &&
+            list.some((entry: unknown) => {
+              if (typeof entry !== "object" || entry === null) return false;
+              const fields = entry as Record<string, unknown>;
+              return (
+                fields.repositoryId === repositoryId &&
+                fields.branch === branch &&
+                fields.pushOnly === true &&
+                fields.expectExisting === false &&
+                fields.base !== branch
+              );
+            })
+          );
+        } catch {
+          return false;
+        }
+      });
     },
 
     async findByRequest(clientRequestId) {

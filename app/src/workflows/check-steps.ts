@@ -84,6 +84,7 @@ import {
   PROJECT_MEMBERS,
   PULL_REQUEST_COMMENT,
   PULL_REQUEST_OPENING_CONNECTORS,
+  PUSH_BRANCH_ROOTS,
   REPOS_BASE_ROOTS,
   REPOS_BRANCH_ROOTS,
   REPOS_REPO_ROOTS,
@@ -94,6 +95,7 @@ import {
   type ConnectorSpec,
 } from "./connectors.ts";
 import { literalText, parseTemplate } from "./template.ts";
+import { isPushBranchName } from "../implementer/branch-name.ts";
 import {
   SESSION_REPOS_MAX,
   deriveMountNames,
@@ -569,6 +571,7 @@ const AGENT_KEYS = [
   "instruction",
   "session",
   "branch",
+  "pushBranch",
   "repos",
   "result",
   "mcp",
@@ -1558,6 +1561,83 @@ function checkStartBranch(
   });
 }
 
+/**
+ * `pushBranch` (#1177, epic #1175): the branch the session works on and pushes to instead of `workflow/<run id>/<step id>`. It decides where the
+ * agent's commits go, so it is a target (a literal, or an input of a manual trigger), never text an agent wrote. A literal is a branch name.
+ * It needs a step that may push, a session of its own (a session that goes on keeps its branch) and no `repos` (their entries name their
+ * own branches).
+ */
+function checkPushBranch(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+  env: Env,
+  state: StepState,
+): void {
+  const value = node.pushBranch;
+  if (value === undefined) return;
+  const where = pointer(path, "pushBranch");
+  if (typeof value !== "string") {
+    c.report(
+      issue(
+        where,
+        "wrong_type",
+        `'pushBranch' must be a text, not ${jsonTypeName(value)}.`,
+      ),
+    );
+    return;
+  }
+  const parsed = parseTemplate(value);
+  const literal = parsed.problems.length > 0 ? undefined : literalText(parsed);
+  if (value.trim() === "")
+    c.report(
+      issue(
+        where,
+        "invalid_value",
+        "'pushBranch' is the name of a branch, not an empty text.",
+      ),
+    );
+  else if (literal !== undefined && !isPushBranchName(literal))
+    c.report(
+      issue(
+        where,
+        "invalid_value",
+        "'pushBranch' is the name of a branch (no space, no '..', no '~ ^ : ? * [', no leading '-' or '+', not starting with 'refs/' or 'heads/', at most 200 characters).",
+      ),
+    );
+  if (factsOf(node, c.resolver)?.canPush === false)
+    c.report(
+      issue(
+        where,
+        "push_branch_without_push",
+        isInlineStep(node)
+          ? "This step has canPush false, so nothing it does leaves its container: there is no branch to push. Take 'pushBranch' out, or set canPush to true."
+          : `The profile ${shown(String(node.profile))} may not push, so there is no branch to push. Take 'pushBranch' out, or use a profile that may push.`,
+      ),
+    );
+  if (isRecord(node.session))
+    c.report(
+      issue(
+        where,
+        "session_target_invalid",
+        "A step that goes on in a session (session.continue) works on the branch of that session, so it takes no 'pushBranch'. Use 'pushBranch' on a step that starts a session of its own.",
+      ),
+    );
+  if (node.repos !== undefined)
+    c.report(
+      issue(
+        where,
+        "push_branch_with_repos",
+        "A step with 'repos' names its branches in each entry, so it takes no 'pushBranch'. Take one of the two out.",
+      ),
+    );
+  checkInput(value, STRING, where, c, reachOf(env, where, state), {
+    input: "pushBranch",
+    roots: PUSH_BRANCH_ROOTS,
+    text: true,
+  });
+}
+
 /** Whether the step goes on in the session of an agent step that has `repos` (#1092): its `{{<step>.repos}}` is the session's list. */
 function continuesRepos(node: Record<string, unknown>, env: Env): boolean {
   const session = node.session;
@@ -1754,6 +1834,7 @@ function checkAgent(
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);
   checkStartBranch(node, path, c, env, state);
+  checkPushBranch(node, path, c, env, state);
   checkRepos(node, path, c, env, state);
   checkStepMcp(node, path, c.laneMcp ?? new Set(), c.report);
   if (node.result === undefined) return;

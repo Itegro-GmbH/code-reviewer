@@ -72,6 +72,10 @@ export const SEMANTIC_ISSUE_CODES = [
   "repos_with_branch",
   /** #1092: an agent step has `repos` next to `session` (a session that goes on keeps the repositories of the session it continues). */
   "repos_with_session_continue",
+  /** #1177: an agent step has a `pushBranch` and may not push (`canPush` false, or a profile that may not push). */
+  "push_branch_without_push",
+  /** #1177: an agent step has `repos` next to its `pushBranch` (each entry of `repos` names its own branch). */
+  "push_branch_with_repos",
   /** #1092: two entries of `repos` name one repository, compared without regard to case. */
   "repo_duplicate",
   /** #1092: the mount names of two repositories of `repos` (`app` or `<owner>__<name>`) are equal without regard to case. */

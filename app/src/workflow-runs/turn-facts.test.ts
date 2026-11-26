@@ -160,6 +160,45 @@ describe("the outcome of a turn", () => {
     }
   });
 
+  // #1177-T38
+  it("ends a pushBranch step whose branch appeared after the start with push_branch_exists, and only that one", () => {
+    const named = {
+      ...SESSION,
+      repos: [
+        {
+          repositoryId: "r-1",
+          fullName: "acme/app",
+          name: "app",
+          base: "main",
+          branch: "agent/handoff",
+          pushOnly: true as const,
+          expectExisting: false,
+        },
+      ],
+    };
+    expect(
+      outcomeOfTurn(
+        ended({
+          jobStatus: "failed",
+          jobErrorCode: "branch_exists",
+          session: named,
+        }),
+        1_000_000,
+      ),
+    ).toMatchObject({
+      ok: false,
+      code: "push_branch_exists",
+      detail: "status=failed error=branch_exists",
+    });
+    // A session without a named branch keeps the code of the job.
+    expect(
+      outcomeOfTurn(
+        ended({ jobStatus: "failed", jobErrorCode: "branch_exists" }),
+        1_000_000,
+      ),
+    ).toMatchObject({ ok: false, code: "branch_exists" });
+  });
+
   // #873-T40: a stored message is a sentence for people: the codes stay in the code of the step and in the detail for the log
   it("tells a failed job in a fixed sentence, with the status and code only in the detail", () => {
     const outcome = outcomeOfTurn(

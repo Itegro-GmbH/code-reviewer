@@ -128,6 +128,8 @@ export type FakeGithubAppClientData = {
   issues?: Record<string, ReadIssue>;
   /** Makes `getIssue` reject with this error (#916). */
   issueFailure?: Error;
+  /** The branches `getBranch` answers `protected: true` for (#1177). */
+  protectedBranches?: string[];
   /** Makes `getRepositoryFacts`, `listBranches` and `getBranch` reject with this error (#750). */
   branchReadFailure?: Error;
 };
@@ -292,7 +294,14 @@ export function fakeGithubAppClient(
       throwIfAborted(signal);
       if (data.branchReadFailure) throw data.branchReadFailure;
       const sha = branchesOf()[name];
-      return sha === undefined ? null : { sha };
+      return sha === undefined
+        ? null
+        : {
+            sha,
+            ...(data.protectedBranches?.includes(name) === true
+              ? { protected: true }
+              : {}),
+          };
     },
     async getCollaboratorPermission(installationId, repoFullName, login) {
       record("getCollaboratorPermission", installationId, repoFullName, login);

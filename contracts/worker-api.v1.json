@@ -12,7 +12,7 @@
         "login": { "const": "workspace" },
         "features": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_]{0,63}(,[a-z][a-z0-9_]{0,63}){0,15}$"
+          "pattern": "^[a-z][a-z0-9_]{0,63}(,[a-z][a-z0-9_]{0,63}){0,31}$"
         },
         "llmProviders": {
           "type": "string",

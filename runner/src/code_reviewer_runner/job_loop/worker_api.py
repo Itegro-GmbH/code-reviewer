@@ -125,6 +125,9 @@ WORKER_FEATURES: tuple[str, ...] = (
     # #1150: the Worker reads `implementer.subscription.oauthToken` (the Claude Code OAuth token of
     # the workspace) and runs the turn on it when the machine has no login of its own.
     "implementer_workspace_token",
+    # #1177: the Worker reads `pushOnly` of an entry of `implementer.repos` and pushes only that
+    # entry's branch of the repository (`select_branches(only=...)`).
+    "implementer_push_allowlist",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

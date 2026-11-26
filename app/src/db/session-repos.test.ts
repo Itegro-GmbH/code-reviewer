@@ -22,6 +22,24 @@ describe("the stored repositories of a session", () => {
     expect(parseSessionRepos(null)).toBeNull();
   });
 
+  // #1177-T63
+  it("keep the pushBranch marks and leave them out of every other entry", () => {
+    const pushed = {
+      ...REPO,
+      pushOnly: true as const,
+      expectExisting: false,
+    };
+    expect(parseSessionRepos(serializeSessionRepos([pushed, REPO]))).toEqual([
+      pushed,
+      REPO,
+    ]);
+    expect(serializeSessionRepos([REPO])).not.toContain("pushOnly");
+    // A mark without `pushOnly` is not read.
+    expect(
+      parseSessionRepos(JSON.stringify([{ ...REPO, expectExisting: true }])),
+    ).toEqual([REPO]);
+  });
+
   // #1092 (review finding 3): the caller tells "none" (null column) from "unreadable" (set, and null here); the claim never treats the latter as one repository.
   it.each([
     ["text that is not JSON", "{not json"],
