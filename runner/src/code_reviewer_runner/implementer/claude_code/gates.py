@@ -2,6 +2,12 @@
 
 """The gates of a turn that runs on the device's login (#856).
 
+**Since #1176 the login is normally not in the agent's container at all.** The model door holds
+the real token and the agent is given a fixed placeholder (`door/subscription.py`), so the network
+is the step's own rule, `open` included, and `agent_rule` returns it as it is. Everything below
+describes the other case, which stays for a placement that cannot host the door
+(`Placement.subscription_door`): there the login is inside the agent's container.
+
 The login is inside the agent's container: Claude Code needs it there, and a tool of the agent can
 read it. The decision (the lead's, owner may revise) is to accept that and to guard the exits:
 
@@ -48,8 +54,8 @@ NETWORK_WILDCARD_REASON: Final = "subscription_network_wildcard"
 # A `*.suffix` entry on one of these covers hosts anybody can get (user content, hosting, a
 # country's public suffix): the login is in the container, so a GET to any tenant's host could
 # carry it. An exact host on these domains stays the owner's choice. Small on purpose, the common
-# cases; the app keeps the same list (`app/src/network-rule/shared-domains.ts`, validator and
-# claim), and a test on each side pins it.
+# cases. Only the fallback without the model door's subscription mode uses it (#1176; the app's
+# validator and claim, which kept a copy, no longer refuse these entries).
 SHARED_SUFFIXES: Final = (
     "github.io",
     "githubusercontent.com",
@@ -85,6 +91,14 @@ def is_shared_wildcard(entry: str) -> bool:
         return False
     base = entry[2:]
     return base in SHARED_SUFFIXES or _COUNTRY_SECOND_LEVEL.fullmatch(base) is not None
+
+
+def agent_rule(environment: NetworkRule, *, token_behind_door: bool) -> NetworkRule:
+    """The rule of the agent's network for a turn on a subscription (#1176). With the token behind
+    the model door nothing the agent can reach holds it, so the step's rule is the rule as it is
+    (`open`, any list, no read-only narrowing, no check of shared domains: they guarded the token in
+    the container). Without the door it is the narrowed rule of `subscription_rule`."""
+    return environment if token_behind_door else subscription_rule(environment)
 
 
 def subscription_rule(environment: NetworkRule) -> NetworkRule:

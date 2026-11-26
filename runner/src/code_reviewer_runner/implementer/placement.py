@@ -84,6 +84,11 @@ class Placement:
     docker_socket: str = B_DOCKER_SOCKET
     # A's address on the inner bridge: where the doors listen and B reaches them (split only).
     door_address: str = ""
+    # #1176: whether the model door can hold the token of a Claude Code turn on a subscription (its
+    # subscription mode, `door/subscription.py`) so that the token stays out of the agent's
+    # container. Every placement that has a model door has it; a placement that cannot keeps the
+    # narrowed network of `claude_code/gates.py`, and the run says so.
+    subscription_door: bool = True
 
     @property
     def model_door_address(self) -> str:

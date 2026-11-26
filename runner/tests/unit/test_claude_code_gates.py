@@ -3,9 +3,6 @@
 """The gates of a turn that runs on the device's login (#856): the network of the agent's
 container, no new privileges, and the check that the device can run the harness at all."""
 
-import re
-from pathlib import Path
-
 import pytest
 
 from code_reviewer_runner.implementer.agent_container import agent_document
@@ -14,7 +11,7 @@ from code_reviewer_runner.implementer.claude_code.gates import (
     NETWORK_HOSTS_REASON,
     NETWORK_OPEN_REASON,
     NETWORK_WILDCARD_REASON,
-    SHARED_SUFFIXES,
+    agent_rule,
     is_shared_wildcard,
     subscription_rule,
 )
@@ -143,17 +140,6 @@ def test_a_suffix_of_ones_own_and_an_exact_host_on_a_shared_domain_stay_the_owne
     assert subscription_rule(NetworkRule(MODE_LIST, (entry,))).read_only == (entry,)
 
 
-# #1126-T56
-def test_the_list_is_kept_in_step_with_the_apps() -> None:
-    """`app/src/network-rule/shared-domains.ts` holds the same suffixes (validator and claim)."""
-    source = (
-        Path(__file__).resolve().parents[3] / "app/src/network-rule/shared-domains.ts"
-    ).read_text(encoding="utf-8")
-    listed = re.search(r"SHARED_SUFFIXES: readonly string\[\] = \[(.*?)\];", source, re.S)
-    assert listed is not None
-    assert tuple(re.findall(r'"([^"]+)"', listed.group(1))) == SHARED_SUFFIXES
-
-
 # #1126-T03
 def test_the_read_only_hosts_travel_in_the_door_document_and_come_back() -> None:
     rule = subscription_rule(NetworkRule(MODE_LIST, ("example.org",)))
@@ -215,3 +201,34 @@ def test_the_agent_container_can_be_made_without_new_privileges() -> None:
     assert "SecurityOpt" not in plain  # the hosted OpenCode agent is root and free, as before
     assert sealed["SecurityOpt"] == ["no-new-privileges"]
     assert sealed["Privileged"] is False
+
+
+# #1176-T30
+@pytest.mark.parametrize(
+    "rule",
+    [
+        OFF,
+        OPEN,
+        NetworkRule(MODE_LIST, ("example.org", "*.github.io", "fonts.googleapis.com")),
+        NetworkRule(MODE_LIST, ("registry.npmjs.org",)),
+    ],
+)
+def test_with_the_token_behind_the_door_the_steps_rule_is_the_rule_as_it_is(
+    rule: NetworkRule,
+) -> None:
+    """Nothing the agent can reach holds the token, so there is nothing to narrow: `open`, a list
+    of any hosts (shared domains too), no read-only, no port 443 only."""
+    assert agent_rule(rule, token_behind_door=True) == rule
+
+
+# #1176-T31
+def test_without_the_door_the_rule_is_the_narrowed_one_and_open_still_refuses() -> None:
+    narrowed = NetworkRule(
+        MODE_LIST, (ANTHROPIC_HOST, "example.org"), ports=(443,), read_only=("example.org",)
+    )
+    assert agent_rule(NetworkRule(MODE_LIST, ("example.org",)), token_behind_door=False) == narrowed
+    assert agent_rule(OFF, token_behind_door=False) == subscription_rule(OFF)
+    with pytest.raises(JobError) as caught:
+        agent_rule(OPEN, token_behind_door=False)
+    assert caught.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
+    assert NETWORK_OPEN_REASON in caught.value.detail

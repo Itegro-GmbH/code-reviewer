@@ -57,6 +57,7 @@ from code_reviewer_runner.implementer.door_launcher import (
     network_document,
     rules_document,
     start_door,
+    start_subscription_door,
 )
 from code_reviewer_runner.implementer.door_state import DoorState
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams, classify
@@ -151,6 +152,38 @@ def test_the_key_and_the_capability_are_in_no_request_to_the_daemon(rig: Rig) ->
     assert API_KEY not in json.dumps(container.document), "not in the definition of the container"
     assert container.document["Env"] == [], "and no environment variable of any kind"
     assert API_KEY not in "".join(container.stderr_text)
+
+
+# #1176-T20
+def test_the_token_of_a_subscription_turn_reaches_the_door_on_stdin_and_is_in_no_request(
+    rig: Rig,
+) -> None:
+    import http.client
+
+    from code_reviewer_runner.implementer.door.subscription import SUBSCRIPTION_PLACEHOLDER
+
+    token = "sk-ant-oat01-LAUNCHERTOKEN-0123456789abcdef"
+
+    door = start_subscription_door(token=token, deadline_seconds=600.0, port=10180, seams=rig.seams)
+    connection = http.client.HTTPConnection("127.0.0.1", rig.port, timeout=10)
+    connection.request(
+        "POST",
+        "/v1/messages",
+        b"{}",
+        {"Authorization": f"Bearer {SUBSCRIPTION_PLACEHOLDER}", "Content-Length": "2"},
+    )
+    assert connection.getresponse().status == 200
+    connection.close()
+    door.stop()
+
+    sent = call_bodies(rig.engine)
+    assert token not in sent, "in no request to the daemon"
+    container = rig.engine.container(DOOR_CONTAINER_NAME)
+    assert token not in json.dumps(container.document) and container.document["Env"] == []
+    assert token not in "".join(container.stderr_text)
+    forwarded = {name.lower(): value for name, value in rig.upstream.requests[0].headers.items()}
+    assert forwarded["authorization"] == f"Bearer {token}"
+    assert door.url == f"http://{MODEL_DOOR_ADDRESS}:10180"
 
 
 # #745-T05

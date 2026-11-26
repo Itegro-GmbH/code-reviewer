@@ -75,10 +75,11 @@ from .agent_container import (
     TRUST_CA_NAME,
 )
 from .claude_code.agent import ClaudeCodeAgent
-from .claude_code.gates import ANTHROPIC_HOST, subscription_rule
+from .claude_code.gates import ANTHROPIC_HOST, agent_rule
 from .claude_code.login import ClaudeLogin
 from .config import build_engine_config, implementer_environment
-from .door_launcher import DoorSeams, RunningDoor, start_door
+from .door.subscription import SUBSCRIPTION_PLACEHOLDER
+from .door_launcher import DoorSeams, RunningDoor, start_door, start_subscription_door
 from .door_model import build_door_ledger
 from .environment_control import (
     NARROW_SECONDS,
@@ -444,6 +445,9 @@ class ImplementerSession:
         self._subscription = job.implementer.subscription
         self._login = login
         self._claude: ClaudeCodeAgent | None = None
+        # #1176: the model door in its subscription mode, which holds the real token of a Claude
+        # Code turn (None: the placement cannot host it, or the turn is not a subscription turn).
+        self._subscription_door: RunningDoor | None = None
         # #843: the profile version the turn started with. A turn without one pushes, as before.
         profile = job.implementer.profile
         self._can_push = profile is None or profile.can_push
@@ -540,6 +544,8 @@ class ImplementerSession:
         try:
             if self._subscription is None:
                 model = self._start_model()
+            else:
+                self._start_subscription_door()
             self._start_network(model)
             self._start_mcp()
             place = self._place_factory()
@@ -584,6 +590,7 @@ class ImplementerSession:
             if model is not None:
                 # No call can come any more: the door says its last word, the cost is final.
                 model.stop()
+            self._stop_subscription_door()
             if agent is not None:
                 # What the live view lost, after both doors are closed: best effort, so a fault in
                 # it never replaces the turn's outcome.
@@ -597,6 +604,7 @@ class ImplementerSession:
             self._stop_network()
             if model is not None:
                 model.stop()
+            self._stop_subscription_door()
             # The last flush of the live view, after the push and before the result: it hands over
             # what is left, is bounded in time and best effort, so the push never waits for it.
             self._finish_steps()
@@ -623,9 +631,13 @@ class ImplementerSession:
                     ErrorCode.TIME_LIMIT_REACHED, "the time limit of the turn was reached"
                 )
 
+        door = self._subscription_door
         agent = ClaudeCodeAgent(
             place=cast("Any", place),
-            login=login,
+            # #1176: behind the door the agent holds the placeholder and the door's address; the
+            # real token (`self._login`) is the door's and is in no container of the turn.
+            login=login if door is None else ClaudeLogin.oauth_token(SUBSCRIPTION_PLACEHOLDER),
+            base_url=None if door is None else door.url,
             model=subscription.model,
             session_id=str(uuid.uuid4()),
             secrets=self.secrets(),
@@ -858,10 +870,13 @@ class ImplementerSession:
         it is. The switch ends the connections that are open, so nothing the agent could have is
         in flight yet. A door or a switch that fails ends the turn `setup_failed`, free."""
         if self._subscription is not None:
-            # #856: the login is in the agent's container, so the exit is the guard: the door lets
-            # through api.anthropic.com and nothing else, whatever the environment says (and an
-            # environment that says more refuses the turn, free).
-            self._effective_rule = subscription_rule(self.rule)
+            # #856: without a door for the token (#1176) the login is in the agent's container, so
+            # the exit is the guard: the network door lets through api.anthropic.com and the
+            # step's hosts read-only (an environment that says more refuses the turn, free). Behind
+            # the model door the step's own rule is the rule.
+            self._effective_rule = agent_rule(
+                self.rule, token_behind_door=self._subscription_door is not None
+            )
             model_host = ANTHROPIC_HOST
         else:
             assert model is not None
@@ -896,6 +911,40 @@ class ImplementerSession:
         else:
             control.narrow(rule, model_host)
             self._vm_policy = VM_POLICY_NARROWED
+
+    def _start_subscription_door(self) -> None:
+        """The token of a Claude Code turn goes to the model door in its subscription mode (#1176)
+        and nowhere else: the agent gets a placeholder. A placement that cannot host it keeps the
+        token in the agent's container and the narrowed network, and says so."""
+        login = self._login
+        if login is None:
+            raise JobError(
+                ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE,
+                "harness_not_ready: this runner has no Claude Code login for the turn",
+            )
+        placement = placement_of(self.environment)
+        if not placement.subscription_door:
+            self._note(
+                "this runner cannot hold the Claude Code token behind the model door: the token "
+                "is in the agent's container and its network is narrowed to the API and the "
+                "hosts the step lists (read-only)"
+            )
+            return
+        self._subscription_door = start_subscription_door(
+            token=login.secret,
+            deadline_seconds=self._deadline_seconds(),
+            port=placement.model_door_port(slot_ports(self.environment).proxy),
+            seams=door_seams(self.environment, self.seams.door),
+        )
+
+    def _stop_subscription_door(self) -> None:
+        """End the door of the token. Safe to call twice."""
+        door, self._subscription_door = self._subscription_door, None
+        if door is None:
+            return
+        if door.state.lost is not None:
+            self._note("the model door ended during the turn; the agent could not reach Anthropic")
+        door.stop()
 
     def _start_mcp(self) -> None:
         """The MCP door (#1067) for a turn whose step has MCP servers: the endpoint the harness is
