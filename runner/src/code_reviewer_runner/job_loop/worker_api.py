@@ -129,6 +129,9 @@ WORKER_FEATURES: tuple[str, ...] = (
     # in the agent's container and the step's own network rule (`open` included) is the rule.
     # Without it the app refuses such a rule for this Worker before the turn starts.
     "implementer_subscription_door",
+    # #1177: the Worker reads `pushOnly` of an entry of `implementer.repos` and pushes only that
+    # entry's branch of the repository (`select_branches(only=...)`).
+    "implementer_push_allowlist",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

@@ -1206,6 +1206,12 @@ the first run (`subscription_auth`).
   only when the Worker image of its active golden snapshot lists it (`IMAGE_GATED_CLAIM_FEATURES`, as for `implementer_multi_repo`), so **while a
   snapshot built before this feature is live, hosted turns on the token wait in the queue** instead of starting a VM that would refuse them; the
   snapshot is rebuilt by the release (`golden-snapshot.md`, "The Claude Code token needs a rebuilt snapshot").
+- **The feature `implementer_push_allowlist` (#1177).** An entry of `implementer.repos` may carry `pushOnly: true` (a step with `pushBranch`): the Worker then
+  pushes that entry's `branch` and no other branch of the repository (`select_branches(only=...)` of `push_policy.py`; every other branch the agent made is
+  reported as excluded, never pushed). A job whose session has such an entry is a candidate only of a claim that names the feature (SQL rule in `jobs-claim.ts`;
+  the claim then also ends a Worker that asks without it, free, `reason=implementer_push_allowlist`). The Dispatcher names it only when the Worker image of
+  its golden snapshot lists it (`IMAGE_GATED_CLAIM_FEATURES`; with Cloudflare placement the Cloudflare image too), a customer runner only when its Workers do,
+  so **while an image without it is the only one live, a `pushBranch` step waits in the queue** and nothing fails; the snapshot is rebuilt by the release.
 - **No outer wall, no token on a hosted VM.** The token is in the agent's container, so a Worker that holds the workspace's token (not a device
   login) must be able to narrow the VM's outer network policy. A hosted Dispatcher without a public URL (`DISPATCHER_PUBLIC_URL`, the base of the
   network switch) gives the Worker no way to; the turn is then refused free before any container exists (`implementer_engine_unavailable`, detail

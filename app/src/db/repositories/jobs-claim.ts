@@ -42,6 +42,11 @@ export type JobClaim = {
    */
   acceptsMultiRepo?: boolean;
   /**
+   * #1177: the caller named the claim feature `implementer_push_allowlist` (its Worker pushes only the branch of an entry marked `pushOnly`).
+   * Without it a turn whose session has such an entry is not a candidate: it stays queued and nothing fails.
+   */
+  acceptsPushAllowlist?: boolean;
+  /**
    * #1150: the claim names the feature `implementer_workspace_token`: the Dispatcher's Worker image reads `implementer.subscription.oauthToken`,
    * which is where the Claude Code OAuth token of the workspace reaches a hosted turn. Without it a hosted turn on `claude-code` is not a
    * candidate and stays queued for a Dispatcher whose image can run it (a snapshot built before this feature is the case).
@@ -283,6 +288,20 @@ function claimQuery(
            and multi_session.workspace_id = multi_turn.workspace_id
           where multi_turn.job_id = due.id and multi_session.repos is not null
         )`;
+  // #1177: a turn with a `pushBranch` entry (`"pushOnly":true` in the stored list, which the app writes without spaces) goes only to a caller whose
+  // Worker pushes that branch alone. Only the app writes this column, and the key is never a repository or branch name (names have no quotes).
+  const pushAllowlistRule =
+    claim.acceptsPushAllowlist === true
+      ? sql``
+      : sql`and not exists (
+          select 1
+          from implementer_turns as push_turn
+          join implementer_sessions as push_session
+            on push_session.id = push_turn.session_id
+           and push_session.workspace_id = push_turn.workspace_id
+          where push_turn.job_id = due.id
+            and push_session.repos like ${'%"pushOnly":true%'}
+        )`;
   return sql<Selectable<JobsTable>>`
     update jobs
     set status = 'running',
@@ -304,6 +323,7 @@ function claimQuery(
         ${jobId === undefined ? sql`` : sql`and due.id = ${jobId}`}
         ${routing}
         ${multiRepoRule}
+        ${pushAllowlistRule}
         and due.run_after <= ${now}
         and not exists (
           select 1

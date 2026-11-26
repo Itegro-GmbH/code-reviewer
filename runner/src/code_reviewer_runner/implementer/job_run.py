@@ -348,6 +348,7 @@ def production_setup(
                         direct=repo.direct,
                         branch_exists=repo.branch_exists,
                         max_branches=MAX_REPO_BRANCHES,
+                        push_only_branch=repo.branch if repo.push_only else None,
                     ),
                     layout,
                     identity,

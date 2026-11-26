@@ -77,11 +77,18 @@ class Selection:
 
 
 def select_branches(
-    local_branches: list[str], *, form_branch: str, limit: int | None = None
+    local_branches: list[str],
+    *,
+    form_branch: str,
+    limit: int | None = None,
+    only: str | None = None,
 ) -> Selection:
     """The branches the final push takes, out of the local branches of the agent's repository.
     **The one place for a rule about which branches are pushed.** Today only the name checks and
-    `PUSH_EXCLUDED_BRANCHES` decide."""
+    `PUSH_EXCLUDED_BRANCHES` decide, and (#1177) `only`: the job's allowlist, the one branch a step
+    that names its branch may push. Every other valid name is reported as excluded (what the agent
+    committed on another branch of its container is never pushed); `None` keeps the rule of all
+    branches."""
     unique = sorted(set(local_branches))
     # Read at the call, so that the limit is the module's current one (a test lowers it).
     limit = MAX_PUSHED_BRANCHES if limit is None else limit
@@ -97,7 +104,7 @@ def select_branches(
         elif len(names) + len(excluded) >= limit:
             # Excluded names are entries of the report too, so they count toward its limit.
             overflow += 1
-        elif name in PUSH_EXCLUDED_BRANCHES:
+        elif name in PUSH_EXCLUDED_BRANCHES or (only is not None and name != only):
             excluded.append((name, REASON_EXCLUDED))
         else:
             names.append(name)

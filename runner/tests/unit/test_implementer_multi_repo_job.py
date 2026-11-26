@@ -44,6 +44,27 @@ def test_a_job_with_repos_parses_into_one_entry_per_repository() -> None:
     assert parsed.implementer.start_branch is None
 
 
+# #1177-T73
+def test_push_only_marks_the_entry_whose_branch_is_the_only_one_pushed() -> None:
+    document = _job()
+    document["implementer"]["repos"][0]["pushOnly"] = True
+
+    repos = _parse(document).implementer.repos
+
+    assert [repo.push_only for repo in repos] == [True, False, False]
+
+
+# #1177-T74
+def test_push_only_must_be_true_or_false() -> None:
+    document = _job()
+    document["implementer"]["repos"][0]["pushOnly"] = "yes"
+
+    with pytest.raises(JobError) as caught:
+        _parse(document)
+
+    assert caught.value.code == ErrorCode.INVALID_JOB
+
+
 # #1093-T21
 def test_every_repository_has_the_token_its_tokenid_names() -> None:
     parsed = _parse(_job())

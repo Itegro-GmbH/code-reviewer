@@ -1397,6 +1397,17 @@ export async function buildJobInput(
       "implementer_engine_unavailable",
       "reason=implementer_multi_repo",
     );
+  // #1177: a `pushBranch` entry is pushed alone by a Worker that reads `pushOnly`; one that does not would push every branch of the agent's
+  // repository. The claim (`acceptsPushAllowlist`) does not hand such a turn to a caller without the feature; this is a Worker that
+  // disagrees with its Dispatcher, so the turn ends here, free.
+  if (
+    implementer?.repos?.some((entry) => entry.pushOnly === true) === true &&
+    !features.includes("implementer_push_allowlist")
+  )
+    return refuse(
+      "implementer_engine_unavailable",
+      "reason=implementer_push_allowlist",
+    );
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -2001,6 +2012,15 @@ export async function buildSubscriptionJob(
       "implementer_engine_unavailable",
       "reason=implementer_multi_repo",
     );
+  // #1177: the same for the allowlist of a `pushBranch` entry.
+  if (
+    turn.session.repos?.some((entry) => entry.pushOnly === true) === true &&
+    !features.includes("implementer_push_allowlist")
+  )
+    return refuse(
+      "implementer_engine_unavailable",
+      "reason=implementer_push_allowlist",
+    );
 
   const repository = await deps
     .repositories(job.workspaceId)
@@ -2512,6 +2532,10 @@ export async function handleClaim(
       // #1092: a turn on several repositories goes only to a caller that reads `implementer.repos`; for any other it waits in the queue.
       ...(features.includes("implementer_multi_repo")
         ? { acceptsMultiRepo: true }
+        : {}),
+      // #1177: a turn with a `pushBranch` entry goes only to a caller that pushes that branch alone; for any other it waits in the queue.
+      ...(features.includes("implementer_push_allowlist")
+        ? { acceptsPushAllowlist: true }
         : {}),
       // #1150: a hosted turn on the token of the workspace goes only to a claim whose Worker image reads it.
       ...(split && features.includes("implementer_workspace_token")

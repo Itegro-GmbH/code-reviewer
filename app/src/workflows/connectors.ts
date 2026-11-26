@@ -59,6 +59,12 @@ export const START_BRANCH_ROOTS: readonly TargetRoot[] = [
 ];
 
 /**
+ * #1177: where a reference in the `pushBranch` of an agent step may start: the branch the session works on and pushes to is a target, so a
+ * literal or an input of a manual trigger, never text an agent wrote and never an issue's title, body or label.
+ */
+export const PUSH_BRANCH_ROOTS: readonly TargetRoot[] = ["input"];
+
+/**
  * #1092: where a reference in the `repo`, the `base` and the `branch` of an entry of the `repos` of an agent step may start. They decide what the
  * agent works on and where its commits go, so they are targets: a literal, or a value the platform or the caller vouches for.
  */

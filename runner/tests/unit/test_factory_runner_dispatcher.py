@@ -171,6 +171,26 @@ def test_the_claim_names_the_multi_repo_feature_only_when_the_runner_has_it() ->
     assert sent(opener2.requests[0])["features"] == ["worker_credential"]
 
 
+# #1177-T75
+def test_the_claim_names_the_push_allowlist_feature_only_when_the_runner_has_it() -> None:
+    app, opener = client(split_answer(labels=["linux"]))
+    app.use_features(multi_repo=True, push_allowlist=True)
+    app.claim()
+    assert sent(opener.requests[0])["features"] == [
+        "worker_credential",
+        "implementer_multi_repo",
+        "implementer_push_allowlist",
+    ]
+
+    plain, opener2 = client(split_answer(labels=["linux"]))
+    plain.use_features(multi_repo=True)
+    plain.claim()
+    assert sent(opener2.requests[0])["features"] == [
+        "worker_credential",
+        "implementer_multi_repo",
+    ]
+
+
 # #974-T01
 def test_a_claim_answer_holds_nothing_secret_whatever_the_app_adds_to_it() -> None:
     answer = split_answer(

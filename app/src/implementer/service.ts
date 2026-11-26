@@ -18,12 +18,16 @@ import type { IntegrationsRepository } from "../db/repositories/integrations-rep
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { ImplementerStoreError } from "../db/implementer-errors.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
-import type { Integration } from "../integrations/types.ts";
+import type { Integration, RepoRef } from "../integrations/types.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { JobQueueError } from "../jobs/errors.ts";
 import type { EnqueueImplementerTurnResult } from "../jobs/job-types.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
-import { branchConflict, checkBranchName } from "./branch-name.ts";
+import {
+  branchConflict,
+  checkBranchName,
+  isPushBranchName,
+} from "./branch-name.ts";
 import { createRunCanceller, type RunCanceller } from "./cancel.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import {
@@ -47,10 +51,15 @@ import {
   type FollowUps,
   type FollowUpDependencies,
 } from "./follow-up.ts";
-import { validateStartInput, type StartInput } from "./start-input.ts";
+import {
+  INSTRUCTION_MAX_LENGTH,
+  validateStartInput,
+  type StartInput,
+} from "./start-input.ts";
 import {
   deriveMountNames,
   firstRepeat,
+  preambleOf,
   type SessionRepo,
 } from "../db/session-repos.ts";
 
@@ -114,6 +123,16 @@ export type StartTaskOptions = {
   timeLimitMinutes?: number;
   /** #920: the request id may start with the prefix that is the engine's alone (`wf-`); a request body never gets this. */
   workflowStep?: boolean;
+  /**
+   * #1177 (epic #1175): the first (and only) entry of `repos` is the branch a lane step names to push to (`pushBranch`), not a branch the
+   * platform made up. The task is refused, before anything is written, when that branch is the default branch of the repository or its
+   * base, is protected on the platform, or exists on the platform without an earlier run of the lane having made it (`madeByLane`, asked
+   * for the repository id and the name). A branch that does not exist is made from the base; one the lane made is continued. A request body
+   * never gets this.
+   */
+  pushBranch?: {
+    madeByLane(repositoryId: string, branch: string): Promise<boolean>;
+  };
   /**
    * #1105 (ADR 0007): the settings of a lane step that carries them itself instead of naming a profile. The profile of the turn is this copy
    * (the lane's name and version, no profile row behind it), and the body names no `profile`. Its `model` is the body's own and checked as
@@ -314,6 +333,60 @@ export function createImplementerService(
   }
 
   /**
+   * #1177: the rules for the branch a lane step names to push to. Never the default branch or the base (that would be work done on the
+   * branch everything is merged into), never a protected branch, and a branch that exists is the lane's own only when an earlier run of
+   * the lane made it; anything else on the platform is not ours to build on or overwrite. Nothing is ever forced: the runner pushes without
+   * force, so a branch that moved is refused there.
+   */
+  async function checkPushBranch(
+    platform: {
+      provider: ReturnType<typeof deps.registry.resolve>;
+      integration: Integration;
+      repo: RepoRef;
+    },
+    named: { repositoryId: string; base: string; branch: string },
+    defaultBranch: string,
+    pushBranch: NonNullable<StartTaskOptions["pushBranch"]>,
+  ): Promise<{ expectExisting: boolean }> {
+    // Branch names are compared without regard to case: GitHub treats `Main` and `main` as different refs but a clone on a
+    // case-insensitive file system does not, and a name that differs only in case from the default branch is never meant.
+    const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+    if (
+      !isPushBranchName(named.branch) ||
+      same(named.branch, defaultBranch) ||
+      same(named.branch, named.base)
+    )
+      throw new ImplementerError(
+        "IMPLEMENTER_REQUEST_INVALID",
+        "The branch to push to is the default branch of the repository or the base branch.",
+        { issues: [{ field: "repos", code: "invalid" }] },
+      );
+    const existing = await platform.provider.getBranch(
+      platform.integration,
+      platform.repo,
+      named.branch,
+    );
+    if (existing === null) {
+      // Git holds `foo` or `foo/bar`, not both. What the read can tell: the first 100 branches the platform lists.
+      const listed = await platform.provider.listBranches(
+        platform.integration,
+        platform.repo,
+      );
+      if (branchConflict(named.branch, listed.names) !== null)
+        throw BRANCH_CONFLICT();
+      return { expectExisting: false };
+    }
+    if (existing.protected === true)
+      throw new ImplementerError(
+        "IMPLEMENTER_BRANCH_PROTECTED",
+        "The branch to push to is protected.",
+      );
+    if (!(await pushBranch.madeByLane(named.repositoryId, named.branch)))
+      throw BRANCH_EXISTS();
+    return { expectExisting: true };
+  }
+
+  /**
    * #1092: the repositories of a step with `repos`, resolved: each one is a repository of the workspace with an active integration, the
    * installation can write to it when the profile may push, and its base branch (the default branch when the step named none) exists.
    * A branch is not asked for here: whether it exists is decided when the job is claimed (`branchExists`), so a retry or a second round on
@@ -322,6 +395,7 @@ export function createImplementerService(
   async function resolveRepos(
     entries: NonNullable<StartInput["repos"]>,
     mustWrite: boolean,
+    pushBranch?: StartTaskOptions["pushBranch"],
   ): Promise<{ repos: SessionRepo[]; baseSha: string }> {
     const refusal = (error: unknown, index: number): ImplementerError => {
       const known = platformFailure(error);
@@ -379,12 +453,28 @@ export function createImplementerService(
             "IMPLEMENTER_REQUEST_INVALID",
             "The branch is not a valid branch name.",
           );
+        // #1177: what the start decided about the named branch is stored with the entry; the claim of the first turn follows it.
+        const pushed =
+          index === 0 && pushBranch !== undefined
+            ? await checkPushBranch(
+                { provider, integration, repo },
+                { repositoryId: entry.repositoryId, base, branch },
+                facts.defaultBranch,
+                pushBranch,
+              )
+            : undefined;
         if (index === 0) firstSha = head.sha;
         resolved.push({
           repositoryId: entry.repositoryId,
           fullName: repo.fullName,
           base,
           branch,
+          ...(pushed === undefined
+            ? {}
+            : {
+                pushOnly: true as const,
+                expectExisting: pushed.expectExisting,
+              }),
         });
       } catch (error) {
         throw refusal(error, index);
@@ -514,9 +604,26 @@ export function createImplementerService(
         const resolved = await resolveRepos(
           task.repos,
           preProfile?.canPush !== false,
+          options.pushBranch,
         );
         baseSha = resolved.baseSha;
         sessionRepos = resolved.repos;
+        // #1177: the claim puts the preamble in front of the instruction within the same limit and cuts the task to fit; a step that names its
+        // branch is refused instead, so an instruction near the limit is never silently truncated.
+        if (
+          options.pushBranch !== undefined &&
+          preambleOf(
+            resolved.repos,
+            resolved.repos.map((entry) => entry.expectExisting === true),
+          ).length +
+            task.instruction.length >
+            INSTRUCTION_MAX_LENGTH
+        )
+          throw new ImplementerError(
+            "IMPLEMENTER_REQUEST_INVALID",
+            "The instruction leaves no room for the note the agent is given about its repository.",
+            { issues: [{ field: "instruction", code: "too_long" }] },
+          );
         repoName = resolved.repos.map((entry) => entry.fullName).join(",");
       } else {
         const resolved = await resolveSingle(task);
