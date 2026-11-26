@@ -60,7 +60,7 @@
         "features": {
           "type": "array",
           "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
-          "maxItems": 16
+          "maxItems": 32
         },
         "llmProviders": {
           "description": "#424: the LLM providers this runner can run (the slugs of its registry). Absent means ['openrouter'], which is what a previous-release runner can run. An app sends a job for a provider only to a caller that listed it, so a newer app never hands an old runner a job it cannot read. The app only parses and validates the list today and does not use it yet (the claim issue of epic #420 will); it still always sends 'openrouter'. A previous-release app ignores the key.",
