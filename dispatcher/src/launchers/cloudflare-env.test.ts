@@ -115,6 +115,31 @@ describe("the Cloudflare placement's configuration", () => {
       "CF_SANDBOX_INSTANCE_TYPES",
     ],
     [
+      "a memory that is no number",
+      { CF_SANDBOX_INSTANCE_TYPES: "8=custom-8:big" },
+      "CF_SANDBOX_INSTANCE_TYPES",
+    ],
+    [
+      "an empty memory",
+      { CF_SANDBOX_INSTANCE_TYPES: "8=custom-8:" },
+      "CF_SANDBOX_INSTANCE_TYPES",
+    ],
+    [
+      "a memory twice",
+      { CF_SANDBOX_INSTANCE_TYPES: "8=custom-8:32768:32768" },
+      "CF_SANDBOX_INSTANCE_TYPES",
+    ],
+    [
+      "a memory below the 1024 MiB the agent needs alone",
+      { CF_SANDBOX_INSTANCE_TYPES: "8=custom-8:512" },
+      "CF_SANDBOX_INSTANCE_TYPES",
+    ],
+    [
+      "a memory with a unit",
+      { CF_SANDBOX_INSTANCE_TYPES: "8=custom-8:32GiB" },
+      "CF_SANDBOX_INSTANCE_TYPES",
+    ],
+    [
       "a Sysbox proof that is none",
       { CF_SANDBOX_SYSBOX_PROOF: "maybe" },
       "CF_SANDBOX_SYSBOX_PROOF",
@@ -143,6 +168,60 @@ describe("the Cloudflare placement's configuration", () => {
       cloudflareFromEnvironment({ ...ENV, CF_SANDBOX_SYSBOX_PROOF: "unproven" })
         ?.placement.sysboxProof,
     ).toBe("unproven");
+  });
+});
+
+describe("the memory of the instance types (#1178)", () => {
+  const memoryOf = (types: string) =>
+    cloudflareFromEnvironment({ ...ENV, CF_SANDBOX_INSTANCE_TYPES: types })
+      ?.placement.memoryMb;
+
+  // #1178-E01
+  it("knows the memory of standard-4 (12 GiB) so that the form `4=standard-4` stays valid and unchanged", () => {
+    expect(memoryOf("4=standard-4")).toEqual(new Map([[4, 12288]]));
+  });
+
+  // #1178-E02
+  it("takes the memory of a custom type from the `:<MiB>` after its name, next to the built-in type", () => {
+    expect(memoryOf("4=standard-4, 8=custom-8:32768")).toEqual(
+      new Map([
+        [4, 12288],
+        [8, 32768],
+      ]),
+    );
+  });
+
+  // #1178-E03
+  it("lets the memory of an entry win over the built-in table", () => {
+    expect(memoryOf("4=standard-4:10240")).toEqual(new Map([[4, 10240]]));
+  });
+
+  // #1178-E04
+  it("plans a custom type without a memory (the form of before #1178) with the 2048 MiB per vCPU of the Vercel ratio, the cautious value", () => {
+    expect(memoryOf("8=custom-8")).toEqual(new Map([[8, 16384]]));
+  });
+
+  // #1178-E05
+  it("does not put the memory into the instance type the Worker is asked for", async () => {
+    const fake = new FakeCfSandbox({
+      token: TOKEN,
+      instanceTypes: ["custom-8"],
+    });
+    const cloudflare = cloudflareFromEnvironment(
+      { ...ENV, CF_SANDBOX_INSTANCE_TYPES: "8=custom-8:32768" },
+      { fetch: fake.fetch },
+    );
+    await cloudflare?.client.create({
+      name: "cr-implementer-x-cf-00000000",
+      placement: "cloudflare",
+      snapshotId: "cloudflare-image",
+      region: "cloudflare",
+      vcpus: 8,
+      timeoutMs: 60_000,
+      tags: {},
+      persistent: false,
+    });
+    expect([...fake.vms.values()][0]?.instanceType).toBe("custom-8");
   });
 });
 
