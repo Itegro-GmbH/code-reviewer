@@ -25,7 +25,7 @@ import type { Database } from "../../db/schema.ts";
 import { readLimitedBody } from "../../webhooks/limited-body.ts";
 import { resourceMetadataUrl } from "../oauth/metadata.ts";
 import type { OAuthService, Principal } from "../oauth/service.ts";
-import { scopeSatisfies } from "../scopes.ts";
+import { FACTORY_SCOPES, scopeSatisfies } from "../scopes.ts";
 import { actorOf, type ToolContext } from "../tools/context.ts";
 import { createToolServices, sessionUserOf } from "../tools/services.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
@@ -100,7 +100,8 @@ export function createMcpEndpoint({
   ): Response {
     const parts =
       problem === null
-        ? ['scope="factory:read"']
+        ? // #1167: every scope, so a client asks for control too; the person chooses on the consent page.
+          [`scope="${FACTORY_SCOPES.join(" ")}"`]
         : [
             `error="${problem.error}"`,
             `error_description="${problem.description}"`,
