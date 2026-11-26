@@ -90,6 +90,10 @@ export const CLAIM_FEATURES = [
   // the login of the turn. Sent only to a caller that named it: a hosted turn on the token is not a candidate of a claim that did not (it waits for a
   // Dispatcher whose image can run it), and a Worker that does not name it is refused the token (`implementer_engine_unavailable`, free).
   "implementer_workspace_token",
+  // #1176 (epic #1175): the Worker's model door holds the Claude Code token (its subscription mode), so the token is not in the agent's container and the
+  // step's own network rule is safe. A `claude-code` turn with an `open` rule or a wildcard on a shared domain is refused (`implementer_engine_unavailable`,
+  // free, reason `subscription_door`) for a caller that did not name it, before a VM or a token exists.
+  "implementer_subscription_door",
   // #1158 (epic #1157): the Dispatcher can launch a hosted job on a Cloudflare Container. Only a claim that names it has the platform label
   // `cr:placement:cloudflare`, so a job of a Cloudflare runner is never a candidate of another claim (it stays queued) and the answer names
   // `placement: "cloudflare"`.

@@ -33,6 +33,19 @@ describe("the claim features that depend on the Worker image", () => {
     expect(IMAGE_GATED_CLAIM_FEATURES).toEqual([
       "implementer_multi_repo",
       "implementer_workspace_token",
+      "implementer_subscription_door",
+    ]);
+  });
+
+  // #1176-T57
+  it("names implementer_subscription_door only when the image lists it: an image without the door mode keeps the token in the container, so the App must not hand it an open network", () => {
+    expect(
+      imageClaimFeatures(
+        "implementer_workspace_token,implementer_subscription_door",
+      ),
+    ).toEqual(["implementer_workspace_token", "implementer_subscription_door"]);
+    expect(imageClaimFeatures("implementer_workspace_token")).toEqual([
+      "implementer_workspace_token",
     ]);
   });
 
@@ -65,6 +78,24 @@ describe("the claim features of a Dispatcher with the Cloudflare placement (#115
         true,
       ),
     ).toEqual(["implementer_multi_repo", "placement_cloudflare"]);
+  });
+
+  // #1176-T57
+  it("names implementer_subscription_door only when both images list it", () => {
+    expect(
+      claimFeaturesForPlacements(
+        ["implementer_subscription_door"],
+        ["implementer_workspace_token"],
+        true,
+      ),
+    ).toEqual(["placement_cloudflare"]);
+    expect(
+      claimFeaturesForPlacements(
+        ["implementer_subscription_door"],
+        ["implementer_subscription_door"],
+        true,
+      ),
+    ).toEqual(["implementer_subscription_door", "placement_cloudflare"]);
   });
 
   // #1158-F02

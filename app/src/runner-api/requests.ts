@@ -259,7 +259,8 @@ function parseMaxRunning(check: Checker, raw: unknown): number | undefined {
 }
 
 const FEATURE_NAME = /^[a-z][a-z0-9_]{0,63}$/;
-const MAX_FEATURES = 16;
+// 16 until #1176: a Worker names 17 features now (one more with every feature of the contract), so a list of 32 is the bound.
+const MAX_FEATURES = 32;
 
 /**
  * #279: what else the runner understands. Only the names this app knows are kept; an unknown one is

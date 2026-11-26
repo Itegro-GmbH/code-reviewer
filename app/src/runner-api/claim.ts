@@ -45,6 +45,7 @@ import {
   providerHostOf,
   type NetworkRule,
 } from "../network-rule/network.ts";
+import { isSharedWildcard } from "../network-rule/shared-domains.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
 import type { SessionRepo } from "../db/session-repos.ts";
@@ -1743,6 +1744,26 @@ function deviceLoginServes(
   );
 }
 
+/**
+ * #1176, release skew: the token of a `claude-code` turn is behind the model door only for a Worker whose image has the door's subscription mode
+ * (the claim feature `implementer_subscription_door`). A Worker of an earlier release keeps the token in the agent's container and refuses an
+ * open network or a wildcard on a shared domain itself, late and after a VM exists. So the turn is refused here, free, before any VM or token
+ * exists, when its rule is one of those and the caller lacks the feature. A rule that old Workers narrow (an exact list, `off`) is not touched.
+ * Can go once every Worker image of every placement has the feature.
+ */
+function subscriptionDoorRefusal(
+  setup: { network: NetworkRule } | null,
+  features: readonly ClaimFeature[],
+): Refusal | null {
+  if (setup === null || features.includes("implementer_subscription_door"))
+    return null;
+  const { network } = setup;
+  const wide = network.mode === "open" || network.hosts.some(isSharedWildcard);
+  return wide
+    ? refuse("implementer_engine_unavailable", "reason=subscription_door")
+    : null;
+}
+
 /** The refusal for a token that cannot be used: the turn would only fail later and cost a VM. */
 function tokenRefusal(token: ClaudeCodeTokenForJob): Refusal | null {
   if (token.state === "token") return null;
@@ -1772,6 +1793,7 @@ async function prepareSubscription(
     customer: boolean;
     split: boolean;
     entries: readonly HarnessAccess[];
+    features: readonly ClaimFeature[];
   },
 ): Promise<Prepared | undefined> {
   const { job } = claimed;
@@ -1835,6 +1857,12 @@ async function prepareSubscription(
     },
   };
   if (!onRunner) {
+    // #1176: the rule a Worker without the door's subscription mode would refuse at its start: refused now, before a VM is started for it.
+    const unfit = subscriptionDoorRefusal(
+      hostedSetupOf(turn.turn.environment),
+      caller.features,
+    );
+    if (unfit !== null) return unfit;
     // #1150: a hosted turn. The Dispatcher starts a Sandbox VM of the environment's size (the default size for a task without one) and
     // narrows its network after the setup: the model host is the one of Claude Code, which the Dispatcher signs into the switch token.
     const environment = turn.turn.environment;
@@ -1901,6 +1929,13 @@ export async function buildSubscriptionJob(
     return undefined;
   // #1150: a turn of a runner environment, or a hosted one (its Sandbox VM has no login of a device: the token of the workspace is its login).
   const onRunner = turn.turn.runnerEnvironment != null;
+  const setup = onRunner
+    ? runnerSetupOf(turn.turn.runnerEnvironment)
+    : hostedSetupOf(turn.turn.environment);
+  // #1176: before the guard and before any token is read or minted: a Worker without the door's subscription mode never gets the login of a turn
+  // whose rule it would only refuse late (the backstop of the runner stays).
+  const unfit = subscriptionDoorRefusal(setup, features);
+  if (unfit !== null) return unfit;
   // #1092: the same as for a hosted turn (`checkJob`): unreadable stored repositories never become a single repository.
   if (turn.session.reposUnreadable === true)
     return refuse("implementer_config_invalid", "reason=repos_unreadable");
@@ -1940,9 +1975,6 @@ export async function buildSubscriptionJob(
     return refuse("implementer_engine_unavailable", "reason=profile");
   // #1126: a Worker that does not name `implementer_subscription_setup` would refuse the script (and read the network rule as the
   // old one-host rule): it ends here, free, with a reason, before any credential exists, as for the features above.
-  const setup = onRunner
-    ? runnerSetupOf(turn.turn.runnerEnvironment)
-    : hostedSetupOf(turn.turn.environment);
   if (setup !== null && !features.includes("implementer_subscription_setup"))
     return refuse(
       "implementer_engine_unavailable",
@@ -2202,6 +2234,7 @@ async function prepare(
     customer,
     split,
     entries: customerEntries,
+    features,
   });
   if (subscription !== undefined) return subscription;
   const checked = await checkJob(deps, job, {

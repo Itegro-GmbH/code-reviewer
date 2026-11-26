@@ -118,7 +118,7 @@ from .network_report import (
 )
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, urllib_post
-from .placement import placement_of
+from .placement import placement_of, token_behind_door
 from .preface import (
     MovedBranch,
     PrefaceFacts,
@@ -448,6 +448,9 @@ class ImplementerSession:
         # #1176: the model door in its subscription mode, which holds the real token of a Claude
         # Code turn (None: the placement cannot host it, or the turn is not a subscription turn).
         self._subscription_door: RunningDoor | None = None
+        # #1176: the one decision whether the real token is behind that door; the network rule and
+        # the login of the agent both follow it (`placement.token_behind_door`).
+        self._token_behind_door = False
         # #843: the profile version the turn started with. A turn without one pushes, as before.
         profile = job.implementer.profile
         self._can_push = profile is None or profile.can_push
@@ -632,12 +635,23 @@ class ImplementerSession:
                 )
 
         door = self._subscription_door
+        # #1176, fail closed: where the token is meant to be behind the door and the door is not
+        # there, the real token is never handed to the container, whatever else happened.
+        if self._token_behind_door and door is None:
+            raise JobError(
+                ErrorCode.SETUP_FAILED,
+                "subscription_door_missing: the model door of the token is not running",
+            )
         agent = ClaudeCodeAgent(
             place=cast("Any", place),
             # #1176: behind the door the agent holds the placeholder and the door's address; the
             # real token (`self._login`) is the door's and is in no container of the turn.
-            login=login if door is None else ClaudeLogin.oauth_token(SUBSCRIPTION_PLACEHOLDER),
-            base_url=None if door is None else door.url,
+            login=(
+                ClaudeLogin.oauth_token(SUBSCRIPTION_PLACEHOLDER)
+                if self._token_behind_door and door is not None
+                else login
+            ),
+            base_url=door.url if self._token_behind_door and door is not None else None,
             model=subscription.model,
             session_id=str(uuid.uuid4()),
             secrets=self.secrets(),
@@ -874,9 +888,13 @@ class ImplementerSession:
             # the exit is the guard: the network door lets through api.anthropic.com and the
             # step's hosts read-only (an environment that says more refuses the turn, free). Behind
             # the model door the step's own rule is the rule.
-            self._effective_rule = agent_rule(
-                self.rule, token_behind_door=self._subscription_door is not None
-            )
+            if self._token_behind_door and self._subscription_door is None:
+                # #1176, fail closed: the wide rule is only for a token that is behind its door.
+                raise JobError(
+                    ErrorCode.SETUP_FAILED,
+                    "subscription_door_missing: the model door of the token is not running",
+                )
+            self._effective_rule = agent_rule(self.rule, token_behind_door=self._token_behind_door)
             model_host = ANTHROPIC_HOST
         else:
             assert model is not None
@@ -923,7 +941,8 @@ class ImplementerSession:
                 "harness_not_ready: this runner has no Claude Code login for the turn",
             )
         placement = placement_of(self.environment)
-        if not placement.subscription_door:
+        self._token_behind_door = token_behind_door(placement)
+        if not self._token_behind_door:
             self._note(
                 "this runner cannot hold the Claude Code token behind the model door: the token "
                 "is in the agent's container and its network is narrowed to the API and the "

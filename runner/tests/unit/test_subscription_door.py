@@ -275,3 +275,217 @@ def test_a_model_start_document_is_still_read_as_before() -> None:
 def test_the_placeholder_is_a_fixed_value_that_is_no_secret() -> None:
     assert SUBSCRIPTION_PLACEHOLDER.startswith("sk-ant-oat01-")
     assert REAL_TOKEN != SUBSCRIPTION_PLACEHOLDER
+
+
+def raw(url: str, request: bytes) -> bytes:
+    """What the door answers to bytes written as they are (`http.client` would not send them)."""
+    import socket
+
+    parts = urlsplit(url)
+    with socket.create_connection((parts.hostname or "", parts.port or 0), timeout=10) as sock:
+        sock.sendall(request)
+        sock.shutdown(socket.SHUT_WR)
+        data = b""
+        while chunk := sock.recv(65536):
+            data += chunk
+    return data
+
+
+# #1176-T10
+@pytest.mark.parametrize(
+    ("method", "target", "headers"),
+    [
+        ("POST", "/v1/messages", None),
+        ("POST", "/v1/messages?beta=true", None),
+        ("POST", "/v1/messages/count_tokens?beta=true", None),
+        ("HEAD", "/api/hello", {"anthropic-version": "2023-06-01"}),
+        ("GET", "/api/hello", {"anthropic-version": "2023-06-01"}),
+    ],
+)
+def test_the_paths_claude_code_calls_are_forwarded(
+    method: str, target: str, headers: dict[str, str] | None
+) -> None:
+    door = run_subscription_door()
+
+    status, _ = call(door.url, method, target, headers or messages_headers(), b"{}")
+
+    assert status == 200
+    assert (door.upstream.requests[0].method, door.upstream.requests[0].path) == (method, target)
+    stop(door)
+
+
+# #1176-T10
+@pytest.mark.parametrize(
+    ("method", "target"),
+    [
+        ("POST", "/v1/complete"),
+        ("POST", "/v1/messages/batches"),
+        ("GET", "/v1/messages"),
+        ("GET", "/v1/models"),
+        ("POST", "/v1/organizations/x/usage"),
+        ("GET", "/api/oauth/profile"),
+        ("POST", "/api/oauth/claude_cli/create_api_key"),
+        ("POST", "/api/hello"),
+        ("GET", "/api/hello/../oauth/profile"),
+        ("GET", "/api/hello?x=1"),
+        ("POST", "/v1/messages/../models"),
+        ("POST", "/v1/messages%2f..%2fmodels"),
+        ("POST", "/v1/messages/"),
+        ("POST", "/v1/messages#x"),
+        ("POST", "/v1/messages?a=b%0d%0aX-Evil:1"),
+    ],
+)
+def test_every_other_path_is_refused_with_the_token_unused(method: str, target: str) -> None:
+    door = run_subscription_door()
+
+    status, answer = call(door.url, method, target, messages_headers(), b"{}")
+
+    assert status == 403
+    assert door.upstream.requests == []
+    assert REAL_TOKEN.encode() not in answer
+    stop(door)
+
+
+# #1176-T11
+def test_folded_and_control_character_headers_are_refused_before_the_provider() -> None:
+    door = run_subscription_door()
+    head = (
+        "POST /v1/messages HTTP/1.1\r\nHost: x\r\n"
+        f"Authorization: Bearer {SUBSCRIPTION_PLACEHOLDER}\r\n"
+        "Content-Length: 2\r\n"
+    ).encode()
+    smuggles = [
+        # an obsolete line fold: the continuation is a header of its own for a lax receiver
+        b"X-Note: a\r\n Authorization: Bearer stolen\r\n\r\n{}",
+        b"X-Note: a\r\n\tx-api-key: stolen\r\n\r\n{}",
+        b"X-Note: a\x00b\r\n\r\n{}",
+        b"X-Note: a\x0bb\r\n\r\n{}",
+        b"X Note: a\r\n\r\n{}",
+        b"X-Note : a\r\n\r\n{}",
+    ]
+
+    for tail in smuggles:
+        answer = raw(door.url, head + tail)
+        assert answer.startswith((b"HTTP/1.1 400", b"HTTP/1.1 403")), tail
+
+    assert door.upstream.requests == []
+    stop(door)
+
+
+# #1176-T12
+def test_only_the_headers_claude_code_sends_are_forwarded() -> None:
+    door = run_subscription_door()
+    sent = messages_headers(
+        **{
+            "User-Agent": "claude-cli/2.1.325",
+            "Accept": "application/json",
+            "X-App": "cli",
+            "X-Stainless-Lang": "js",
+            "X-Claude-Code-Session-Id": "s-1",
+            "anthropic-dangerous-direct-browser-access": "true",
+            "X-Forwarded-For": "10.0.0.1",
+            "X-Exfil": "secret",
+            "Referer": "http://evil.example/",
+        }
+    )
+
+    call(door.url, "POST", "/v1/messages", sent, b"{}")
+
+    forwarded = {name.lower() for name in door.upstream.requests[0].headers}
+    assert {
+        "authorization",
+        "anthropic-beta",
+        "anthropic-version",
+        "content-type",
+        "user-agent",
+        "accept",
+        "x-app",
+        "x-stainless-lang",
+        "x-claude-code-session-id",
+        "anthropic-dangerous-direct-browser-access",
+    } <= forwarded
+    assert not forwarded & {"x-forwarded-for", "x-exfil", "referer"}
+    stop(door)
+
+
+# #1176-T13
+def test_an_event_stream_is_relayed_chunk_by_chunk_and_whole() -> None:
+    events = [
+        b"event: message_start\ndata: {}\n\n",
+        b'event: delta\ndata: {"a":1}\n\n',
+        b"event: stop\ndata: {}\n\n",
+    ]
+    door = run_subscription_door(
+        ScriptedUpstream(
+            Scripted(headers=[("content-type", "text/event-stream")], chunks=list(events))
+        )
+    )
+    parts = urlsplit(door.url)
+    connection = http.client.HTTPConnection(parts.hostname or "", parts.port, timeout=10)
+
+    connection.request("POST", "/v1/messages?beta=true", b"{}", messages_headers())
+    response = connection.getresponse()
+    body = response.read()
+    connection.close()
+
+    assert response.status == 200
+    assert response.getheader("content-type") == "text/event-stream"
+    assert response.getheader("content-length") is None
+    assert body == b"".join(events)
+    stop(door)
+
+
+# #1176-T14
+def test_a_head_answer_keeps_its_length_and_has_no_body() -> None:
+    door = run_subscription_door(
+        ScriptedUpstream(
+            Scripted(headers=[("content-type", "text/plain"), ("content-length", "123")])
+        )
+    )
+    parts = urlsplit(door.url)
+    connection = http.client.HTTPConnection(parts.hostname or "", parts.port, timeout=10)
+
+    connection.request("HEAD", "/api/hello", headers={"anthropic-version": "2023-06-01"})
+    response = connection.getresponse()
+
+    assert response.status == 200
+    assert response.getheader("content-length") == "123"
+    assert response.read() == b""
+    # the connection is still in step: another request on it is answered
+    connection.request("HEAD", "/api/hello", headers={"anthropic-version": "2023-06-01"})
+    assert connection.getresponse().status == 200
+    connection.close()
+    stop(door)
+
+
+# #1176-T15
+def test_a_body_over_the_cap_is_refused_before_it_is_read() -> None:
+    from code_reviewer_runner.implementer.door import subscription
+
+    door = run_subscription_door()
+    too_big = subscription.MAX_BODY_BYTES + 1
+
+    answer = raw(
+        door.url,
+        (f"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Length: {too_big}\r\n\r\n").encode(),
+    )
+
+    assert answer.startswith(b"HTTP/1.1 413")
+    assert door.upstream.requests == []
+    assert subscription.MAX_BODY_BYTES == 32 * 1024 * 1024
+    stop(door)
+
+
+# #1176-T15
+def test_the_bodies_in_flight_share_one_budget() -> None:
+    from code_reviewer_runner.implementer.door.subscription import ByteBudget
+
+    budget = ByteBudget(100)
+
+    assert budget.reserve(60) and budget.reserve(40)
+    assert not budget.reserve(1), "the budget is spent"
+    budget.release(60)
+    assert budget.reserve(60)
+    assert not budget.reserve(1)
+    budget.release(100)
+    assert budget.reserve(100)

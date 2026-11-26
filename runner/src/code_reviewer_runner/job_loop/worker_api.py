@@ -125,6 +125,10 @@ WORKER_FEATURES: tuple[str, ...] = (
     # #1150: the Worker reads `implementer.subscription.oauthToken` (the Claude Code OAuth token of
     # the workspace) and runs the turn on it when the machine has no login of its own.
     "implementer_workspace_token",
+    # #1176: the model door has a subscription mode that holds the Claude Code token, so it is not
+    # in the agent's container and the step's own network rule (`open` included) is the rule.
+    # Without it the app refuses such a rule for this Worker before the turn starts.
+    "implementer_subscription_door",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

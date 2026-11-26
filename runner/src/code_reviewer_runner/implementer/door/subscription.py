@@ -20,6 +20,14 @@ this module is the door:
 * it **refuses any other credential**: a different bearer, any other scheme, `x-api-key`, a second
   `Authorization`, `Proxy-Authorization` (a `403`; nothing is forwarded). A request that carries
   none (`HEAD /api/hello`) passes through without one;
+* it forwards **only the calls Claude Code makes** (`FORWARDED_ROUTES`: `POST /v1/messages`,
+  `POST /v1/messages/count_tokens`, `HEAD|GET /api/hello`); every other path is a `403` and the
+  token is not used for it. A real-token trial (2026-11-26, `claude -p`) called only
+  `HEAD /api/hello` and `POST /v1/messages?beta=true`, so a prompt-injected agent cannot use the
+  token for the account's other endpoints (profile, key creation, usage);
+* it forwards **only the headers Claude Code sends** (`FORWARDED_HEADERS`, measured on 2.1.325) and
+  drops any other, refuses a header with a control character (a folded line, a NUL) or a name
+  that is not a token, and caps what is in memory (`MAX_BODY_BYTES`, `MAX_INFLIGHT_BYTES`);
 * it counts nothing and decides nothing about the model: there is no ledger (the money of a
   subscription turn is Claude Code's `--max-budget-usd` and the job's clock), and no request body is
   looked at beyond its length.
@@ -77,8 +85,12 @@ _MAX_PORT = 32767
 _MAX_DEADLINE_SECONDS = 24 * 60 * 60
 # The door ends itself this long after the turn's deadline if nobody stopped it.
 LINGER_SECONDS: Final = 600.0
-# A request body (the whole conversation, images included) is read to its length, at most this much.
-MAX_BODY_BYTES: Final = 64 * 1024 * 1024
+# A request body (the whole conversation, images included) is read to its length, at most this much,
+# and all bodies in flight together at most `MAX_INFLIGHT_BYTES`: the door runs in 256 MiB and
+# holds a body whole (twice, with the copy that is sent), so parallel large bodies must not be able
+# to end it.
+MAX_BODY_BYTES: Final = 32 * 1024 * 1024
+MAX_INFLIGHT_BYTES: Final = 64 * 1024 * 1024
 MAX_CONNECTIONS: Final = 16
 FIRST_REQUEST_TIMEOUT_SECONDS: Final = 5.0
 IDLE_TIMEOUT_SECONDS: Final = 120.0
@@ -89,6 +101,40 @@ UPSTREAM_SECONDS: Final = 600.0
 CHUNK_BYTES: Final = 64 * 1024
 
 _METHODS: Final = frozenset({"GET", "HEAD", "POST"})
+# The only calls the token is used for: (method, path) and whether a query may follow. Measured with
+# a real token in `claude -p`: `HEAD /api/hello` (no credential) and `POST /v1/messages?beta=true`;
+# `count_tokens` is the same API's token count, used by `/context`-style calls. The path is compared
+# whole, so no suffix, dot segment, escape or fragment reaches another endpoint.
+FORWARDED_ROUTES: Final = {
+    ("POST", "/v1/messages"): True,
+    ("POST", "/v1/messages/count_tokens"): True,
+    ("GET", "/api/hello"): False,
+    ("HEAD", "/api/hello"): False,
+}
+_QUERY: Final = re.compile(r"[A-Za-z0-9_.=&-]{0,256}")
+# The headers that are forwarded (compared in lower case), with the prefix `x-stainless-` (the SDK's
+# platform description). Measured on Claude Code 2.1.325 (`POST /v1/messages?beta=true`): accept,
+# accept-encoding, anthropic-beta, anthropic-dangerous-direct-browser-access, anthropic-version,
+# content-type, user-agent, x-app, x-claude-code-session-id, x-stainless-*. Any other header is
+# dropped, not refused: a later Claude Code that sends one more still works, and it cannot carry
+# data to Anthropic's side that the list does not name. `authorization` is handled on its own.
+FORWARDED_HEADERS: Final = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "anthropic-beta",
+        "anthropic-dangerous-direct-browser-access",
+        "anthropic-version",
+        "content-type",
+        "user-agent",
+        "x-app",
+        "x-claude-code-session-id",
+    }
+)
+FORWARDED_HEADER_PREFIX: Final = "x-stainless-"
+_HEADER_NAME: Final = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}")
+# Anything below space but a tab, and DEL: CR and LF (a folded line), NUL, and the rest.
+_CONTROL: Final = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 # Headers that are the connection's, not the message's, and `host` (the door's own is the
 # destination's). `content-length` is rebuilt from the body that was read.
 _HOP_BY_HOP: Final = frozenset(
@@ -239,6 +285,11 @@ def outgoing_headers(
     outgoing: dict[str, str] = {}
     authorization: str | None = None
     for name, value in incoming:
+        # Before anything else, on every header: a name that is not a token (whitespace), a value
+        # with CR, LF, NUL or another control character (an obsolete line fold carries a second
+        # header inside one value) never reaches the provider.
+        if _HEADER_NAME.fullmatch(name) is None or _CONTROL.search(value) is not None:
+            raise _Refusal(400, "header_refused")
         lower = name.lower()
         if lower in _OTHER_CREDENTIALS:
             raise _Refusal(403, "credential_refused")
@@ -248,6 +299,8 @@ def outgoing_headers(
             authorization = value
             continue
         if lower in _HOP_BY_HOP:
+            continue
+        if lower not in FORWARDED_HEADERS and not lower.startswith(FORWARDED_HEADER_PREFIX):
             continue
         if lower in {key.lower() for key in outgoing}:
             # A repeated header is joined, as HTTP says it may be (`anthropic-beta` is one).
@@ -261,6 +314,26 @@ def outgoing_headers(
             raise _Refusal(403, "credential_refused")
         outgoing["Authorization"] = f"Bearer {token}"
     return outgoing
+
+
+class ByteBudget:
+    """The bytes of request bodies held in memory at once, all connections together."""
+
+    def __init__(self, total: int) -> None:
+        self._total = total
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def reserve(self, size: int) -> bool:
+        with self._lock:
+            if self._used + size > self._total:
+                return False
+            self._used += size
+            return True
+
+    def release(self, size: int) -> None:
+        with self._lock:
+            self._used = max(0, self._used - size)
 
 
 class _Server(ThreadingHTTPServer):
@@ -278,6 +351,7 @@ class _Server(ThreadingHTTPServer):
         self.upstream = upstream
         self.time_left = time_left
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self.budget = ByteBudget(MAX_INFLIGHT_BYTES)
         super().__init__(address, _Handler)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -345,29 +419,50 @@ class _Handler(BaseHTTPRequestHandler):
         # Only a path on the one host: no absolute form (`http://...`), no authority form.
         if not target.startswith("/") or target.startswith("//") or "\\" in target:
             raise _Refusal(400, "target_refused")
+        path, has_query, query = target.partition("?")
+        query_allowed = FORWARDED_ROUTES.get((self.command, path))
+        if query_allowed is None or (has_query and not query_allowed):
+            raise _Refusal(403, "path_refused")
+        if has_query and _QUERY.fullmatch(query) is None:
+            raise _Refusal(403, "path_refused")
         if self.headers.get("Transfer-Encoding") is not None:
             raise _Refusal(400, "chunked_request_refused")
+        # A malformed head (a line that is not `name: value`) is a defect, not a header to skip.
+        if self.headers.defects:
+            raise _Refusal(400, "header_refused")
         headers = outgoing_headers(list(self.headers.items()), server.token)
-        body = self._read_body()
-        remaining = server.time_left()
-        if remaining <= 0:
-            raise _Refusal(503, "turn_over")
-        request = UpstreamRequest(target, headers, body, method=self.command)
-        response = server.upstream.send(request, min(UPSTREAM_SECONDS, remaining))
+        length = self._body_length()
+        if length > 0 and not server.budget.reserve(length):
+            raise _Refusal(503, "busy")
         try:
-            self._relay(response, server)
+            body = self._read_body(length)
+            remaining = server.time_left()
+            if remaining <= 0:
+                raise _Refusal(503, "turn_over")
+            request = UpstreamRequest(target, headers, body, method=self.command)
+            response = server.upstream.send(request, min(UPSTREAM_SECONDS, remaining))
+            try:
+                self._relay(response, server)
+            finally:
+                response.close()
         finally:
-            response.close()
+            if length > 0:
+                server.budget.release(length)
 
-    def _read_body(self) -> bytes:
+    def _body_length(self) -> int:
         raw = self.headers.get("Content-Length")
         if raw is None:
-            return b""
+            return 0
         if not raw.isdigit() or len(raw) > 12:
             raise _Refusal(400, "content_length_refused")
         length = int(raw)
         if length > MAX_BODY_BYTES:
             raise _Refusal(413, "body_too_large")
+        return length
+
+    def _read_body(self, length: int) -> bytes:
+        if length == 0:
+            return b""
         self.connection.settimeout(IO_TIMEOUT_SECONDS)
         data = self.rfile.read(length)
         if len(data) != length:

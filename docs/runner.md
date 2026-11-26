@@ -1242,10 +1242,23 @@ container. The token is now **the model door's, never the container's**:
   **only to api.anthropic.com on port 443** (`HttpsUpstream`, the same public-address check and the host's outer-wall proxy as the model door; the request line is read as a path on that host and the
   `Host` header is dropped). **Any other credential is refused with 403 and nothing is forwarded:** another bearer, another scheme, a second `Authorization`, `x-api-key`, `Proxy-Authorization`, a cookie. A
   request with none (`HEAD /api/hello`) passes through without one. It keeps no ledger (the money is Claude Code's `--max-budget-usd` and the job's clock), and reads no body beyond its length.
+- **Only the calls Claude Code makes, with only the headers it sends** (review fix). The token is used for `POST /v1/messages` (a `?beta=true` query is fine) and `POST /v1/messages/count_tokens`; `HEAD|GET /api/hello`
+  has no credential. Every other path, method or query is a `403` (`FORWARDED_ROUTES`, the one list). Measured 2026-11-26 with a real token in `claude -p` (2.1.325): only `HEAD /api/hello` and `POST /v1/messages?beta=true`
+  were called, so an agent cannot spend the token on the account's other endpoints (profile, key creation, usage). Headers are an allowlist (`FORWARDED_HEADERS`: accept, accept-encoding, anthropic-beta,
+  anthropic-dangerous-direct-browser-access, anthropic-version, content-type, user-agent, x-app, x-claude-code-session-id, `x-stainless-*`); any other header is **dropped** (not refused: a later Claude Code that
+  sends one more still works), a credential header is still refused, and a header **name that is not a token or a value with CR, LF, NUL or another control character** (an obsolete line fold carried a second
+  header in one value) or a malformed header line is refused with 400 before the provider is asked. A request body is at most 32 MiB and all bodies in flight together at most 64 MiB (`ByteBudget`; over it: 503 `busy`), so
+  parallel large bodies cannot end the 256 MiB door.
+- **Release skew** (review fix). The claim feature `implementer_subscription_door` (the Worker image's `WORKER_FEATURES`; a Dispatcher names it only when its snapshot image and, for Cloudflare, the cr-sandbox image
+  list it) says that this door exists. For a `claude-code` turn whose rule is `open` or has a wildcard on a shared domain the app answers `implementer_engine_unavailable` (free, `reason=subscription_door`) to a
+  caller without it, hosted (at the Dispatcher's claim) and self-hosted (at the Worker's details request), before any VM or token exists. A Worker without the mode keeps the token in the container and refuses such a rule
+  itself, late: that stays as the backstop. Any other rule is passed on as before (an old Worker narrows it itself).
+- **Fail closed** (review fix). `token_behind_door` is decided once per turn from the placement and used for the network rule (`production_setup`, `_start_network`) and for the login the agent is given. Where it is true and
+  the door is not running, the turn ends `setup_failed` (`subscription_door_missing`) before the network is opened or the container gets any login; the placeholder path never falls back to the real token.
 - **The network is the step's own rule** (`gates.agent_rule`): `off`, any `list` (no read-only narrowing, not port 443 only, no refusal of shared domains: those guarded the token in the container) or
   `open`. `session._start_network` and `job_run.production_setup` use it, the Dispatcher's switch carries the rule as signed and the Worker's check (`network_switch.narrow_policy`, #1171) sees the
   job's rule equal to it. The second wall still narrows the VM to the app, GitHub, the rule and `api.anthropic.com`, the door's one destination. The validator and the app's claim no longer refuse
-  `open` or a shared wildcard for the harness (`subscription_network_open` and `subscription_network_wildcard` are gone); a runner that predates this refuses such a turn itself, free, when it starts.
+  `open` or a shared wildcard for the harness (`subscription_network_open` and `subscription_network_wildcard` are gone) when the caller names `implementer_subscription_door`; for one that does not, the claim refuses them as before (see "Release skew" below).
 - **A placement that cannot host the door keeps today's narrowed behaviour** (`Placement.subscription_door` false): the token is in the agent's container, the network is `subscription_rule` (the API host plus the
   step's hosts read-only, `open` refused) and the run says so in its log. Every placement that exists hosts it.
 - **What stays**: the push guard and the redaction still know the real token (the job's secrets and `harness.login`), so a token the agent could not have seen is still scrubbed from every text. The device-login

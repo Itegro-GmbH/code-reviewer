@@ -345,7 +345,43 @@ describe("the claim of a turn on the harness claude-code", () => {
     ],
     [{ mode: "list", hosts: ["*.co.uk"] }, "public suffix"],
   ])(
-    "hands the turn on with the rule as the step has it: the token is behind the model door, not in the container (%j, %s)",
+    "ends the turn, free, before a token exists, for a Worker without the door's subscription mode and a rule it would refuse late (%j, %s)",
+    async (network) => {
+      const h = await start();
+      const runner = await h.registerRunner({
+        labels: ["box"],
+        manifest: BOTH,
+      });
+      const turn = await h.enqueueTurn({
+        modelChoice: CLAUDE_MODEL,
+        runnerEnvironment: { ...RUNNER_ENV, setupScript: "npm ci\n", network },
+        profile: PROFILE,
+      });
+
+      const { response } = await fetchedTurn(h, runner.credential, [
+        ...NOW_FEATURES,
+        "implementer_subscription_setup",
+      ]);
+
+      expect(response.status).toBe(409);
+      expect(h.issuedJobTokens()).toEqual([]);
+      expect(await h.queue.get(turn.job.id)).toMatchObject({
+        status: "failed",
+        errorCode: "implementer_engine_unavailable",
+      });
+    },
+  );
+
+  // #1176-T54
+  it.each<[NetworkRule, string]>([
+    [{ mode: "open", hosts: [] }, "open network"],
+    [
+      { mode: "list", hosts: ["registry.npmjs.org", "*.github.io"] },
+      "wildcard",
+    ],
+    [{ mode: "list", hosts: ["*.co.uk"] }, "public suffix"],
+  ])(
+    "hands the turn on with the rule as the step has it to a Worker that names implementer_subscription_door: the token is behind the model door (%j, %s)",
     async (network) => {
       const h = await start();
       const runner = await h.registerRunner({
@@ -361,6 +397,7 @@ describe("the claim of a turn on the harness claude-code", () => {
       const { response } = await fetchedTurn(h, runner.credential, [
         ...NOW_FEATURES,
         "implementer_subscription_setup",
+        "implementer_subscription_door",
       ]);
 
       const input = (await turnInput(response)) as unknown as {
@@ -369,6 +406,28 @@ describe("the claim of a turn on the harness claude-code", () => {
       expect(input.implementer.environment.network).toEqual(network);
     },
   );
+
+  // #1176-T55
+  it("does not refuse an exact list on a Worker without the door's subscription mode: it narrows such a list itself", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: {
+        ...RUNNER_ENV,
+        setupScript: "npm ci\n",
+        network: { mode: "list", hosts: ["registry.npmjs.org"] },
+      },
+      profile: PROFILE,
+    });
+
+    const { response } = await fetchedTurn(h, runner.credential, [
+      ...NOW_FEATURES,
+      "implementer_subscription_setup",
+    ]);
+
+    expect(response.status).toBe(200);
+  });
 
   // #1126-T42
   it("sends no environment, and needs no feature, for a step without a script or a rule", async () => {
@@ -610,8 +669,167 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     expect(h.issuedJobTokens()).toEqual([]);
   });
 
-  // #1176-T55
-  it("claims a hosted turn with an open network: the token is behind the model door, not in the container", async () => {
+  // #1176-T56
+  it("ends a hosted turn with an open network, free, for a Dispatcher whose Worker image has no door mode", async () => {
+    const h = await start();
+    await saveToken(h);
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+      environment: {
+        id: "env-hosted",
+        name: "Open",
+        vcpus: 2,
+        setupScript: "",
+        network: { mode: "open", hosts: [] },
+      },
+    });
+
+    const without = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+
+    expect(without.status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.issuedJobTokens()).toEqual([]);
+  });
+
+  // #1176-T56
+  it("hands a hosted turn with an open network to a Dispatcher whose Worker image has the door mode", async () => {
+    const h = await start();
+    await saveToken(h);
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+      environment: {
+        id: "env-hosted",
+        name: "Open",
+        vcpus: 2,
+        setupScript: "",
+        network: { mode: "open", hosts: [] },
+      },
+    });
+
+    const claim = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: [...HOSTED_FEATURES, "implementer_subscription_door"],
+    });
+
+    expect(claim.status).toBe(200);
+    const { job } = (await claim.json()) as SplitClaimResponse;
+    expect(job).toMatchObject({ network: { mode: "open", hosts: [] } });
+  });
+
+  // #1150-T11
+  it("hands a hosted Dispatcher the turn with the size of a VM and the host of Claude Code, and its Worker the token with the input and nowhere else", async () => {
+    const h = await start();
+    await saveToken(h);
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+      costLimitCents: 80,
+    });
+
+    const response = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+    expect(response.status).toBe(200);
+    const { job } = (await response.json()) as SplitClaimResponse;
+
+    // The claim holds nothing of the turn but its credential and what the Dispatcher needs to start a VM: no input, no token.
+    expect(job.id).toBe(turn.job.id);
+    expect(JSON.stringify(job)).not.toContain(OAUTH_TOKEN);
+    expect(job).not.toHaveProperty("input");
+    expect(job.access).toEqual({
+      harness: "claude-code",
+      auth: "app-key",
+      model: "claude-sonnet-5-5",
+    });
+    expect(job.sizeLabel).toMatch(/^cr:size-/);
+    // The Dispatcher narrows the VM's network to the App, GitHub and the host of Claude Code (the token of the switch signs it).
+    expect(job).toMatchObject({
+      network: { mode: "off", hosts: [] },
+      modelHost: "api.anthropic.com",
+    });
+
+    const fetched = await h.worker.details(
+      job.id,
+      job.credential,
+      HOSTED_FEATURES.join(","),
+    );
+    const input = (await turnInput(fetched)) as unknown as {
+      llm?: unknown;
+      implementer: { subscription: Record<string, unknown> };
+    };
+    expect(input.llm).toBeUndefined();
+    expect(input.implementer.subscription).toEqual({
+      model: "claude-sonnet-5-5",
+      maxBudgetUsd: "0.80",
+      oauthToken: OAUTH_TOKEN,
+    });
+    expect(h.issuedJobTokens()).toHaveLength(1);
+  });
+
+  // #1150-T11
+  it("never writes the token to the log of the App", async () => {
+    const h = await start();
+    await saveToken(h);
+    await h.enqueueTurn({ modelChoice: CLAUDE_MODEL, profile: PROFILE });
+    const response = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+    const { job } = (await response.json()) as SplitClaimResponse;
+
+    await h.worker.details(job.id, job.credential, HOSTED_FEATURES.join(","));
+
+    expect(h.logLines().join("\n")).not.toContain(OAUTH_TOKEN);
+  });
+
+  // #1150-T11
+  it("carries the size, the script and the rule of the hosted environment of the turn: the Dispatcher starts the VM of that size and the Worker reads the same setup as on a runner", async () => {
+    const h = await start();
+    await saveToken(h);
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+      environment: {
+        id: "env-hosted",
+        name: "Standard",
+        vcpus: 4,
+        setupScript: "npm ci\n",
+        network: { mode: "list", hosts: ["registry.npmjs.org"] },
+      },
+    });
+
+    const response = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: HOSTED_FEATURES,
+    });
+    const { job } = (await response.json()) as SplitClaimResponse;
+
+    expect(job).toMatchObject({
+      vcpus: 4,
+      network: { mode: "list", hosts: ["registry.npmjs.org"] },
+      modelHost: "api.anthropic.com",
+    });
+    const input = (await turnInput(
+      await h.worker.details(job.id, job.credential, HOSTED_FEATURES.join(",")),
+    )) as unknown as { implementer: { environment: unknown } };
+    expect(input.implementer.environment).toEqual({
+      name: "Standard",
+      setupScript: "npm ci\n",
+      network: { mode: "list", hosts: ["registry.npmjs.org"] },
+    });
+  });
+
+  // #1150-T11
+  it("ends a hosted turn with an open network before a VM is started: the token would be inside a container that can reach anything", async () => {
     const h = await start();
     await saveToken(h);
     const turn = await h.enqueueTurn({
@@ -631,10 +849,12 @@ describe("the claim of a turn on claude-code that runs on the token of the works
       features: HOSTED_FEATURES,
     });
 
-    expect(claim.status).toBe(200);
-    expect(await h.queue.get(turn.job.id)).not.toMatchObject({
+    expect(claim.status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
+      errorCode: "implementer_config_invalid",
     });
+    expect(h.issuedJobTokens()).toEqual([]);
   });
 
   // #1150-T12

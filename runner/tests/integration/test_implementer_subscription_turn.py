@@ -192,6 +192,7 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
         dirty: bool = False,
         setup_outcome: EnvironmentSetup | None = None,
         placement: Placement | None = None,
+        door: Callable[..., Any] | None = None,
     ) -> Played:
         played = Played()
         if placement is not None:
@@ -249,7 +250,9 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
             return made
 
         monkeypatch.setattr(session_module, "start_door", no_door)
-        monkeypatch.setattr(session_module, "start_subscription_door", subscription_door)
+        monkeypatch.setattr(
+            session_module, "start_subscription_door", subscription_door if door is None else door
+        )
         monkeypatch.setattr(session_module, "start_network_door", netdoor)
         ready = harness or ReadyHarness(ClaudeLogin.oauth_token(LOGIN), IMAGE)
         seams = JobSeams(
@@ -446,6 +449,27 @@ def test_without_the_door_an_open_network_still_refuses_the_turn_free(
     assert result["ok"] is False and result["errorCode"] == "implementer_config_invalid"
     assert "subscription_network_open" in result["logTail"]
     assert played.rules == [] and result["usage"] is None
+
+
+# #1176-T16
+def test_a_door_that_is_missing_where_the_token_belongs_behind_it_never_gives_the_token_away(
+    play: Callable[..., Played],
+) -> None:
+    def vanished(**options: Any) -> None:
+        return None
+
+    played = play(
+        says("Done."),
+        environment={"name": "wide", "network": {"mode": "open", "hosts": []}},
+        door=vanished,
+    )
+
+    result = played.result
+    assert result["ok"] is False and result["errorCode"] == "setup_failed", played.output
+    assert "subscription_door_missing" in result["logTail"]
+    assert played.places == [] or all(place.runs == [] for place in played.places)
+    assert LOGIN not in json.dumps(result)
+    assert played.rules == [], "no wide network is opened for a token that has no door"
 
 
 # #1126-T20

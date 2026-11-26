@@ -160,6 +160,14 @@ class Placement:
 HOSTED: Final = Placement()
 
 
+def token_behind_door(placement: Placement) -> bool:
+    """Whether the Claude Code token of a subscription turn stays behind the model door (#1176).
+    The one decision: the network rule of the turn (`job_run.production_setup`, the session's
+    `_start_network`) and the login the agent is given (`session`) both follow it, so the token is
+    never in the container while the network is wide, and the other way round."""
+    return placement.subscription_door
+
+
 def placement_of(environment: Mapping[str, str]) -> Placement:
     """The placement the launcher told this job process. A value that is not `split` or an address
     that is missing ends the turn `setup_failed`, free, before anything is started."""
