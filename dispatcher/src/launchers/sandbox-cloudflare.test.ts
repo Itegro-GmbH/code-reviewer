@@ -17,8 +17,18 @@ import { createCfSandboxService } from "./cf-sandbox.ts";
 import { createPlacementPlatform } from "./placement.ts";
 import {
   CLOUDFLARE_IMAGE,
+  cloudflareVmMemoryMb,
+  IMPLEMENTER_VM_HEADROOM_MB,
+  MEMORY_GUARD_MIN_FLOOR_MB,
+  MODEL_DOOR_MEMORY_MB,
+  NETWORK_DOOR_MEMORY_MB,
+  READER_COUNT,
+  READER_MEMORY_MB,
   SANDBOX_HANDOVER_SECONDS,
+  agentMemoryMb,
   createSandboxLauncher,
+  memoryGuardFloorOfMb,
+  planForKind,
   type SandboxLauncherOptions,
 } from "./sandbox.ts";
 
@@ -66,6 +76,7 @@ function build(overrides: Partial<SandboxLauncherOptions> = {}): Launcher {
     cloudflare: {
       health: async () => cloudflare.health(),
       sizes: [4],
+      memoryMb: new Map([[4, 12288]]),
       sysboxProof: "proven",
     },
     ...overrides,
@@ -209,6 +220,97 @@ describe("the Sandbox-Launcher on the Cloudflare placement", () => {
     expect(cf.stdinOf([...cf.vms.keys()][0] ?? "")).toContain(CREDENTIAL);
   });
 
+  // #1178-L01
+  it("gives the agent of standard-4 what its 12 GiB leave after the kernel's share, the OS, Control, the doors, the readers and the guard's floor: 9,446 MB, not the 5,904 MB of 2 GiB per vCPU", async () => {
+    await launch(build());
+
+    expect(run()?.args).toContain("RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=9446");
+    // The VM shows 98 % of the type's memory (12,650 MB of 12 GiB measured in the spike); every deduction of the Vercel plan is kept.
+    const vm = cloudflareVmMemoryMb(12288);
+    expect(vm).toBe(12042);
+    expect(agentMemoryMb(4, 768, vm)).toBe(9446);
+    expect(vm - 9446).toBe(
+      IMPLEMENTER_VM_HEADROOM_MB +
+        (memoryGuardFloorOfMb(vm) - MEMORY_GUARD_MIN_FLOOR_MB) +
+        768 +
+        MODEL_DOOR_MEMORY_MB +
+        NETWORK_DOOR_MEMORY_MB +
+        READER_COUNT * READER_MEMORY_MB,
+    );
+    // With the agent at its limit the VM the kernel really shows (12,064 MiB of the measurement) still has the guard's floor left.
+    expect(12064 - 9446 - 768 - 256 - 96 - 512).toBeGreaterThanOrEqual(
+      memoryGuardFloorOfMb(12064),
+    );
+  });
+
+  // #1178-L02
+  it("gives the agent of a custom type its `memoryMib`: 8 vCPU / 32768 MiB leaves 27,911 MB, the guard's floor 8% of the VM included", async () => {
+    cf = new FakeCfSandbox({
+      token: TOKEN,
+      workerImageId: IMAGE_ID,
+      instanceTypes: ["standard-4", "custom-8"],
+    });
+    cf.onExec("image-id", { exitCode: 0, stdout: `${IMAGE_ID}\n` });
+    const cloudflare = createCfSandboxService({
+      baseUrl: "https://cr-sandbox.example",
+      token: TOKEN,
+      instanceTypes: new Map([
+        [4, "standard-4"],
+        [8, "custom-8"],
+      ]),
+      fetch: cf.fetch,
+    });
+    const result = await launch(
+      build({
+        service: createPlacementPlatform({ vercel, cloudflare, logger }),
+        cloudflare: {
+          health: async () => cloudflare.health(),
+          sizes: [4, 8],
+          memoryMb: new Map([
+            [4, 12288],
+            [8, 32768],
+          ]),
+          sysboxProof: "proven",
+        },
+      }),
+      spec({ vcpus: 8 }),
+    );
+
+    expect(result).toStrictEqual({ ok: true });
+    expect([...cf.vms.values()][0]?.instanceType).toBe("custom-8");
+    expect(run()?.args).toContain("RUNNER_IMPLEMENTER_AGENT_MEMORY_MB=27911");
+    expect(agentMemoryMb(8, 768, cloudflareVmMemoryMb(32768))).toBe(27911);
+  });
+
+  // #1178-L03
+  it("keeps 2048 MiB per vCPU for the Vercel placement of the same size: 5,904 MB at 4 vCPU", async () => {
+    expect(agentMemoryMb(4, 768)).toBe(5904);
+    expect(
+      planForKind("implementer", { launcher: { vcpus: 4 } }),
+    ).toMatchObject({ agentMemoryMb: 5904 });
+  });
+
+  // #1178-L04
+  it("refuses a size whose instance type leaves the agent less than it can start with, before any VM exists", async () => {
+    // 3072 MiB less the OS, Control, the doors and the readers (2144 MB) is 928 MB, below the 1024 MB the Worker needs.
+    const result = await launch(
+      build({
+        cloudflare: {
+          health: async () => client().health(),
+          sizes: [2],
+          memoryMb: new Map([[2, 3072]]),
+          sysboxProof: "proven",
+        },
+      }),
+      spec({ vcpus: 2 }),
+    );
+
+    expect((result as { error: LaunchError }).error.code).toBe(
+      "sandbox_size_unsupported",
+    );
+    expect(cf.vms.size).toBe(0);
+  });
+
   // #1158-L05
   it("passes the Sysbox proof of the placement, `unproven` when it is configured so", async () => {
     await launch(
@@ -216,6 +318,7 @@ describe("the Sandbox-Launcher on the Cloudflare placement", () => {
         cloudflare: {
           health: async () => client().health(),
           sizes: [4],
+          memoryMb: new Map([[4, 12288]]),
           sysboxProof: "unproven",
         },
       }),
