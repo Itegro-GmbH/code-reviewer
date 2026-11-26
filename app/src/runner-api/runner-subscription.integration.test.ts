@@ -670,35 +670,6 @@ describe("the claim of a turn on claude-code that runs on the token of the works
   });
 
   // #1176-T56
-  it("ends a hosted turn with an open network, free, for a Dispatcher whose Worker image has no door mode", async () => {
-    const h = await start();
-    await saveToken(h);
-    const turn = await h.enqueueTurn({
-      modelChoice: CLAUDE_MODEL,
-      profile: PROFILE,
-      environment: {
-        id: "env-hosted",
-        name: "Open",
-        vcpus: 2,
-        setupScript: "",
-        network: { mode: "open", hosts: [] },
-      },
-    });
-
-    const without = await h.claimSplit({
-      engines: DISPATCHER_ENGINES,
-      features: HOSTED_FEATURES,
-    });
-
-    expect(without.status).toBe(204);
-    expect(await h.queue.get(turn.job.id)).toMatchObject({
-      status: "failed",
-      errorCode: "implementer_engine_unavailable",
-    });
-    expect(h.issuedJobTokens()).toEqual([]);
-  });
-
-  // #1176-T56
   it("hands a hosted turn with an open network to a Dispatcher whose Worker image has the door mode", async () => {
     const h = await start();
     await saveToken(h);
@@ -828,8 +799,8 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     });
   });
 
-  // #1150-T11
-  it("ends a hosted turn with an open network before a VM is started: the token would be inside a container that can reach anything", async () => {
+  // #1176-T56
+  it("ends a hosted turn with an open network, free and before a VM is started, for a Dispatcher whose Worker image has no door for the token: there the token would be inside a container that can reach anything", async () => {
     const h = await start();
     await saveToken(h);
     const turn = await h.enqueueTurn({
@@ -852,7 +823,7 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     expect(claim.status).toBe(204);
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
-      errorCode: "implementer_config_invalid",
+      errorCode: "implementer_engine_unavailable",
     });
     expect(h.issuedJobTokens()).toEqual([]);
   });
