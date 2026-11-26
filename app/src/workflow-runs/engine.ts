@@ -176,6 +176,16 @@ export type EngineDependencies = {
   repositoryByName?(
     fullName: string,
   ): Promise<{ id: string; fullName: string } | undefined>;
+  /**
+   * #1177 (epic #1175): whether an earlier run of the same workflow made the branch `branch` of the repository (a session of such a run
+   * worked on it), so that a step that names it as its `pushBranch` continues it instead of being refused (`push_branch_exists`). Left out:
+   * no run is known to have made any.
+   */
+  pushBranchMadeByLane?(query: {
+    workflowId: string;
+    repositoryId: string;
+    branch: string;
+  }): Promise<boolean>;
   now?: () => Date;
   /** The most one call of a connector may take; `ACTION_TIMEOUT_MS` unless a test shortens it. */
   actionTimeoutMs?: number;
@@ -612,6 +622,32 @@ function startBranchOf(
         "template_invalid",
         "The branch of this step is not the name of a branch.",
       );
+}
+
+/**
+ * The `pushBranch` of an agent step with its references filled in (#1177): a branch name, else the step ends before anything starts. It is
+ * never the run's base branch, the branch the step starts from, or a text that is no branch name; the default branch of the repository and
+ * the branches that exist are for the Implementer, which asks the platform.
+ */
+function pushBranchOf(
+  pushBranch: unknown,
+  values: RunValues,
+  run: Pick<StoredWorkflowRun, "baseBranch">,
+  start: string | undefined,
+): string | StepOutcome {
+  const resolved =
+    typeof pushBranch === "string"
+      ? resolveValue(pushBranch, values)
+      : undefined;
+  const refused = (why: string) =>
+    failed("push_branch_invalid", `The branch this step pushes to ${why}.`);
+  if (typeof resolved !== "string" || !checkBranchName(resolved, "").ok)
+    return refused("is not the name of a branch");
+  if (resolved === run.baseBranch || resolved === start)
+    return refused(
+      "is the base branch of the run or the branch the step starts from",
+    );
+  return resolved;
 }
 
 class ActionTimeout extends Error {}
@@ -1391,6 +1427,14 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         ? undefined
         : startBranchOf(node.branch, values);
     if (typeof start === "object") return { outcome: start };
+    // #1177: a step with `pushBranch` works on the branch it names, made from its start branch (the run's base when it names none). The
+    // session is a one-repository session of the run's repository, whose list carries that branch; the platform's own name stays its key.
+    let named: string | undefined;
+    if (node.pushBranch !== undefined && node.repos === undefined) {
+      const resolved = pushBranchOf(node.pushBranch, values, run, start);
+      if (typeof resolved === "object") return { outcome: resolved };
+      named = resolved;
+    }
     // #1092: a step with `repos` works on those repositories, whatever the run's is: the references are filled in, and each repository
     // must be one of the workspace. The run's repository is not special and is not needed.
     let repos: { start: StartRepo[]; names: string[] } | undefined;
@@ -1425,14 +1469,29 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     const owner = await sessionOwner(run);
     if ("missing" in owner)
       return { outcome: failed("agent_start_failed", ownerMissingText(owner)) };
+    const namedRepos: StartRepo[] | undefined =
+      named === undefined
+        ? undefined
+        : [
+            {
+              repositoryId: run.repositoryId,
+              base: start ?? run.baseBranch,
+              branch: named,
+            },
+          ];
     try {
       const started = await deps.implementer.startTask(
         owner,
         {
           repositoryId: repos?.start[0]?.repositoryId ?? run.repositoryId,
           baseBranch: run.baseBranch,
-          ...(repos === undefined ? {} : { repos: repos.start }),
-          ...(start === undefined ? {} : { startBranch: start }),
+          ...(repos === undefined && namedRepos === undefined
+            ? {}
+            : { repos: repos?.start ?? namedRepos }),
+          // With a named branch the start branch is the base of its entry; the session has no `startBranch` of its own then.
+          ...(start === undefined || namedRepos !== undefined
+            ? {}
+            : { startBranch: start }),
           branch: sessionBranchOf(run, step),
           instruction,
           environmentId: placed.id,
@@ -1446,6 +1505,18 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           costCapCents: capCents(step.capMicroUsd),
           timeLimitMinutes,
           workflowStep: true,
+          ...(named === undefined
+            ? {}
+            : {
+                pushBranch: {
+                  madeByLane: async (repositoryId, branch) =>
+                    (await deps.pushBranchMadeByLane?.({
+                      workflowId: run.workflowId,
+                      repositoryId,
+                      branch,
+                    })) ?? false,
+                },
+              }),
           ...(inline === undefined
             ? {}
             : {
@@ -1458,7 +1529,16 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       );
       return { runId: started.runId };
     } catch (error) {
-      return resolvedStartFailure(error, run, step, repos?.names);
+      // A step with `pushBranch` is a one-repository session of the run's repository: a refusal about repository 0 names that one.
+      return resolvedStartFailure(
+        error,
+        run,
+        step,
+        named === undefined
+          ? repos?.names
+          : [(await deps.repositoryName(run.repositoryId)) ?? "the repository"],
+        named,
+      );
     }
   }
 
@@ -1539,6 +1619,33 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     }
   }
 
+  /** The step a refusal of the Implementer about the branch of a `pushBranch` ends, or undefined for a refusal that is about something else. */
+  function pushBranchRefusal(
+    code: ImplementerError["code"],
+    branch: string,
+  ): StepOutcome | undefined {
+    switch (code) {
+      case "IMPLEMENTER_BRANCH_EXISTS":
+        return failed(
+          "push_branch_exists",
+          `The branch ${branch} exists in the repository and no earlier run of this lane made it, so it is not pushed to. Name a branch that does not exist yet.`,
+        );
+      case "IMPLEMENTER_BRANCH_PROTECTED":
+        return failed(
+          "push_branch_protected",
+          `The branch ${branch} is protected in the repository, so it is not pushed to.`,
+        );
+      case "IMPLEMENTER_BRANCH_CONFLICT":
+      case "IMPLEMENTER_REQUEST_INVALID":
+        return failed(
+          "push_branch_invalid",
+          `The branch ${branch} cannot be used: it is the default branch of the repository, or its name clashes with another branch (a branch cannot be a folder of another).`,
+        );
+      default:
+        return undefined;
+    }
+  }
+
   /** The Implementer refused: the step is about to be given up, not while a turn exists under its request id (a repeat of the request that no longer fits it). */
   async function resolvedStartFailure(
     error: unknown,
@@ -1546,10 +1653,22 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     step: StoredStepRun,
     /** #1092: the repositories of a step with `repos`, by their place in the list (`repoIndex` of a refusal). */
     repoNames?: readonly string[],
+    /** #1177: the branch a step with `pushBranch` named; the refusals about it have codes of their own. */
+    pushBranch?: string,
   ): Promise<Begun> {
     if (!(error instanceof ImplementerError)) throw error;
     const existing = await deps.turns.findByRequest(requestIdOf(run, step));
     if (existing !== undefined) return { runId: existing.jobId };
+    const pushRefusal =
+      pushBranch === undefined
+        ? undefined
+        : pushBranchRefusal(error.code, pushBranch);
+    if (pushRefusal !== undefined) {
+      log(
+        `[workflow-runs] STEP_START_FAILED run=${run.id} step=${step.stepId} code=${error.code}`,
+      );
+      return { outcome: pushRefusal };
+    }
     const named =
       error.repoIndex === undefined ? undefined : repoNames?.[error.repoIndex];
     if (named !== undefined) {

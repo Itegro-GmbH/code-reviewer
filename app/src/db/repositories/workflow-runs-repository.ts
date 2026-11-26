@@ -377,6 +377,16 @@ export type WorkflowRunsRepository = {
    */
   createRun(input: NewWorkflowRun): Promise<CreateRunOutcome>;
   getRun(id: string): Promise<StoredWorkflowRun | undefined>;
+  /**
+   * #1177: whether a session of a run of this workflow (any run of it, the running one included) worked on the branch `branch` of the
+   * repository, as the working branch of its repositories list (`pushBranch` of an agent step). It says the lane made the branch (or was
+   * going to), which is what lets a step continue a branch that exists on the platform; it does not ask the platform.
+   */
+  laneWorkedOnBranch(
+    workflowId: string,
+    repositoryId: string,
+    branch: string,
+  ): Promise<boolean>;
   /** The run a client request id made, or undefined. */
   findByRequest(
     clientRequestId: string,
@@ -894,6 +904,55 @@ export function createWorkflowRunsRepository(
     async getRun(id) {
       const row = await selectRun(db, id).executeTakeFirst();
       return row === undefined ? undefined : runFrom(row);
+    },
+
+    async laneWorkedOnBranch(workflowId, repositoryId, branch) {
+      // A session of several repositories (and the one-entry list of a `pushBranch` step) keeps its repositories as JSON text; the
+      // containment holds when one entry of the list is this repository with this working branch.
+      const wanted = JSON.stringify([{ repositoryId, branch }]);
+      const found = await db
+        .selectFrom("workflow_step_runs")
+        .innerJoin("workflow_runs", (join) =>
+          join
+            .onRef("workflow_runs.id", "=", "workflow_step_runs.run_id")
+            .onRef(
+              "workflow_runs.workspace_id",
+              "=",
+              "workflow_step_runs.workspace_id",
+            ),
+        )
+        .innerJoin("implementer_turns", (join) =>
+          join
+            .onRef("implementer_turns.id", "=", "workflow_step_runs.turn_id")
+            .onRef(
+              "implementer_turns.workspace_id",
+              "=",
+              "workflow_step_runs.workspace_id",
+            ),
+        )
+        .innerJoin("implementer_sessions", (join) =>
+          join
+            .onRef(
+              "implementer_sessions.id",
+              "=",
+              "implementer_turns.session_id",
+            )
+            .onRef(
+              "implementer_sessions.workspace_id",
+              "=",
+              "implementer_turns.workspace_id",
+            ),
+        )
+        .select("implementer_sessions.id")
+        .where("workflow_step_runs.workspace_id", "=", workspaceId)
+        .where("workflow_runs.workflow_id", "=", workflowId)
+        .where("implementer_sessions.repos", "is not", null)
+        .where(
+          sql<boolean>`implementer_sessions.repos::jsonb @> ${wanted}::jsonb`,
+        )
+        .limit(1)
+        .executeTakeFirst();
+      return found !== undefined;
     },
 
     async findByRequest(clientRequestId) {

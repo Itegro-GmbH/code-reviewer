@@ -129,6 +129,12 @@ export const STEP_FAILURE_CODES = [
   "repo_not_available",
   /** #1092: a repository of `repos` has no branch with the name of its `base`. */
   "base_branch_not_found",
+  /** #1177: the `pushBranch` of a step gave no branch name, the run's base branch, the branch the step starts from or the default branch of the repository. */
+  "push_branch_invalid",
+  /** #1177: the branch a step is to push to is protected on the platform. */
+  "push_branch_protected",
+  /** #1177: the branch a step is to push to exists on the platform and no earlier run of the lane made it. */
+  "push_branch_exists",
   /** The Implementer refused the turn, or could not start it. */
   "agent_start_failed",
   /** The turn ended, but its job, its result or its session cannot be read. */
