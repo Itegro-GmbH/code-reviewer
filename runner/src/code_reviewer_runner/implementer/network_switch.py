@@ -143,6 +143,20 @@ def urllib_post(url: str, body: bytes, timeout: float) -> tuple[int, bytes]:
         return error.code, error.read(4096)
 
 
+def _is_subscription_form(rule: NetworkRule, signed: NetworkRule) -> bool:
+    """#1171: a turn on a subscription login narrows the step's rule itself (`subscription_rule`:
+    the API host and the step's hosts read-only), while the switch carries the step's rule as the
+    Dispatcher read and signed it. That form, and only that one, is the job's rule too; what is
+    sent stays the signed rule (the token signs it, and the wall it makes is never wider)."""
+    # Imported here: the claude_code package imports this module's neighbours.
+    from code_reviewer_runner.implementer.claude_code.gates import subscription_rule
+
+    try:
+        return rule == subscription_rule(signed)
+    except JobError:
+        return False
+
+
 def narrow_policy(
     switch: NetworkSwitch,
     rule: NetworkRule,
@@ -158,7 +172,7 @@ def narrow_policy(
     calls it took. Raises `JobError` (`setup_failed`, free) when it never does, and
     `implementer_config_invalid` when the rule or the provider's host in the job is not the one the
     Dispatcher read and signed."""
-    if rule != switch.rule:
+    if rule != switch.rule and not _is_subscription_form(rule, switch.rule):
         raise JobError(
             ErrorCode.IMPLEMENTER_CONFIG_INVALID,
             "the network rule of the job is not the one the Dispatcher read",

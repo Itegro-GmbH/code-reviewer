@@ -25,6 +25,7 @@ from code_reviewer_runner.implementer.agent_container import (
     proxy_environment,
     trust_environment,
 )
+from code_reviewer_runner.implementer.claude_code.gates import subscription_rule
 from code_reviewer_runner.implementer.netdoor.registries import rule_has_registries
 from code_reviewer_runner.implementer.network_report import network_report
 from code_reviewer_runner.implementer.network_rule import (
@@ -327,6 +328,40 @@ def test_a_rule_in_the_job_that_is_not_the_one_the_dispatcher_read_is_refused() 
     post = Dispatcher(APPLIED)
     with pytest.raises(JobError) as caught:
         narrow(post, rule=OPEN)
+    assert caught.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID and post.bodies == []
+
+
+# #1171: a subscription turn narrows the step's rule itself (`subscription_rule`); the switch still
+# carries the rule the Dispatcher signed, and that is what is sent.
+@pytest.mark.parametrize(
+    "signed",
+    [NetworkRule(MODE_LIST, ("registry.npmjs.org",)), OFF],
+)
+def test_the_narrowed_rule_of_a_subscription_turn_is_accepted_and_the_signed_one_is_sent(
+    signed: NetworkRule,
+) -> None:
+    post = Dispatcher(APPLIED)
+    switch = parse_switch(switch_text(signed))
+    assert switch is not None
+    narrowed = subscription_rule(signed)
+    assert narrowed != signed
+    assert narrow_policy(switch, narrowed, MODEL_HOST, post=post, sleep=lambda _: None) == 1
+    assert post.bodies[0]["network"] == signed.to_json()
+
+
+# #1171: only the subscription form of the signed rule is accepted, not any other narrower one.
+def test_a_rule_that_is_neither_the_signed_one_nor_its_subscription_form_is_refused() -> None:
+    post = Dispatcher(APPLIED)
+    switch = parse_switch(switch_text(NetworkRule(MODE_LIST, ("registry.npmjs.org",))))
+    assert switch is not None
+    with pytest.raises(JobError) as caught:
+        narrow_policy(
+            switch,
+            NetworkRule(MODE_LIST, ("evil.example.com",)),
+            MODEL_HOST,
+            post=post,
+            sleep=lambda _: None,
+        )
     assert caught.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID and post.bodies == []
 
 
