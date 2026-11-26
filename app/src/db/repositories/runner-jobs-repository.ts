@@ -386,6 +386,11 @@ export type ClaimOptions = {
    */
   acceptsMultiRepo?: boolean;
   /**
+   * #1177: the caller named the claim feature `implementer_push_allowlist`: its Worker pushes only the branch of an entry marked `pushOnly`.
+   * Without it a turn whose session has such an entry is never a candidate of the claim (it waits; nothing fails).
+   */
+  acceptsPushAllowlist?: boolean;
+  /**
    * #1150: the caller named the claim feature `implementer_workspace_token`: its Worker image reads the Claude Code OAuth token of the workspace
    * from the input. Without it a hosted turn on `claude-code` is not a candidate of the claim (it waits for a caller that has the feature).
    */
@@ -1289,6 +1294,9 @@ export function createRunnerJobsRepository(
               : {}),
             ...(claimOptions.acceptsMultiRepo === true
               ? { acceptsMultiRepo: true }
+              : {}),
+            ...(claimOptions.acceptsPushAllowlist === true
+              ? { acceptsPushAllowlist: true }
               : {}),
             // #1150: only a claim that names `implementer_workspace_token` is handed a hosted turn on the token of the workspace.
             ...(claimOptions.acceptsWorkspaceLogin === true

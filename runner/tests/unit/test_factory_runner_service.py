@@ -128,9 +128,11 @@ class FakeClient:
         self.states: list[str | Exception | None] = []
         self.state_calls: list[str] = []
         self.multi_repo: bool | None = None
+        self.push_allowlist: bool | None = None
 
-    def use_features(self, *, multi_repo: bool) -> None:
+    def use_features(self, *, multi_repo: bool, push_allowlist: bool = False) -> None:
         self.multi_repo = multi_repo
+        self.push_allowlist = push_allowlist
 
     def claim(self) -> ClaimedWorker | None:
         self.claim_calls += 1

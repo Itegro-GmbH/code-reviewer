@@ -24,6 +24,7 @@ function harness(
     input?: Record<string, unknown>;
     startTask?: EngineDependencies["implementer"]["startTask"];
     madeByLane?: EngineDependencies["pushBranchMadeByLane"];
+    repositoryName?: EngineDependencies["repositoryName"];
   } = {},
 ) {
   const run: StoredWorkflowRun = {
@@ -162,7 +163,7 @@ function harness(
       findByRequest: async () => undefined,
     },
     connectors: createConnectorRegistry(),
-    repositoryName: async () => "acme/run-repo",
+    repositoryName: options.repositoryName ?? (async () => "acme/run-repo"),
     ...(options.madeByLane === undefined
       ? {}
       : { pushBranchMadeByLane: options.madeByLane }),
@@ -281,6 +282,66 @@ describe("an agent step with pushBranch", () => {
       expect.objectContaining({ errorCode: "agent_start_failed" }),
     ]);
   });
+
+  // #1177-T38
+  it.each([
+    ["IMPLEMENTER_BRANCH_EXISTS"],
+    ["IMPLEMENTER_REQUEST_INVALID"],
+    ["IMPLEMENTER_BRANCH_CONFLICT"],
+  ] as const)(
+    "keeps %s as agent_start_failed when it is not about the named branch (no place of a repository)",
+    async (refusal) => {
+      const app = harness(
+        { pushBranch: "{{trigger.input.branch}}" },
+        {
+          startTask: async () => {
+            throw new ImplementerError(refusal, "refused");
+          },
+        },
+      );
+      await app.engine.advance(RUN_ID);
+      expect(app.settled).toEqual([
+        expect.objectContaining({ errorCode: "agent_start_failed" }),
+      ]);
+    },
+  );
+
+  // #1177-T39
+  it("classifies a refusal even when the name of the repository cannot be read", async () => {
+    const app = harness(
+      { pushBranch: "{{trigger.input.branch}}" },
+      {
+        startTask: async () => {
+          throw new ImplementerError("IMPLEMENTER_BRANCH_EXISTS", "refused", {
+            repoIndex: 0,
+          });
+        },
+        repositoryName: async () => {
+          throw new Error("database down");
+        },
+      },
+    );
+    await app.engine.advance(RUN_ID);
+    expect(app.settled).toEqual([
+      expect.objectContaining({ errorCode: "push_branch_exists" }),
+    ]);
+  });
+
+  // #1177-T40
+  it.each([["refs/heads/x"], ["heads/x"], ["MAIN"]])(
+    "ends the step before anything starts for the name %s",
+    async (branch) => {
+      const app = harness(
+        { pushBranch: "{{trigger.input.branch}}" },
+        { input: { branch } },
+      );
+      await app.engine.advance(RUN_ID);
+      expect(app.startTask).not.toHaveBeenCalled();
+      expect(app.settled).toEqual([
+        expect.objectContaining({ errorCode: "push_branch_invalid" }),
+      ]);
+    },
+  );
 
   // #1177-T35
   it("asks the lane's earlier runs whether they made a branch, for this workflow and repository", async () => {

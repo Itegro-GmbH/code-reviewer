@@ -17,6 +17,17 @@ export type SessionRepo = {
   name: string;
   base: string;
   branch: string;
+  /**
+   * #1177: the entry is the named branch of a `pushBranch` step: the runner pushes this branch and no other of the repository. Set only
+   * then (and only to true); left out for every other entry.
+   */
+  pushOnly?: true;
+  /**
+   * #1177: only with `pushOnly`: what the start of the session decided about the branch on the platform. true: it existed and an earlier
+   * run of the lane had made it (it is continued); false: it did not exist (the first turn creates it, and a branch that has appeared since
+   * is the runner's `branch_exists`, never continued). The first turn's claim follows this and does not ask the platform again.
+   */
+  expectExisting?: boolean;
 };
 
 /** The names the work volume uses itself (and `.git`, which would make `/work` a repository): never a mount name as they are. */
@@ -96,10 +107,15 @@ export function parseSessionRepos(text: string | null): SessionRepo[] | null {
   const repos: SessionRepo[] = [];
   for (const entry of value as unknown[]) {
     if (typeof entry !== "object" || entry === null) return null;
-    const { repositoryId, fullName, name, base, branch } = entry as Record<
-      string,
-      unknown
-    >;
+    const {
+      repositoryId,
+      fullName,
+      name,
+      base,
+      branch,
+      pushOnly,
+      expectExisting,
+    } = entry as Record<string, unknown>;
     if (
       typeof repositoryId !== "string" ||
       typeof fullName !== "string" ||
@@ -110,20 +126,44 @@ export function parseSessionRepos(text: string | null): SessionRepo[] | null {
       !NO_WHITESPACE.test(branch)
     )
       return null;
-    repos.push({ repositoryId, fullName, name, base, branch });
+    repos.push({
+      repositoryId,
+      fullName,
+      name,
+      base,
+      branch,
+      ...(pushOnly === true ? { pushOnly: true as const } : {}),
+      ...(pushOnly === true && typeof expectExisting === "boolean"
+        ? { expectExisting }
+        : {}),
+    });
   }
   return repos;
 }
 
 export function serializeSessionRepos(repos: readonly SessionRepo[]): string {
   return JSON.stringify(
-    repos.map(({ repositoryId, fullName, name, base, branch }) => ({
-      repositoryId,
-      fullName,
-      name,
-      base,
-      branch,
-    })),
+    repos.map(
+      ({
+        repositoryId,
+        fullName,
+        name,
+        base,
+        branch,
+        pushOnly,
+        expectExisting,
+      }) => ({
+        repositoryId,
+        fullName,
+        name,
+        base,
+        branch,
+        ...(pushOnly === true ? { pushOnly: true } : {}),
+        ...(pushOnly === true && expectExisting !== undefined
+          ? { expectExisting }
+          : {}),
+      }),
+    ),
   );
 }
 
@@ -138,7 +178,10 @@ export function isDirect(repo: Pick<SessionRepo, "base" | "branch">): boolean {
  * repository goes to its base branch. Made from the stored resolution, so it is the same text on every turn of the session.
  */
 export function preambleOf(
-  repos: readonly Pick<SessionRepo, "fullName" | "name" | "base" | "branch">[],
+  repos: readonly Pick<
+    SessionRepo,
+    "fullName" | "name" | "base" | "branch" | "pushOnly"
+  >[],
   branchExists: readonly boolean[],
 ): string {
   const lines = [
@@ -155,9 +198,12 @@ export function preambleOf(
           : `- ${repo.fullName} at ${where}: base branch "${repo.base}"; the working branch "${repo.branch}" was made from it and is checked out.`,
     );
   });
+  // #1177: the runner pushes only the named branch of a `pushOnly` entry, so the agent is told what really happens to its commits.
   lines.push(
     "",
-    "Commit your work in each repository you change. Everything you commit, on any branch of any of these repositories, is pushed when the task ends; you have no remote and no credential, so do not try to push.",
+    repos.every((repo) => repo.pushOnly === true)
+      ? "Commit your work on the working branch. Only that branch is pushed when the task ends: what you commit on any other branch stays in your container and is lost. You have no remote and no credential, so do not try to push."
+      : "Commit your work in each repository you change. Everything you commit, on any branch of any of these repositories, is pushed when the task ends; you have no remote and no credential, so do not try to push.",
     "",
     "The task:",
     "",

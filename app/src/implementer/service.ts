@@ -23,7 +23,11 @@ import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { JobQueueError } from "../jobs/errors.ts";
 import type { EnqueueImplementerTurnResult } from "../jobs/job-types.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
-import { branchConflict, checkBranchName } from "./branch-name.ts";
+import {
+  branchConflict,
+  checkBranchName,
+  isPushBranchName,
+} from "./branch-name.ts";
 import { createRunCanceller, type RunCanceller } from "./cancel.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import {
@@ -47,10 +51,15 @@ import {
   type FollowUps,
   type FollowUpDependencies,
 } from "./follow-up.ts";
-import { validateStartInput, type StartInput } from "./start-input.ts";
+import {
+  INSTRUCTION_MAX_LENGTH,
+  validateStartInput,
+  type StartInput,
+} from "./start-input.ts";
 import {
   deriveMountNames,
   firstRepeat,
+  preambleOf,
   type SessionRepo,
 } from "../db/session-repos.ts";
 
@@ -338,8 +347,15 @@ export function createImplementerService(
     named: { repositoryId: string; base: string; branch: string },
     defaultBranch: string,
     pushBranch: NonNullable<StartTaskOptions["pushBranch"]>,
-  ): Promise<void> {
-    if (named.branch === defaultBranch || named.branch === named.base)
+  ): Promise<{ expectExisting: boolean }> {
+    // Branch names are compared without regard to case: GitHub treats `Main` and `main` as different refs but a clone on a
+    // case-insensitive file system does not, and a name that differs only in case from the default branch is never meant.
+    const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+    if (
+      !isPushBranchName(named.branch) ||
+      same(named.branch, defaultBranch) ||
+      same(named.branch, named.base)
+    )
       throw new ImplementerError(
         "IMPLEMENTER_REQUEST_INVALID",
         "The branch to push to is the default branch of the repository or the base branch.",
@@ -358,7 +374,7 @@ export function createImplementerService(
       );
       if (branchConflict(named.branch, listed.names) !== null)
         throw BRANCH_CONFLICT();
-      return;
+      return { expectExisting: false };
     }
     if (existing.protected === true)
       throw new ImplementerError(
@@ -367,6 +383,7 @@ export function createImplementerService(
       );
     if (!(await pushBranch.madeByLane(named.repositoryId, named.branch)))
       throw BRANCH_EXISTS();
+    return { expectExisting: true };
   }
 
   /**
@@ -436,19 +453,28 @@ export function createImplementerService(
             "IMPLEMENTER_REQUEST_INVALID",
             "The branch is not a valid branch name.",
           );
-        if (index === 0 && pushBranch !== undefined)
-          await checkPushBranch(
-            { provider, integration, repo },
-            { repositoryId: entry.repositoryId, base, branch },
-            facts.defaultBranch,
-            pushBranch,
-          );
+        // #1177: what the start decided about the named branch is stored with the entry; the claim of the first turn follows it.
+        const pushed =
+          index === 0 && pushBranch !== undefined
+            ? await checkPushBranch(
+                { provider, integration, repo },
+                { repositoryId: entry.repositoryId, base, branch },
+                facts.defaultBranch,
+                pushBranch,
+              )
+            : undefined;
         if (index === 0) firstSha = head.sha;
         resolved.push({
           repositoryId: entry.repositoryId,
           fullName: repo.fullName,
           base,
           branch,
+          ...(pushed === undefined
+            ? {}
+            : {
+                pushOnly: true as const,
+                expectExisting: pushed.expectExisting,
+              }),
         });
       } catch (error) {
         throw refusal(error, index);
@@ -582,6 +608,22 @@ export function createImplementerService(
         );
         baseSha = resolved.baseSha;
         sessionRepos = resolved.repos;
+        // #1177: the claim puts the preamble in front of the instruction within the same limit and cuts the task to fit; a step that names its
+        // branch is refused instead, so an instruction near the limit is never silently truncated.
+        if (
+          options.pushBranch !== undefined &&
+          preambleOf(
+            resolved.repos,
+            resolved.repos.map((entry) => entry.expectExisting === true),
+          ).length +
+            task.instruction.length >
+            INSTRUCTION_MAX_LENGTH
+        )
+          throw new ImplementerError(
+            "IMPLEMENTER_REQUEST_INVALID",
+            "The instruction leaves no room for the note the agent is given about its repository.",
+            { issues: [{ field: "instruction", code: "too_long" }] },
+          );
         repoName = resolved.repos.map((entry) => entry.fullName).join(",");
       } else {
         const resolved = await resolveSingle(task);

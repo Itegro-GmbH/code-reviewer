@@ -135,6 +135,30 @@ def test_an_excluded_branch_is_reported_with_its_reason_and_not_chosen(
     assert chosen.excluded == [("main", REASON_EXCLUDED)]
 
 
+# #1177-T70
+def test_with_an_allowlist_only_that_branch_is_chosen_and_the_rest_is_reported() -> None:
+    chosen = select_branches(["main", "other", FORM], form_branch=FORM, only=FORM)
+
+    assert chosen.names == [FORM]
+    assert chosen.excluded == [("main", REASON_EXCLUDED), ("other", REASON_EXCLUDED)]
+
+
+# #1177-T71
+def test_with_an_allowlist_a_run_that_made_no_commit_on_it_pushes_nothing() -> None:
+    chosen = select_branches(["main"], form_branch=FORM, only=FORM)
+
+    assert chosen.names == []
+    assert chosen.excluded == [("main", REASON_EXCLUDED)]
+
+
+# #1177-T72
+def test_without_an_allowlist_nothing_changes() -> None:
+    chosen = select_branches(["main", FORM], form_branch=FORM, only=None)
+
+    assert chosen.names == [FORM, "main"]
+    assert chosen.excluded == []
+
+
 def test_hostile_names_are_counted_and_never_chosen_or_named() -> None:
     chosen = select_branches(["ok", "a\nb", "-x", "a b"], form_branch=FORM)
 

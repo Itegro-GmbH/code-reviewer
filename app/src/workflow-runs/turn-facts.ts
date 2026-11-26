@@ -307,6 +307,22 @@ export function outcomeOfTurn(
         : estimated !== null
           ? "estimated"
           : "limit";
+  // #1177: the runner found the named branch of a `pushBranch` step on the platform although the start had seen none (it appeared in between,
+  // made by somebody else): nothing was pushed to it, and the step says so with the code of the start-time refusal.
+  const named = ended.session.repos?.find((entry) => entry.pushOnly === true);
+  if (
+    ended.jobStatus === "failed" &&
+    ended.jobErrorCode === "branch_exists" &&
+    named !== undefined
+  )
+    return {
+      ok: false,
+      code: "push_branch_exists",
+      message: `The branch ${named.branch} appeared in the repository after the step was started, and no earlier run of this lane made it, so it is not pushed to. Name a branch that does not exist yet.`,
+      detail: `status=${ended.jobStatus} error=branch_exists`,
+      costMicroUsd,
+      costBasis,
+    };
   if (ended.jobStatus !== "succeeded")
     return {
       ok: false,

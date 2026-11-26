@@ -237,4 +237,81 @@ describe("a task that pushes to a branch the step names", () => {
       { workflowStep: true },
     );
   });
+
+  // #1177-T27
+  it("stores the start-time decision with the entry: new, or continued because the lane made it", async () => {
+    const fresh = build();
+    await fresh.service.startTask(USER, NAMED, options());
+    expect(fresh.enqueue.mock.calls[0]?.[0]).toMatchObject({
+      repos: [{ pushOnly: true, expectExisting: false }],
+    });
+    const continued = build({
+      branches: { "Acme/lib": ["main", "agent/handoff"] },
+    });
+    await continued.service.startTask(USER, NAMED, options(true));
+    expect(continued.enqueue.mock.calls[0]?.[0]).toMatchObject({
+      repos: [{ pushOnly: true, expectExisting: true }],
+    });
+  });
+
+  // #1177-T28
+  it("compares the named branch with the default and the base branch without regard to case", async () => {
+    for (const branch of ["Main", "MAIN"]) {
+      const { service, enqueue } = build();
+      const error = await failureOf(
+        service.startTask(
+          USER,
+          {
+            ...TASK,
+            repos: [{ repositoryId: "repo-lib", base: "main", branch }],
+          },
+          options(),
+        ),
+      );
+      expect(error.code, branch).toBe("IMPLEMENTER_REQUEST_INVALID");
+      expect(enqueue).not.toHaveBeenCalled();
+    }
+  });
+
+  // #1177-T29
+  it.each(["refs/heads/agent", "heads/agent", "REFS/x"])(
+    "refuses %s: a full ref name is no branch name",
+    async (branch) => {
+      const { service, enqueue } = build();
+      const error = await failureOf(
+        service.startTask(
+          USER,
+          {
+            ...TASK,
+            repos: [{ repositoryId: "repo-lib", base: "main", branch }],
+          },
+          options(),
+        ),
+      );
+      expect(error.code).toBe("IMPLEMENTER_REQUEST_INVALID");
+      expect(enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  // #1177-T30
+  it("refuses an instruction that leaves no room for the note the claim puts in front of it, instead of cutting it later", async () => {
+    const { service, enqueue } = build();
+    const error = await failureOf(
+      service.startTask(
+        USER,
+        { ...NAMED, instruction: "x".repeat(20_000 - 10) },
+        options(),
+      ),
+    );
+    expect(error.code).toBe("IMPLEMENTER_REQUEST_INVALID");
+    expect(error.issues).toEqual([{ field: "instruction", code: "too_long" }]);
+    expect(enqueue).not.toHaveBeenCalled();
+    // One that fits with the note is started.
+    await service.startTask(
+      USER,
+      { ...NAMED, instruction: "x".repeat(19_000), clientRequestId: "wf-2" },
+      options(),
+    );
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
 });

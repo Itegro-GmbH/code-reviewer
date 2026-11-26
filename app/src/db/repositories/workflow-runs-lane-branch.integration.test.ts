@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// #1177 (epic #1175) against a real Postgres: a branch is "worked on by the lane" when a session of a run of the same workflow in the same
-// repository has it as the working branch of its repositories list; another workflow, another repository, another branch, a session of one
-// repository and a list that cannot be read do not count.
+// #1177 (epic #1175) against a real Postgres: a branch is "made by the lane" when a session of a run of the same workflow has it as the named
+// branch of a `pushBranch` entry that started on a branch that did not exist, in the repository of that entry (any entry of the list). Another
+// workflow, another repository, another branch, a session of one repository, an entry of a plain `repos` step (also one that works directly on
+// its base), an entry that continued a branch it found, a session whose first turn ended `branch_exists` and a list that cannot be read do not count.
 import { describe, expect, it } from "vitest";
 import { sha } from "../../test-support/jobs.ts";
 import { createRunsFixture } from "../../test-support/runs.ts";
@@ -26,7 +27,12 @@ async function start() {
     return created.workflow.id;
   }
   /** A run of the workflow with one agent step whose session works on `branch` (or on none of its own: a session of one repository). */
-  async function session(workflowId: string, branch: string | undefined) {
+  async function session(
+    workflowId: string,
+    branch: string | undefined,
+    kind: "created" | "continued" | "plain" = "created",
+    entryBase = "main",
+  ) {
     n += 1;
     const made = await runs.createRun({
       workflowId,
@@ -47,8 +53,14 @@ async function start() {
               repositoryId: f.repositoryId,
               fullName: "acme/gadgets",
               name: "gadgets",
-              base: "main",
+              base: entryBase,
               branch,
+              ...(kind === "plain"
+                ? {}
+                : {
+                    pushOnly: true as const,
+                    expectExisting: kind === "continued",
+                  }),
             },
           ];
     f.clock.advance(1000);
@@ -146,6 +158,83 @@ describe("the branches a lane worked on", () => {
     ).toBe(true);
     expect(
       await runs.laneWorkedOnBranch(lane, f.repositoryId, "agent/broken"),
+    ).toBe(false);
+  });
+
+  // #1177-T53
+  it("does not count a plain repos entry, direct work on a base, a continued branch or a session that ended branch_exists", async () => {
+    const { f, runs, workflow, session } = await start();
+    const lane = await workflow("Handoff");
+    await session(lane, "agent/plain", "plain");
+    await session(lane, "release", "created", "release");
+    await session(lane, "agent/continued", "continued");
+    const raced = await session(lane, "agent/raced");
+    await f.db
+      .updateTable("jobs")
+      .set({ status: "failed", error_code: "branch_exists" })
+      .where("id", "=", raced.job.id)
+      .execute();
+
+    for (const branch of [
+      "agent/plain",
+      "release",
+      "agent/continued",
+      "agent/raced",
+    ])
+      expect(
+        await runs.laneWorkedOnBranch(lane, f.repositoryId, branch),
+        branch,
+      ).toBe(false);
+  });
+
+  // #1177-T54
+  it("finds the repository inside the entry, not only the first one of the session, and any number of sessions", async () => {
+    const { f, runs, workflow, session } = await start();
+    const lane = await workflow("Handoff");
+    const made = await session(lane, "agent/second");
+    await f.db
+      .updateTable("implementer_sessions")
+      .set({
+        repos: JSON.stringify([
+          {
+            repositoryId: "other-repository",
+            fullName: "acme/other",
+            name: "other",
+            base: "main",
+            branch: "agent/first",
+          },
+          {
+            repositoryId: f.repositoryId,
+            fullName: "acme/gadgets",
+            name: "gadgets",
+            base: "main",
+            branch: "agent/second",
+            pushOnly: true,
+            expectExisting: false,
+          },
+        ]),
+      })
+      .where("id", "=", made.session.id)
+      .execute();
+    for (let i = 0; i < 3; i += 1)
+      await session(lane, `agent/later-${String(i)}`);
+
+    expect(
+      await runs.laneWorkedOnBranch(lane, f.repositoryId, "agent/second"),
+    ).toBe(true);
+  });
+
+  // #1177-T55
+  it("matches a branch name that has LIKE characters literally", async () => {
+    const { f, runs, workflow, session } = await start();
+    const lane = await workflow("Handoff");
+    await session(lane, "agent/a_b%c");
+
+    expect(
+      await runs.laneWorkedOnBranch(lane, f.repositoryId, "agent/a_b%c"),
+    ).toBe(true);
+    expect(
+      await runs.laneWorkedOnBranch(lane, f.repositoryId, "agent/aXbYc"),
     ).toBe(false);
   });
 });

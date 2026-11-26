@@ -95,7 +95,7 @@ import {
   type ConnectorSpec,
 } from "./connectors.ts";
 import { literalText, parseTemplate } from "./template.ts";
-import { checkBranchName } from "../implementer/branch-name.ts";
+import { isPushBranchName } from "../implementer/branch-name.ts";
 import {
   SESSION_REPOS_MAX,
   deriveMountNames,
@@ -1597,12 +1597,12 @@ function checkPushBranch(
         "'pushBranch' is the name of a branch, not an empty text.",
       ),
     );
-  else if (literal !== undefined && !checkBranchName(literal, "").ok)
+  else if (literal !== undefined && !isPushBranchName(literal))
     c.report(
       issue(
         where,
         "invalid_value",
-        "'pushBranch' is the name of a branch (no space, no '..', no '~ ^ : ? * [', no leading '-' or '+', at most 200 characters).",
+        "'pushBranch' is the name of a branch (no space, no '..', no '~ ^ : ? * [', no leading '-' or '+', not starting with 'refs/' or 'heads/', at most 200 characters).",
       ),
     );
   if (factsOf(node, c.resolver)?.canPush === false)

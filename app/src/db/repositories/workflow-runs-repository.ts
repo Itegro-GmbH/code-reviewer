@@ -370,8 +370,10 @@ export type RunLock = {
   touch(): Promise<void>;
 };
 
-/** The most sessions of a lane `laneWorkedOnBranch` reads (the newest ones): a lane with more runs than this forgets its oldest branches. */
-const LANE_BRANCH_LOOKUP_SESSIONS = 500;
+/** The text of a LIKE pattern that matches `text` itself (`%`, `_` and the escape character `\` are escaped). */
+function likeLiteral(text: string): string {
+  return text.replace(/[\\%_]/g, "\\$&");
+}
 
 export type WorkflowRunsRepository = {
   /**
@@ -910,8 +912,11 @@ export function createWorkflowRunsRepository(
     },
 
     async laneWorkedOnBranch(workflowId, repositoryId, branch) {
-      // The list of a session of several repositories (and the one-entry list of a `pushBranch` step) is JSON text. It is read here and not
-      // compared in SQL, so that a list that cannot be read (one row, never expected) is skipped instead of failing the question.
+      // The list of a `pushBranch` step's session is JSON text. The rows are narrowed in SQL to the sessions that name this branch as a
+      // named one (the app writes the list without spaces, and the branch as JSON text), then read here, so that a list that cannot be read
+      // (one row, never expected) is skipped instead of failing the question. There is no cap on the sessions: a lane that is old must not
+      // forget a branch it made and be refused it as foreign.
+      const named = likeLiteral(`"branch":${JSON.stringify(branch)}`);
       const rows = await db
         .selectFrom("workflow_step_runs")
         .innerJoin("workflow_runs", (join) =>
@@ -948,24 +953,51 @@ export function createWorkflowRunsRepository(
         .select("implementer_sessions.repos")
         .where("workflow_step_runs.workspace_id", "=", workspaceId)
         .where("workflow_runs.workflow_id", "=", workflowId)
-        .where("implementer_sessions.repository_id", "=", repositoryId)
-        .where("implementer_sessions.repos", "is not", null)
-        .orderBy("implementer_sessions.created_at", "desc")
-        .limit(LANE_BRANCH_LOOKUP_SESSIONS)
+        .where("implementer_sessions.repos", "like", `%${named}%`)
+        .where("implementer_sessions.repos", "like", '%"pushOnly":true%')
+        // A session whose first turn found the branch already there (it appeared in between, made by somebody else) did not make it.
+        .where(({ not, exists, selectFrom }) =>
+          not(
+            exists(
+              selectFrom("implementer_turns as refused")
+                .innerJoin("jobs as refused_job", (join) =>
+                  join
+                    .onRef("refused_job.id", "=", "refused.job_id")
+                    .onRef(
+                      "refused_job.workspace_id",
+                      "=",
+                      "refused.workspace_id",
+                    ),
+                )
+                .select(sql<number>`1`.as("one"))
+                .whereRef("refused.session_id", "=", "implementer_sessions.id")
+                .whereRef(
+                  "refused.workspace_id",
+                  "=",
+                  "implementer_sessions.workspace_id",
+                )
+                .where("refused_job.error_code", "=", "branch_exists"),
+            ),
+          ),
+        )
         .execute();
+      // Made by the lane: a `pushBranch` entry that started on a branch that did not exist, in this repository (any entry of the list).
       return rows.some((row) => {
         try {
           const list: unknown = JSON.parse(row.repos ?? "null");
           return (
             Array.isArray(list) &&
-            list.some(
-              (entry: unknown) =>
-                typeof entry === "object" &&
-                entry !== null &&
-                (entry as Record<string, unknown>).repositoryId ===
-                  repositoryId &&
-                (entry as Record<string, unknown>).branch === branch,
-            )
+            list.some((entry: unknown) => {
+              if (typeof entry !== "object" || entry === null) return false;
+              const fields = entry as Record<string, unknown>;
+              return (
+                fields.repositoryId === repositoryId &&
+                fields.branch === branch &&
+                fields.pushOnly === true &&
+                fields.expectExisting === false &&
+                fields.base !== branch
+              );
+            })
           );
         } catch {
           return false;

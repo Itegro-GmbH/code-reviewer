@@ -17,6 +17,10 @@ export const IMAGE_GATED_CLAIM_FEATURES = [
   // #1150: the Worker reads `implementer.subscription.oauthToken`. A snapshot built before this release does not list it, so the Dispatcher
   // does not name it, the App leaves a hosted turn on `claude-code` queued, and no VM starts that would refuse it.
   "implementer_workspace_token",
+  // #1177: the Worker pushes only the branch of a `pushOnly` entry of `implementer.repos`. A snapshot built before this release does not list it,
+  // so the Dispatcher does not name it and a turn of a step that names its branch stays queued instead of running on an image that would push
+  // every branch of the agent's repository.
+  "implementer_push_allowlist",
 ] as const satisfies readonly KnownClaimFeature[];
 
 /**

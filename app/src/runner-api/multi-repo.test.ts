@@ -221,6 +221,106 @@ describe("the repositories of a turn on several repositories", () => {
     expect(follow.repos[0]?.branchExists).toBe(true);
   });
 
+  // #1177-T60
+  it("follows the start-time decision of a pushBranch entry on the first turn and does not ask the platform again", async () => {
+    // The branch appeared after the session started: the entry says "new", so the runner is told so and ends `branch_exists`.
+    const { deps } = setup({ branches: ["lane/x"] });
+    const parts = await buildMultiRepo(
+      deps,
+      input([
+        {
+          ...sessionRepo(ROWS[0] as Row, "lane/x"),
+          pushOnly: true,
+          expectExisting: false,
+        },
+      ]),
+    );
+    expect(parts.repos[0]?.branchExists).toBe(false);
+    // The branch the lane made is expected, and gone now: the runner ends `clone_failed`, it is not created silently.
+    const gone = await buildMultiRepo(
+      setup({ branches: [] }).deps,
+      input([
+        {
+          ...sessionRepo(ROWS[0] as Row, "lane/x"),
+          pushOnly: true,
+          expectExisting: true,
+        },
+      ]),
+    );
+    expect(gone.repos[0]?.branchExists).toBe(true);
+  });
+
+  // #1177-T61
+  it("keeps today's rule for the later turns of a pushBranch session", async () => {
+    const { deps } = setup({ branches: ["lane/x"] });
+    const follow = await buildMultiRepo(
+      deps,
+      input(
+        [
+          {
+            ...sessionRepo(ROWS[0] as Row, "lane/x"),
+            pushOnly: true,
+            expectExisting: false,
+          },
+        ],
+        {
+          resume: {
+            turn: 2,
+            repos: [
+              {
+                name: "app",
+                branches: [{ name: "lane/x", head: "b".repeat(40) }],
+                checkout: null,
+              },
+            ],
+            snapshot: false,
+          },
+        },
+      ),
+    );
+    expect(follow.repos[0]?.branchExists).toBe(true);
+  });
+
+  // #1177-T62
+  it("hands the push allowlist to the runner for a pushBranch entry only", async () => {
+    const { deps } = setup();
+    const parts = await buildMultiRepo(
+      deps,
+      input([
+        {
+          ...sessionRepo(ROWS[0] as Row, "lane/x"),
+          pushOnly: true,
+          expectExisting: false,
+        },
+        sessionRepo(ROWS[1] as Row, "feature/y"),
+      ]),
+    );
+    expect(parts.repos[0]?.pushOnly).toBe(true);
+    expect(parts.repos[1]).not.toHaveProperty("pushOnly");
+  });
+
+  // #1177-T64
+  it("tells the agent that only the named branch is pushed when every entry is a pushBranch entry", async () => {
+    const { deps } = setup();
+    const named = await buildMultiRepo(
+      deps,
+      input([
+        {
+          ...sessionRepo(ROWS[0] as Row, "lane/x"),
+          pushOnly: true,
+          expectExisting: false,
+        },
+      ]),
+    );
+    expect(named.instruction).toContain("Only that branch is pushed");
+    expect(named.instruction).not.toContain("on any branch of any of these");
+    const plain = await buildMultiRepo(
+      deps,
+      input([sessionRepo(ROWS[0] as Row, "feature/y")]),
+    );
+    expect(plain.instruction).toContain("on any branch of any of these");
+  });
+
   // #1092-T24
   it("writes the preamble at the start of the instruction", async () => {
     const { deps } = setup({ branches: ["feature/x"] });

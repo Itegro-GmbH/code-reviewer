@@ -108,7 +108,16 @@ describe("the pushBranch of an agent step", () => {
       AT,
       "invalid_value",
     ]);
-    for (const name of ["bad..name", "-dash", "with space", "end.lock", "a~b"])
+    for (const name of [
+      "bad..name",
+      "-dash",
+      "with space",
+      "end.lock",
+      "a~b",
+      "refs/heads/x",
+      "heads/x",
+      "Refs/x",
+    ])
       expect(codes(lane({ pushBranch: name })), name).toContainEqual([
         AT,
         "invalid_value",

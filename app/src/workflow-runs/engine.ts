@@ -54,6 +54,7 @@ import {
 import {
   BRANCH_NAME_MAX_LENGTH,
   checkBranchName,
+  isPushBranchName,
 } from "../implementer/branch-name.ts";
 import {
   deriveMountNames,
@@ -641,9 +642,14 @@ function pushBranchOf(
       : undefined;
   const refused = (why: string) =>
     failed("push_branch_invalid", `The branch this step pushes to ${why}.`);
-  if (typeof resolved !== "string" || !checkBranchName(resolved, "").ok)
+  if (typeof resolved !== "string" || !isPushBranchName(resolved))
     return refused("is not the name of a branch");
-  if (resolved === run.baseBranch || resolved === start)
+  // Without regard to case: a clone on a case-insensitive file system makes `Main` and `main` one branch.
+  const lower = resolved.toLowerCase();
+  if (
+    lower === run.baseBranch.toLowerCase() ||
+    (start !== undefined && lower === start.toLowerCase())
+  )
     return refused(
       "is the base branch of the run or the branch the step starts from",
     );
@@ -1530,13 +1536,18 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       return { runId: started.runId };
     } catch (error) {
       // A step with `pushBranch` is a one-repository session of the run's repository: a refusal about repository 0 names that one.
+      // The name is for the message only: a lookup that fails must not turn a refusal of the start into an unclassified failure.
+      const runRepository =
+        named === undefined
+          ? undefined
+          : await deps.repositoryName(run.repositoryId).catch(() => undefined);
       return resolvedStartFailure(
         error,
         run,
         step,
         named === undefined
           ? repos?.names
-          : [(await deps.repositoryName(run.repositoryId)) ?? "the repository"],
+          : [runRepository ?? "the repository"],
         named,
       );
     }
@@ -1621,10 +1632,14 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
 
   /** The step a refusal of the Implementer about the branch of a `pushBranch` ends, or undefined for a refusal that is about something else. */
   function pushBranchRefusal(
-    code: ImplementerError["code"],
+    error: ImplementerError,
     branch: string,
   ): StepOutcome | undefined {
-    switch (code) {
+    // Only a refusal about repository 0, the one entry of the step, is about the named branch: the check of the branch carries that place
+    // (`repoIndex`), while a lost race on the platform's own session key or a request that is invalid as a whole has none and stays
+    // `agent_start_failed`.
+    if (error.repoIndex !== 0) return undefined;
+    switch (error.code) {
       case "IMPLEMENTER_BRANCH_EXISTS":
         return failed(
           "push_branch_exists",
@@ -1662,7 +1677,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     const pushRefusal =
       pushBranch === undefined
         ? undefined
-        : pushBranchRefusal(error.code, pushBranch);
+        : pushBranchRefusal(error, pushBranch);
     if (pushRefusal !== undefined) {
       log(
         `[workflow-runs] STEP_START_FAILED run=${run.id} step=${step.stepId} code=${error.code}`,
