@@ -336,7 +336,7 @@ describe("the claim of a turn on the harness claude-code", () => {
     });
   });
 
-  // #1126-T54
+  // #1176-T54
   it.each<[NetworkRule, string]>([
     [{ mode: "open", hosts: [] }, "open network"],
     [
@@ -345,7 +345,7 @@ describe("the claim of a turn on the harness claude-code", () => {
     ],
     [{ mode: "list", hosts: ["*.co.uk"] }, "public suffix"],
   ])(
-    "ends the turn, free, before a token exists, for a rule the runner would refuse (%j, %s)",
+    "ends the turn, free, before a token exists, for a Worker without the door's subscription mode and a rule it would refuse late (%j, %s)",
     async (network) => {
       const h = await start();
       const runner = await h.registerRunner({
@@ -367,10 +367,67 @@ describe("the claim of a turn on the harness claude-code", () => {
       expect(h.issuedJobTokens()).toEqual([]);
       expect(await h.queue.get(turn.job.id)).toMatchObject({
         status: "failed",
-        errorCode: "implementer_config_invalid",
+        errorCode: "implementer_engine_unavailable",
       });
     },
   );
+
+  // #1176-T54
+  it.each<[NetworkRule, string]>([
+    [{ mode: "open", hosts: [] }, "open network"],
+    [
+      { mode: "list", hosts: ["registry.npmjs.org", "*.github.io"] },
+      "wildcard",
+    ],
+    [{ mode: "list", hosts: ["*.co.uk"] }, "public suffix"],
+  ])(
+    "hands the turn on with the rule as the step has it to a Worker that names implementer_subscription_door: the token is behind the model door (%j, %s)",
+    async (network) => {
+      const h = await start();
+      const runner = await h.registerRunner({
+        labels: ["box"],
+        manifest: BOTH,
+      });
+      await h.enqueueTurn({
+        modelChoice: CLAUDE_MODEL,
+        runnerEnvironment: { ...RUNNER_ENV, setupScript: "npm ci\n", network },
+        profile: PROFILE,
+      });
+
+      const { response } = await fetchedTurn(h, runner.credential, [
+        ...NOW_FEATURES,
+        "implementer_subscription_setup",
+        "implementer_subscription_door",
+      ]);
+
+      const input = (await turnInput(response)) as unknown as {
+        implementer: { environment: { network: NetworkRule } };
+      };
+      expect(input.implementer.environment.network).toEqual(network);
+    },
+  );
+
+  // #1176-T55
+  it("does not refuse an exact list on a Worker without the door's subscription mode: it narrows such a list itself", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: {
+        ...RUNNER_ENV,
+        setupScript: "npm ci\n",
+        network: { mode: "list", hosts: ["registry.npmjs.org"] },
+      },
+      profile: PROFILE,
+    });
+
+    const { response } = await fetchedTurn(h, runner.credential, [
+      ...NOW_FEATURES,
+      "implementer_subscription_setup",
+    ]);
+
+    expect(response.status).toBe(200);
+  });
 
   // #1126-T42
   it("sends no environment, and needs no feature, for a step without a script or a rule", async () => {
@@ -612,6 +669,32 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     expect(h.issuedJobTokens()).toEqual([]);
   });
 
+  // #1176-T56
+  it("hands a hosted turn with an open network to a Dispatcher whose Worker image has the door mode", async () => {
+    const h = await start();
+    await saveToken(h);
+    await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+      environment: {
+        id: "env-hosted",
+        name: "Open",
+        vcpus: 2,
+        setupScript: "",
+        network: { mode: "open", hosts: [] },
+      },
+    });
+
+    const claim = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: [...HOSTED_FEATURES, "implementer_subscription_door"],
+    });
+
+    expect(claim.status).toBe(200);
+    const { job } = (await claim.json()) as SplitClaimResponse;
+    expect(job).toMatchObject({ network: { mode: "open", hosts: [] } });
+  });
+
   // #1150-T11
   it("hands a hosted Dispatcher the turn with the size of a VM and the host of Claude Code, and its Worker the token with the input and nowhere else", async () => {
     const h = await start();
@@ -716,8 +799,8 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     });
   });
 
-  // #1150-T11
-  it("ends a hosted turn with an open network before a VM is started: the token would be inside a container that can reach anything", async () => {
+  // #1176-T56
+  it("ends a hosted turn with an open network, free and before a VM is started, for a Dispatcher whose Worker image has no door for the token: there the token would be inside a container that can reach anything", async () => {
     const h = await start();
     await saveToken(h);
     const turn = await h.enqueueTurn({
@@ -740,7 +823,7 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     expect(claim.status).toBe(204);
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
-      errorCode: "implementer_config_invalid",
+      errorCode: "implementer_engine_unavailable",
     });
     expect(h.issuedJobTokens()).toEqual([]);
   });

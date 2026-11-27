@@ -80,6 +80,9 @@ class UpstreamRequest:
     path: str
     headers: Mapping[str, str]
     body: bytes
+    # The model proxy only ever POSTs; the subscription door (#1176) also passes a `GET` or `HEAD`
+    # (Claude Code's `HEAD /api/hello`).
+    method: str = "POST"
 
 
 class UpstreamResponse(Protocol):
@@ -97,8 +100,8 @@ class UpstreamResponse(Protocol):
 
 class Upstream(Protocol):
     def send(self, request: UpstreamRequest, timeout: float) -> UpstreamResponse:
-        """Send a POST and return as soon as the status and headers are in. `timeout` is the wait
-        for connecting and for each read. Raises `UpstreamError`."""
+        """Send the request (a POST) and return as soon as the status and headers are in.
+        `timeout` is the wait for connecting and for each read. Raises `UpstreamError`."""
         ...
 
 
@@ -304,9 +307,9 @@ class HttpsUpstream:
             raise
         try:
             connection.request(
-                "POST",
+                request.method,
                 self._base_path + request.path,
-                body=request.body,
+                body=request.body or None,
                 headers=dict(request.headers),
             )
             response = connection.getresponse()

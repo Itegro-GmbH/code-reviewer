@@ -688,7 +688,9 @@ def test_a_subscription_turn_sets_up_in_the_layers_image_sealed_and_takes_the_co
     taken = made._seams  # pyright: ignore[reportPrivateUsage]
     assert taken.image == layer and taken.no_new_privileges is True
     # The turn's rule is the forced one with the step's host read-only.
-    assert made._rule.read_only == ("fonts.googleapis.com",)  # pyright: ignore[reportPrivateUsage]
+    # #1176: the token is behind the model door, so the step's own rule is the agent's rule.
+    assert made._rule.hosts == ("fonts.googleapis.com",)  # pyright: ignore[reportPrivateUsage]
+    assert made._rule.read_only == ()  # pyright: ignore[reportPrivateUsage]
 
 
 # #1126-T31

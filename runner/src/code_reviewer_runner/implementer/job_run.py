@@ -59,7 +59,7 @@ from code_reviewer_runner.result import ErrorCode, JobResult, Usage
 from code_reviewer_runner.usage_probe import UsageProbe
 
 from .agent_container import OPENCODE, Adopted, AgentContainer, AgentSeams
-from .claude_code.gates import subscription_rule
+from .claude_code.gates import agent_rule
 from .claude_code.layer import LayerDaemon
 from .claude_code.login import ClaudeLogin
 from .claude_code.readiness import HarnessNotReady, ReadyHarness, ready_harness
@@ -76,7 +76,7 @@ from .git_workspace import (
 from .mcp_config import mcp_door_wanted
 from .multi_workspace import AnyWorkspace, MultiWorkspace
 from .network_rule import OFF
-from .placement import placement_of
+from .placement import placement_of, token_behind_door
 from .reader import ReaderAccess
 from .repo_places import places_of
 from .report import MAX_REPO_BRANCHES, body_fits, clip_texts, escaped_size, fit_block, valid_block
@@ -285,7 +285,12 @@ def production_setup(
         )
     if subscription:
         environment_rule = OFF if spec.environment is None else spec.environment.network
-        rule_of_turn = subscription_rule(environment_rule)
+        # #1176: the token is behind the model door where the placement can host it, so the step's
+        # own rule is the rule; otherwise the narrowed one (`claude_code/gates.py`).
+        rule_of_turn = agent_rule(
+            environment_rule,
+            token_behind_door=token_behind_door(placement_of(environment)),
+        )
     else:
         rule_of_turn = OFF if spec.environment is None else spec.environment.network
     # #1093 (epic #1090): where the repositories are: the one `/work/repo`, or one mount for each

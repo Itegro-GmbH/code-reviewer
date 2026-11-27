@@ -134,9 +134,10 @@ agent step on a self-hosted runner (the DevBox, Claude Code on the owner's own s
 tools to build and test (a Next.js landing page: `npm ci` in the setup, then the agent runs `npm run lint && npm run build`, which also
 fetches fonts, and looks at the live site). Decision 11 said the setup of a self-hosted machine is its owner's; the owner is the one who
 now says otherwise, so **`setupScript` and `network` are valid on any runner** and `hosted_only_setting` is gone (the validator refuses
-what the runner cannot honour instead: `network.mode` `open` on the harness `claude-code`, `subscription_network_open`, and a `*.suffix` entry on a
-domain whose subdomains anybody can get, `subscription_network_wildcard`; the runner and the app's claim refuse both as well, and the runner also refuses a
-wildcard entry that covers the model's host). What was the reason for the old rule, and what keeps each part safe:
+what the runner cannot honour instead; until #1176 that was `network.mode` `open` on the harness `claude-code`, `subscription_network_open`, and a `*.suffix` entry on a
+domain whose subdomains anybody can get, `subscription_network_wildcard`, because the login lived in the container. **#1176 lifts both:** the token is held by the model door and the
+agent's network is the step's own rule; the validator and the claim no longer refuse them, and the two codes are gone. A placement that cannot host the door keeps the narrowed
+rule in the runner, which still refuses `open` and the shared wildcard there, and a wildcard entry that covers the model's host). What was the reason for the old rule, and what keeps each part safe:
 
 - *The script on a runner.* It runs in the agent's own container (decision of #1009), as for a hosted step, with the internet open and
   no secret of ours in it. The turn row copies it with the runner (`environment_setup_script`, the same columns as a hosted copy; one

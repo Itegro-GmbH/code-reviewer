@@ -1628,13 +1628,15 @@ runs **before the login exists in the container**, and the network of the turn i
    the job process on the host side and in no file or variable of the container).
 2. **Hand-over.** The container leaves the setup network, is frozen, read, and taken over by the agent's container object on the model
    network behind the doors. **Only now** does the agent run, and the login is placed: in the environment of each `claude` exec.
-3. **Agent phase.** The agent's network is the rule of the step as the runner narrows it for a subscription turn
-   (`claude_code/gates.py`): `api.anthropic.com` on port 443 (a tunnel: Claude Code posts to it) and **every other host of the step's
+3. **Agent phase.** Since #1176 the subscription token is behind the model door and the agent's network is **the step's own rule**,
+   `open` included (`claude_code/gates.py`, `agent_rule`); see `docs/runner.md`, "The token behind the model door". What follows is the
+   narrowed rule of a placement that cannot host the door (`Placement.subscription_door`), where the token is in the container:
+   `api.anthropic.com` on port 443 (a tunnel: Claude Code posts to it) and **every other host of the step's
    `list` read-only on port 443**: the door ends the TLS connection itself and lets only `GET` and `HEAD` through (as it does for the
-   package registries, `netdoor/registries.py`; the container trusts the door's certificate for exactly those names). `open` is refused
-   for this harness, by the validator when the lane is saved (`subscription_network_open`), by the app's claim before any git token is
-   made, and by the runner at the start of the turn; so is a `*.suffix` entry on a domain whose subdomains anybody can get
-   (`subscription_network_wildcard`: `*.github.io`, `*.vercel.app`, `*.co.uk`, a short list).
+   package registries, `netdoor/registries.py`; the container trusts the door's certificate for exactly those names). There `open` is
+   refused by the runner at the start of the turn (`subscription_network_open`), and so is a `*.suffix` entry on a domain whose subdomains
+   anybody can get (`subscription_network_wildcard`: `*.github.io`, `*.vercel.app`, `*.co.uk`, a short list); the validator and the
+   app's claim no longer refuse either (#1176).
 
 So for the Lateinorum landing page a step with `"setupScript": "npm ci"` and `"network": {"mode": "list", "hosts":
 ["fonts.googleapis.com", "*.gstatic.com", "lateinorum.de"]}` has its dependencies installed in phase 1, and in phase 3 the agent runs

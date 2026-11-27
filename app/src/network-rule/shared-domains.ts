@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 /**
+ * #1176: kept only for the release skew: the claim refuses `open` and a wildcard on one of these domains for a caller whose Worker has no door for the token
+ * (`implementer_subscription_door`); the validator no longer refuses them. Can go once every Worker image has the feature.
+ *
  * #1126 (ADR 0007, decision 11 as amended): a `*.suffix` entry in the network rule of a step on the harness `claude-code` is refused
  * when the suffix is a domain whose subdomains anybody can get (user content, hosting, a public suffix): the login lives in the
  * container, so such an entry would let a `GET` carry it to any tenant's host. An exact host on these domains
