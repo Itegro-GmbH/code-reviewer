@@ -695,6 +695,40 @@ describe("the claim of a turn on claude-code that runs on the token of the works
     expect(job).toMatchObject({ network: { mode: "open", hosts: [] } });
   });
 
+  // #1184-T01
+  it("names the Cloudflare placement for a hosted turn of a Cloudflare runner, so the Dispatcher does not launch it on the Vercel Sandbox", async () => {
+    const h = await start();
+    await saveToken(h);
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      profile: PROFILE,
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({
+        required_labels: [
+          "cr:managed",
+          "cr:size-4",
+          "cr:placement:cloudflare",
+        ].join("\n"),
+      })
+      .where("id", "=", turn.job.id)
+      .execute();
+
+    const claim = await h.claimSplit({
+      engines: DISPATCHER_ENGINES,
+      features: [...HOSTED_FEATURES, "placement_cloudflare"],
+    });
+
+    expect(claim.status).toBe(200);
+    const { job } = (await claim.json()) as SplitClaimResponse;
+    expect(job.id).toBe(turn.job.id);
+    expect(job).toMatchObject({
+      placement: "cloudflare",
+      sizeLabel: "cr:size-4",
+    });
+  });
+
   // #1150-T11
   it("hands a hosted Dispatcher the turn with the size of a VM and the host of Claude Code, and its Worker the token with the input and nowhere else", async () => {
     const h = await start();
