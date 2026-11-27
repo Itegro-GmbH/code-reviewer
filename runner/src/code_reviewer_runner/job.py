@@ -172,7 +172,7 @@ MAX_ENVIRONMENT_NAME_CHARS = 80
 _IMPLEMENTER_REPO_FIELDS = {"fullName", "cloneUrl"}
 # #1091 (epic #1090): one repository of a multi-repository turn (`ImplementerJobRepo`), one token of
 # the job (`GitToken`) and one repository of a follow-up (`ImplementerResumeRepo`).
-_IMPLEMENTER_JOB_REPO_FIELDS = {
+_IMPLEMENTER_JOB_REPO_REQUIRED = {
     "name",
     "fullName",
     "cloneUrl",
@@ -181,6 +181,8 @@ _IMPLEMENTER_JOB_REPO_FIELDS = {
     "branchExists",
     "tokenId",
 }
+# #1177: `pushOnly` is the one optional field of an entry (only this entry's `branch` is pushed).
+_IMPLEMENTER_JOB_REPO_FIELDS = _IMPLEMENTER_JOB_REPO_REQUIRED | {"pushOnly"}
 _GIT_TOKEN_FIELDS = {"id", "token"}
 _GIT_TOKEN_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
 _IMPLEMENTER_RESUME_REPO_FIELDS = {"name", "branches", "checkout"}
@@ -393,6 +395,8 @@ class ImplementerRepoEntry:
     branch: str
     branch_exists: bool
     token_id: str
+    # #1177: the final push takes this entry's `branch` and no other branch of the repository.
+    push_only: bool = False
 
     @property
     def direct(self) -> bool:
@@ -1274,7 +1278,7 @@ def _implementer_repos(spec: dict[str, Any], git: GitAccess) -> tuple[Implemente
         path = f"implementer.repos[{index}]"
         given = _object(item, path)
         _check_fields(given, _IMPLEMENTER_JOB_REPO_FIELDS, f"{path}.")
-        for name in _IMPLEMENTER_JOB_REPO_FIELDS:
+        for name in sorted(_IMPLEMENTER_JOB_REPO_REQUIRED):
             if name not in given:
                 raise _invalid(f"{path}.{name} is required")
         name = given["name"]
@@ -1283,6 +1287,9 @@ def _implementer_repos(spec: dict[str, Any], git: GitAccess) -> tuple[Implemente
         exists = given["branchExists"]
         if not isinstance(exists, bool):
             raise _invalid(f"{path}.branchExists must be true or false")
+        push_only = given.get("pushOnly", False)
+        if not isinstance(push_only, bool):
+            raise _invalid(f"{path}.pushOnly must be true or false")
         base = _branch_name(given["base"], f"{path}.base")
         branch = _pushable_branch_name(given["branch"], f"{path}.branch")
         token_id = _matching(
@@ -1299,6 +1306,7 @@ def _implementer_repos(spec: dict[str, Any], git: GitAccess) -> tuple[Implemente
                 branch=branch,
                 branch_exists=exists,
                 token_id=token_id,
+                push_only=push_only,
             )
         )
     _check_tokens(entries, git)

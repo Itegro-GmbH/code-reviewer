@@ -330,6 +330,9 @@ class WorkspaceSpec:
     # The most branches the final push reports for this repository (a multi-repository report is
     # shared by up to ten of them).
     max_branches: int | None = None
+    # #1177: the job's allowlist for the final push: this branch of the repository and no other
+    # (`select_branches(only=...)`); None pushes every branch the agent made or moved.
+    push_only_branch: str | None = None
 
     @property
     def multi(self) -> bool:
@@ -1217,7 +1220,10 @@ class GitWorkspace:
         # A branch still at its start tip has nothing on it: it is neither fetched nor reported.
         names = [name for name, tip in listed if not self._unchanged(name, tip)]
         selection = select_branches(
-            names, form_branch=self.spec.branch, limit=self.spec.max_branches
+            names,
+            form_branch=self.spec.branch,
+            limit=self.spec.max_branches,
+            only=self.spec.push_only_branch,
         )
         self._progress.invalid = selection.invalid
         self._progress.overflow = selection.overflow

@@ -72,6 +72,10 @@ export const SEMANTIC_ISSUE_CODES = [
   "repos_with_branch",
   /** #1092: an agent step has `repos` next to `session` (a session that goes on keeps the repositories of the session it continues). */
   "repos_with_session_continue",
+  /** #1177: an agent step has a `pushBranch` and may not push (`canPush` false, or a profile that may not push). */
+  "push_branch_without_push",
+  /** #1177: an agent step has `repos` next to its `pushBranch` (each entry of `repos` names its own branch). */
+  "push_branch_with_repos",
   /** #1092: two entries of `repos` name one repository, compared without regard to case. */
   "repo_duplicate",
   /** #1092: the mount names of two repositories of `repos` (`app` or `<owner>__<name>`) are equal without regard to case. */
@@ -84,10 +88,6 @@ export const SEMANTIC_ISSUE_CODES = [
   "model_not_allowed",
   /** #1105: a host of the `network` rule of a step is no host name the rule can hold (an address, a port, a scheme; only the validator knows). */
   "network_host_invalid",
-  /** #1126: `network` with `mode` `open` in a step on the harness `claude-code`, whose login lives in the container (ADR 0007, decision 11 as amended). */
-  "subscription_network_open",
-  /** #1126: a `*.suffix` entry of the `network` rule of a step on the harness `claude-code` covers a domain whose subdomains anybody can get (`*.github.io`, `*.vercel.app`, `*.co.uk`): the login lives in the container. */
-  "subscription_network_wildcard",
   /** #1105: a step with settings of its own names neither a `runner` nor an `environment`. `available` lists the ids of the runners. */
   "runner_required",
   /** #1105: a step names a `runner` and an `environment`; a step runs in one place (`environment` is for steps written before the runner). */

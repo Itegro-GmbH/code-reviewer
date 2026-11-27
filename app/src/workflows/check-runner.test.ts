@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The concrete runner of an agent step (#1105, ADR 0007, decisions 6, 14 and 16): a step with settings of its own names a runner by id,
-// and the rules a profile and an environment had together (`runner_needs_own_key`, `harness_needs_runner`, `no_runner_announces`,
-// `subscription_network_open`) are judged at that runner.
+// and the rules a profile and an environment had together (`runner_needs_own_key`, `harness_needs_runner`, `no_runner_announces`) are
+// judged at that runner.
 import { describe, expect, it } from "vitest";
 import { BUILT_IN_CONNECTORS } from "./connectors.ts";
 import type { RunnerInfo, WorkflowResolver } from "./resolver.ts";
@@ -199,8 +199,8 @@ describe("the runner of an agent step (#1105)", () => {
     expect(codes(lane(step({ ...extras, runner: DEVBOX.id })))).toEqual([]);
   });
 
-  // #1126-V05
-  it("refuses a suffix entry on a domain anybody can get a subdomain of, for the harness whose login lives in the container", () => {
+  // #1176-V05
+  it("takes a suffix entry on a shared domain and an open network for the harness whose token is behind the model door", () => {
     const claude = { harness: "claude-code", model: LOGIN, runner: DEVBOX.id };
     expect(
       codes(
@@ -214,51 +214,15 @@ describe("the runner of an agent step (#1105)", () => {
                 "lateinorum.de",
                 "*.VERCEL.app",
                 "*.co.uk",
-              ],
-            },
-          }),
-        ),
-      ),
-    ).toEqual([
-      ["/steps/0/network/hosts/0", "subscription_network_wildcard"],
-      ["/steps/0/network/hosts/2", "subscription_network_wildcard"],
-      ["/steps/0/network/hosts/3", "subscription_network_wildcard"],
-    ]);
-    // An exact host on such a domain is the owner's choice, a suffix of one's own is fine, and another harness is not asked.
-    expect(
-      codes(
-        lane(
-          step({
-            ...claude,
-            network: {
-              mode: "list",
-              hosts: [
                 "raw.githubusercontent.com",
-                "*.gstatic.com",
-                "*.mine.github.io",
               ],
             },
           }),
         ),
       ),
     ).toEqual([]);
-    expect(
-      codes(
-        lane(
-          step({
-            runner: DEVBOX.id,
-            network: { mode: "list", hosts: ["*.github.io"] },
-          }),
-        ),
-      ),
-    ).toEqual([]);
-  });
-
-  // #1126-V02
-  it("refuses an open network for the harness whose login lives in the container, and takes a list or off", () => {
-    const claude = { harness: "claude-code", model: LOGIN, runner: DEVBOX.id };
     expect(codes(lane(step({ ...claude, network: { mode: "open" } })))).toEqual(
-      [["/steps/0/network", "subscription_network_open"]],
+      [],
     );
     expect(
       codes(
@@ -277,7 +241,7 @@ describe("the runner of an agent step (#1105)", () => {
     expect(codes(lane(step({ ...claude, network: { mode: "off" } })))).toEqual(
       [],
     );
-    // OpenCode on the same runner keeps its open network: its key is the model door's, not a login in the container.
+    // The same rule on every harness: no code of ours is left that refuses an open network or a wide list for one of them.
     expect(
       codes(lane(step({ runner: DEVBOX.id, network: { mode: "open" } }))),
     ).toEqual([]);

@@ -223,7 +223,7 @@ export type GithubAppClient = {
     repoFullName: string,
     name: string,
     signal?: AbortSignal,
-  ): Promise<{ sha: string } | null>;
+  ): Promise<{ sha: string; protected?: boolean } | null>;
   /**
    * One issue (#916), read as a ticket with a token of its own limited to `scope`, or null when there is none of that number or the number
    * is a pull request (a ticket is an issue); same token and abort rules as `getRepositoryFacts`.
@@ -1801,7 +1801,13 @@ export function createGithubAppClient(
               commit.sha === ""
             )
               throw shapeError("GET /repos/{owner}/{repo}/branches/{branch}");
-            return { sha: commit.sha };
+            // #1177: GitHub says whether a protection rule applies to the branch; only a protected one carries the flag.
+            return {
+              sha: commit.sha,
+              ...(isRecord(json) && json.protected === true
+                ? { protected: true }
+                : {}),
+            };
           } catch (error) {
             if (
               error instanceof GithubAppError &&

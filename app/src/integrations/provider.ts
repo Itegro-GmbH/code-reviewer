@@ -359,13 +359,16 @@ export interface IntegrationProvider {
    * Null can also mean that the repository path in `repo` is stale (the repository was renamed or moved, so
    * GitHub answers 404 for the branch as well): a caller must call `getRepositoryFacts` first, which rejects when the
    * repository path no longer resolves, and trust a null only after that.
+   *
+   * `protected` (#1177) is what the platform says of the branch (GitHub's `protected`: a branch protection rule applies). Absent when
+   * the provider does not say; a caller that must not push to a protected branch treats only `true` as protected.
    */
   getBranch(
     integration: Integration,
     repo: RepoRef,
     name: string,
     signal?: AbortSignal,
-  ): Promise<{ sha: string } | null>;
+  ): Promise<{ sha: string; protected?: boolean } | null>;
 
   /** The open pull requests of a repository (drafts included, marked as such). Aborts like `getPullRequest`. */
   listOpenPullRequests(

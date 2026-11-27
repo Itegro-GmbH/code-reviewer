@@ -34,6 +34,7 @@ from code_reviewer_runner.implementer.agent import CommandOutcome
 from code_reviewer_runner.implementer.agent_container import Adopted
 from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin
 from code_reviewer_runner.implementer.claude_code.readiness import HarnessNotReady, ReadyHarness
+from code_reviewer_runner.implementer.door.subscription import SUBSCRIPTION_PLACEHOLDER
 from code_reviewer_runner.implementer.environment_setup import EnvironmentSetup
 from code_reviewer_runner.implementer.git_workspace import REASON_LOGIN_SECRET
 from code_reviewer_runner.implementer.job_run import (
@@ -42,7 +43,8 @@ from code_reviewer_runner.implementer.job_run import (
     TurnSetup,
     run_implementer_job,
 )
-from code_reviewer_runner.implementer.network_rule import MODE_LIST, NetworkRule
+from code_reviewer_runner.implementer.network_rule import MODE_LIST, MODE_OPEN, NetworkRule
+from code_reviewer_runner.implementer.placement import Placement
 from code_reviewer_runner.implementer.session import SessionSeams
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.lease_check import LEASE_CHECK_FD_VARIABLE
@@ -105,6 +107,23 @@ class ClaudePlace(FakePlace):
         return CommandOutcome(0, "")
 
 
+class FakeSubscriptionDoor:
+    """The model door in its subscription mode (#1176): records the token it was handed and says
+    where the agent reaches it."""
+
+    url = "http://10.213.77.2:10180"
+    end = None
+
+    def __init__(self, token: str, events: list[str]) -> None:
+        self.token = token
+        self.stopped = 0
+        self.events = events
+        self.state = type("State", (), {"lost": None})()
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+
 class FakeNetDoor:
     end = None
     # The door's certificate authority, which a rule with read-only hosts has the container trust.
@@ -139,6 +158,7 @@ class Played:
         self.git: FakeGit | None = None
         self.places: list[ClaudePlace] = []
         self.rules: list[NetworkRule] = []
+        self.doors: list[FakeSubscriptionDoor] = []
         self.setups = 0
         self.events: list[str] = []
         self.places_at_setup = -1
@@ -171,8 +191,16 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
         form_rejected: tuple[str, str | None] | None = None,
         dirty: bool = False,
         setup_outcome: EnvironmentSetup | None = None,
+        placement: Placement | None = None,
+        door: Callable[..., Any] | None = None,
     ) -> Played:
         played = Played()
+        if placement is not None:
+
+            def fixed_placement(_environment: Mapping[str, str]) -> Placement:
+                return placement
+
+            monkeypatch.setattr(session_module, "placement_of", fixed_placement)
         lease = LeaseChannel(held)
         channels.append(lease)
         monkeypatch.setenv(LEASE_CHECK_FD_VARIABLE, str(lease.fd()))
@@ -213,9 +241,18 @@ def play(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[.
             return FakeNetDoor()
 
         def no_door(**options: Any) -> None:
-            raise AssertionError("a subscription turn has no model door")
+            raise AssertionError("a subscription turn has no model-key door")
+
+        def subscription_door(*, token: str, **options: Any) -> FakeSubscriptionDoor:
+            played.events.append("model-door")
+            made = FakeSubscriptionDoor(token, played.events)
+            played.doors.append(made)
+            return made
 
         monkeypatch.setattr(session_module, "start_door", no_door)
+        monkeypatch.setattr(
+            session_module, "start_subscription_door", subscription_door if door is None else door
+        )
         monkeypatch.setattr(session_module, "start_network_door", netdoor)
         ready = harness or ReadyHarness(ClaudeLogin.oauth_token(LOGIN), IMAGE)
         seams = JobSeams(
@@ -258,8 +295,12 @@ def test_a_subscription_turn_runs_claude_code_with_no_model_door_and_pushes_the_
     [run] = place.runs
     assert run["argv"][run["argv"].index("--max-budget-usd") + 1] == "2.50"
     assert run["argv"][run["argv"].index("--model") + 1] == "claude-sonnet-5-5"
-    assert run["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == LOGIN
+    # #1176: the agent holds the placeholder and the door's address; the token is the door's.
+    assert run["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == SUBSCRIPTION_PLACEHOLDER
+    assert run["environment"]["ANTHROPIC_BASE_URL"] == played.doors[0].url
+    assert played.doors[0].token == LOGIN
     assert LOGIN not in " ".join(run["argv"])
+    assert LOGIN not in json.dumps(run["environment"])
     assert played.git is not None and played.git.pushes == [TIP]
     assert result["implementer"]["summary"] == "Added the greeting."
     assert result["implementer"]["headCommit"] == TIP and result["implementer"]["pushed"] is True
@@ -315,32 +356,20 @@ def test_no_session_is_saved_for_resume_and_the_report_names_no_opencode_session
     assert result["implementer"]["opencode"] is None
 
 
-# #856-N03
-def test_the_network_door_is_forced_to_the_anthropic_api_and_nothing_else(
+# #1176-T10
+def test_a_step_without_a_network_needs_no_network_door_and_the_agent_still_reaches_the_model(
     play: Callable[..., Played],
 ) -> None:
     played = play(says("Done."))
 
-    assert played.rules == [NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))]
-    assert played.result["implementer"]["network"]["mode"] == "list"
-
-
-# #856-N03
-def test_an_environment_that_lists_exactly_that_host_is_fine(play: Callable[..., Played]) -> None:
-    played = play(
-        says("Done."),
-        environment={
-            "name": "claude",
-            "network": {"mode": "list", "hosts": ["api.anthropic.com"]},
-        },
-    )
-
+    assert played.rules == [], "mode off: no network door, the agent reaches the model door only"
+    assert [door.url for door in played.doors] == ["http://10.213.77.2:10180"]
+    assert played.result["implementer"]["network"]["mode"] == "off"
     assert played.result["ok"] is True
-    assert played.rules == [NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))]
 
 
-# #856-N04
-def test_an_environment_with_an_open_network_refuses_the_turn_free(
+# #1176-T11
+def test_an_environment_with_an_open_network_runs_with_the_token_behind_the_door(
     play: Callable[..., Played],
 ) -> None:
     played = play(
@@ -348,14 +377,103 @@ def test_an_environment_with_an_open_network_refuses_the_turn_free(
     )
 
     result = played.result
+    assert result["ok"] is True, played.output
+    assert played.rules == [NetworkRule(MODE_OPEN)], "the step's own rule, as it is"
+    [place] = played.places
+    assert place.runs[0]["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == SUBSCRIPTION_PLACEHOLDER
+    assert LOGIN not in json.dumps(place.runs[0]["environment"])
+    assert played.doors[0].token == LOGIN
+    assert result["implementer"]["network"]["mode"] == "open"
+
+
+# #1176-T12
+def test_a_list_is_the_steps_own_list_not_narrowed_to_read_only_or_to_port_443(
+    play: Callable[..., Played],
+) -> None:
+    hosts = ["fonts.googleapis.com", "*.github.io", "api.example.org"]
+    played = play(
+        says("Done."), environment={"name": "b", "network": {"mode": "list", "hosts": hosts}}
+    )
+
+    assert played.result["ok"] is True, played.output
+    assert played.rules == [NetworkRule(MODE_LIST, tuple(hosts))]
+    assert played.rules[0].read_only == () and played.rules[0].ports == ()
+
+
+# #1176-T13
+def test_the_door_of_the_token_comes_up_before_the_network_door_and_ends_with_the_turn(
+    play: Callable[..., Played],
+) -> None:
+    played = play(
+        says("Done."),
+        environment={"name": "b", "network": {"mode": "list", "hosts": ["lateinorum.de"]}},
+    )
+
+    assert [e for e in played.events if e in ("model-door", "door", "claude")] == [
+        "model-door",
+        "door",
+        "claude",
+    ]
+    assert [door.stopped for door in played.doors] == [1], (
+        "the door of the token ends with the turn"
+    )
+
+
+# #1176-T14
+def test_a_placement_that_cannot_host_the_door_keeps_the_token_in_the_container_and_says_so(
+    play: Callable[..., Played],
+) -> None:
+    played = play(says("Done."), placement=Placement(subscription_door=False))
+
+    result = played.result
+    assert result["ok"] is True, played.output
+    assert played.doors == []
+    assert played.rules == [NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))]
+    [place] = played.places
+    assert place.runs[0]["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == LOGIN
+    assert "ANTHROPIC_BASE_URL" not in place.runs[0]["environment"]
+    assert "cannot hold the Claude Code token behind the model door" in result["logTail"]
+
+
+# #1176-T14
+def test_without_the_door_an_open_network_still_refuses_the_turn_free(
+    play: Callable[..., Played],
+) -> None:
+    played = play(
+        says("Done."),
+        environment={"name": "wide", "network": {"mode": "open", "hosts": []}},
+        placement=Placement(subscription_door=False),
+    )
+
+    result = played.result
     assert result["ok"] is False and result["errorCode"] == "implementer_config_invalid"
     assert "subscription_network_open" in result["logTail"]
-    assert played.places == [] and played.rules == []
-    assert result["usage"] is None
+    assert played.rules == [] and result["usage"] is None
+
+
+# #1176-T16
+def test_a_door_that_is_missing_where_the_token_belongs_behind_it_never_gives_the_token_away(
+    play: Callable[..., Played],
+) -> None:
+    def vanished(**options: Any) -> None:
+        return None
+
+    played = play(
+        says("Done."),
+        environment={"name": "wide", "network": {"mode": "open", "hosts": []}},
+        door=vanished,
+    )
+
+    result = played.result
+    assert result["ok"] is False and result["errorCode"] == "setup_failed", played.output
+    assert "subscription_door_missing" in result["logTail"]
+    assert played.places == [] or all(place.runs == [] for place in played.places)
+    assert LOGIN not in json.dumps(result)
+    assert played.rules == [], "no wide network is opened for a token that has no door"
 
 
 # #1126-T20
-def test_the_hosts_of_the_step_are_read_only_beside_the_api_host(
+def test_without_the_door_the_hosts_of_the_step_are_read_only_beside_the_api_host(
     play: Callable[..., Played],
 ) -> None:
     played = play(
@@ -364,6 +482,7 @@ def test_the_hosts_of_the_step_are_read_only_beside_the_api_host(
             "name": "build",
             "network": {"mode": "list", "hosts": ["fonts.googleapis.com", "*.gstatic.com"]},
         },
+        placement=Placement(subscription_door=False),
     )
 
     assert played.result["ok"] is True, played.output
@@ -391,17 +510,19 @@ def test_a_setup_script_runs_before_the_login_is_placed_and_the_agent_keeps_the_
     )
 
     assert played.result["ok"] is True, played.output
-    assert [e for e in played.events if e in ("setup", "door", "claude")] == [
+    assert [e for e in played.events if e in ("setup", "model-door", "door", "claude")] == [
         "setup",
+        "model-door",
         "door",
         "claude",
-    ], "the script ends, the door of the turn comes up, then the agent's exec has the login"
+    ], "the script ends, the doors of the turn come up, then the agent's exec has the placeholder"
     assert played.places_at_setup == 0, "no container of the agent had run anything at the setup"
     [place] = played.places
     [run] = place.runs
-    assert run["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == LOGIN, "the agent's exec has it"
+    assert run["environment"]["CLAUDE_CODE_OAUTH_TOKEN"] == SUBSCRIPTION_PLACEHOLDER
+    assert played.doors[0].token == LOGIN, "the real token is the door's, never the container's"
     assert played.result["implementer"]["setup"]["ok"] is True
-    assert played.rules[0].read_only == ("lateinorum.de",)
+    assert played.rules[0].hosts == ("lateinorum.de",) and played.rules[0].read_only == ()
 
 
 # #1126-T22

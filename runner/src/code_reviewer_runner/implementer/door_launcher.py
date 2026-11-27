@@ -63,6 +63,7 @@ from .door.protocol import (
     VERSION,
 )
 from .door.status import parse_status
+from .door.subscription import subscription_start_document
 from .door_state import DoorEnd, DoorState
 from .placement import HOSTED, Placement
 from .role_labels import role_labels
@@ -429,6 +430,44 @@ def start_door(
     """Make the network and the container, hand the door its start document and wait for `ready`.
     Raises `JobError` (`setup_failed`, free) for a door that cannot be started; whatever was made is
     removed first."""
+    return _start(
+        start_document(
+            model_access=model_access,
+            capability=capability,
+            deadline_seconds=deadline_seconds,
+            port=port,
+            environment=environment,
+            outer_proxy=seams.outer_proxy,
+        ),
+        port,
+        seams,
+    )
+
+
+def start_subscription_door(
+    *,
+    token: str,
+    deadline_seconds: float,
+    port: int,
+    seams: DoorSeams = DoorSeams(),  # noqa: B008 - frozen, shared on purpose
+) -> RunningDoor:
+    """The same door in its subscription mode (#1176): the token of a Claude Code turn is handed to
+    it on stdin like a model key, and the agent is given the placeholder
+    (`door.subscription`). The container, its network, its rules and its end are those of the
+    model door; only the start document and what the process serves differ."""
+    return _start(
+        subscription_start_document(
+            token,
+            deadline_seconds=deadline_seconds,
+            port=port,
+            outer_proxy=seams.outer_proxy,
+        ),
+        port,
+        seams,
+    )
+
+
+def _start(document: bytes, port: int, seams: DoorSeams) -> RunningDoor:
     api = seams.api()
     network: str | None = None
     container: str | None = None
@@ -462,14 +501,6 @@ def start_door(
         api.start_container(container)
         if not split:
             _close_the_doors_network(api, image, container, seams.outer_proxy)
-        document = start_document(
-            model_access=model_access,
-            capability=capability,
-            deadline_seconds=deadline_seconds,
-            port=port,
-            environment=environment,
-            outer_proxy=seams.outer_proxy,
-        )
         # A door that is already gone cannot be written to: the reader says how it ended.
         with contextlib.suppress(OSError):
             streams.write(document)

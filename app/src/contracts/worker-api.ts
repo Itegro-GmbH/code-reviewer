@@ -1041,6 +1041,10 @@ export interface ImplementerJobRepo {
   branch: string;
   branchExists: boolean;
   /**
+   * #1177: true: the runner pushes `branch` of this repository and no other branch (an agent that committed on another branch inside its container gets nothing of it pushed). Left out: every branch the agent made or moved is pushed, as before. Only a claim that names the feature `implementer_push_allowlist` is handed a job with it.
+   */
+  pushOnly?: boolean;
+  /**
    * #1091: the name of one git token of a job (`git.tokens`): 1 to 32 letters, digits, `_` or `-`. The app makes it up (`t1`, `t2`, ...); it says nothing of the installation it stands for.
    */
   tokenId: string;

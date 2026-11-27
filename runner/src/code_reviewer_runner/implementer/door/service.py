@@ -50,6 +50,7 @@ from .protocol import (
     DoorStatus,
 )
 from .status import status_line
+from .subscription import SubscriptionDoor, is_subscription_document, parse_subscription_start
 
 _log = logging.getLogger(__name__)
 
@@ -274,7 +275,7 @@ class _Reporter:
     request threads of the proxy (through `AnnouncingLedger`). One lock orders the lines and their
     serial numbers; nothing is said before `ready`."""
 
-    def __init__(self, door: ModelDoor, stdout: TextIO) -> None:
+    def __init__(self, door: ModelDoor | SubscriptionDoor, stdout: TextIO) -> None:
         self._door = door
         self._stdout = stdout
         self._lock = threading.Lock()
@@ -344,9 +345,19 @@ def run_door(
     The ledger is reported when a call changes it (reserve, settle) and, as a safety net, when the
     poll finds it changed."""
     first = stdin.readline(MAX_START_BYTES + 1)
-    door: ModelDoor | None = None
+    door: ModelDoor | SubscriptionDoor | None = None
     try:
-        door = ModelDoor(parse_start(first), bind=bind, upstream_for=upstream_for, clock=clock)
+        if is_subscription_document(first):
+            # #1176: the token of a Claude Code turn on a subscription, swapped in for the
+            # placeholder the agent holds; no ledger, one destination.
+            door = SubscriptionDoor(
+                parse_subscription_start(first),
+                bind=bind,
+                upstream_for=upstream_for,
+                clock=clock,
+            )
+        else:
+            door = ModelDoor(parse_start(first), bind=bind, upstream_for=upstream_for, clock=clock)
         door.start()
     except DoorRefused as refusal:
         _log.error("the model door cannot start: %s", refusal.reason)

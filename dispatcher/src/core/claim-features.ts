@@ -10,13 +10,20 @@ import { parseWorkerFeatures } from "../snapshot/worker-features.ts";
 
 /**
  * The claim features named only when the Worker image lists a feature of the same name (`SANDBOX_WORKER_FEATURES`, recorded
- * by the snapshot build from the image itself). `implementer_multi_repo` (#1090): the Worker reads `implementer.repos`; `implementer_workspace_token` (#1150): the Worker reads the workspace's Claude Code token.
+ * by the snapshot build from the image itself). `implementer_multi_repo` (#1090): the Worker reads `implementer.repos`; `implementer_workspace_token` (#1150): the Worker reads the workspace's Claude Code token; `implementer_subscription_door` (#1176): the Worker's model door holds that token.
  */
 export const IMAGE_GATED_CLAIM_FEATURES = [
   "implementer_multi_repo",
   // #1150: the Worker reads `implementer.subscription.oauthToken`. A snapshot built before this release does not list it, so the Dispatcher
   // does not name it, the App leaves a hosted turn on `claude-code` queued, and no VM starts that would refuse it.
   "implementer_workspace_token",
+  // #1176: the Worker's model door holds the Claude Code token (subscription mode), so the step's own network rule is allowed for such a turn.
+  // An image without it keeps the token in the container: the App then refuses an open or wide rule for the claim, free, before a VM starts.
+  "implementer_subscription_door",
+  // #1177: the Worker pushes only the branch of a `pushOnly` entry of `implementer.repos`. A snapshot built before this release does not list it,
+  // so the Dispatcher does not name it and a turn of a step that names its branch stays queued instead of running on an image that would push
+  // every branch of the agent's repository.
+  "implementer_push_allowlist",
 ] as const satisfies readonly KnownClaimFeature[];
 
 /**

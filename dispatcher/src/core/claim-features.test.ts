@@ -33,7 +33,39 @@ describe("the claim features that depend on the Worker image", () => {
     expect(IMAGE_GATED_CLAIM_FEATURES).toEqual([
       "implementer_multi_repo",
       "implementer_workspace_token",
+      "implementer_subscription_door",
+      "implementer_push_allowlist",
     ]);
+  });
+
+  // #1176-T57
+  it("names implementer_subscription_door only when the image lists it: an image without the door mode keeps the token in the container, so the App must not hand it an open network", () => {
+    expect(
+      imageClaimFeatures(
+        "implementer_workspace_token,implementer_subscription_door",
+      ),
+    ).toEqual(["implementer_workspace_token", "implementer_subscription_door"]);
+    expect(imageClaimFeatures("implementer_workspace_token")).toEqual([
+      "implementer_workspace_token",
+    ]);
+  });
+
+  // #1177-T76
+  it("names implementer_push_allowlist only when the image lists it: an older snapshot never gets a turn of a step that names its branch", () => {
+    expect(
+      imageClaimFeatures("implementer_multi_repo,implementer_push_allowlist"),
+    ).toEqual(["implementer_multi_repo", "implementer_push_allowlist"]);
+    expect(imageClaimFeatures("implementer_multi_repo")).toEqual([
+      "implementer_multi_repo",
+    ]);
+    // One claim may be given a job of either placement: Cloudflare's image must list it too.
+    expect(
+      claimFeaturesForPlacements(
+        ["implementer_multi_repo", "implementer_push_allowlist"],
+        ["implementer_multi_repo"],
+        true,
+      ),
+    ).toEqual(["implementer_multi_repo", "placement_cloudflare"]);
   });
 
   // #1150-T19
@@ -65,6 +97,24 @@ describe("the claim features of a Dispatcher with the Cloudflare placement (#115
         true,
       ),
     ).toEqual(["implementer_multi_repo", "placement_cloudflare"]);
+  });
+
+  // #1176-T57
+  it("names implementer_subscription_door only when both images list it", () => {
+    expect(
+      claimFeaturesForPlacements(
+        ["implementer_subscription_door"],
+        ["implementer_workspace_token"],
+        true,
+      ),
+    ).toEqual(["placement_cloudflare"]);
+    expect(
+      claimFeaturesForPlacements(
+        ["implementer_subscription_door"],
+        ["implementer_subscription_door"],
+        true,
+      ),
+    ).toEqual(["implementer_subscription_door", "placement_cloudflare"]);
   });
 
   // #1158-F02

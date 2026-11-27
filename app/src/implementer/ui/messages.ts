@@ -322,6 +322,8 @@ const failureCopy = (
     "The base branch does not exist on GitHub any more. Choose another base branch.",
   IMPLEMENTER_BRANCH_EXISTS:
     "A branch or an earlier task of this repository already uses this branch name. A new branch name is needed: change the name and send the task again.",
+  IMPLEMENTER_BRANCH_PROTECTED:
+    "This branch is protected on GitHub, so a task never pushes to it. Choose another branch name.",
   IMPLEMENTER_BRANCH_CONFLICT:
     "This name clashes with a branch of the repository: a branch name cannot be a folder of another (foo and foo/bar). A new branch name is needed.",
   IMPLEMENTER_REQUEST_REUSED:

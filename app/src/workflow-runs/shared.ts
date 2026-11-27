@@ -234,9 +234,10 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
   const repositories = createRepositoriesRepository(db, workspaceId);
   const jobs = createJobsRepository(db, workspaceId);
   const turns = createImplementerRepository(db, workspaceId);
+  const runs = createWorkflowRunsRepository(db, workspaceId);
   return createWorkflowEngine({
     asks: askChannelFor(workspaceId),
-    runs: createWorkflowRunsRepository(db, workspaceId),
+    runs,
     workflows: createWorkflowsRepository(db, workspaceId),
     members: createWorkspaceMembersRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
@@ -253,6 +254,9 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
     // #1092: the `repos` of an agent step name repositories of the workspace by their full name.
     repositoryByName: repositoryByName(repositories),
+    // #1177: a branch that exists is the lane's own when a session of a run of the same workflow worked on it.
+    pushBranchMadeByLane: ({ workflowId, repositoryId, branch }) =>
+      runs.laneWorkedOnBranch(workflowId, repositoryId, branch),
   });
 }
 

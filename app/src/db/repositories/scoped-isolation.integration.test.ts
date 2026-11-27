@@ -2690,6 +2690,16 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    name: "workflowRuns.laneWorkedOnBranch",
+    run: (a, b) =>
+      a.workflowRuns.laneWorkedOnBranch(
+        b.workflow.id,
+        b.workflowRun.repositoryId,
+        "agent/handoff",
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
     name: "workflowRuns.findByRequest",
     run: (a, b) => a.workflowRuns.findByRequest(b.workflowRun.clientRequestId),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),

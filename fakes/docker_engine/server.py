@@ -175,6 +175,8 @@ class FakeDockerEngine:
         self._server.server_close()
         for container in self.containers.values():
             self._close(container)
+            self._close_read(container, "stdin_read")
+            self._close_read(container, "stdout_read")
 
     # -- what a test does to the "daemon" -------------------------------------------------------
 
@@ -204,6 +206,17 @@ class FakeDockerEngine:
                     setattr(container, name, -1)
                     with contextlib.suppress(OSError):
                         os.close(descriptor)
+
+    def _close_read(self, container: FakeContainer, name: str) -> None:
+        """Close one read end of the container's pipes, once (a test run leaves no descriptor of
+        them behind: the serial unit run of the runner is close to the limit of `select`)."""
+        with self._lock:
+            descriptor = getattr(container, name)
+            if descriptor < 0:
+                return
+            setattr(container, name, -1)
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
 
     # -- the API --------------------------------------------------------------------------------
 
@@ -512,6 +525,7 @@ class FakeDockerEngine:
 
         def run() -> None:
             stdin = os.fdopen(os.dup(container.stdin_read), "rb", buffering=0)
+            self._close_read(container, "stdin_read")  # the behaviour has its own copy now
             stdout = _Stdout(os.dup(container.stdout_write))
             code = 0
             try:
@@ -549,23 +563,30 @@ class FakeDockerEngine:
                     os.close(descriptor)
 
         threading.Thread(target=pump_in, daemon=True).start()
-        while True:
-            # A killed container's door thread may still hold the pipe: the end is its state.
-            ready, _, _ = select.select([container.stdout_read], [], [], 0.05)
-            if not ready:
-                if container.exit_code is not None and not container.running:
+        try:
+            while True:
+                # A killed container's door thread may still hold the pipe: the end is its state.
+                try:
+                    ready, _, _ = select.select([container.stdout_read], [], [], 0.05)
+                except (OSError, ValueError):  # the engine was stopped under the stream
                     break
-                continue
-            try:
-                data = os.read(container.stdout_read, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            try:
-                connection.sendall(struct.pack(">BxxxI", 1, len(data)) + data)
-            except OSError:
-                return
+                if not ready:
+                    if container.exit_code is not None and not container.running:
+                        break
+                    continue
+                try:
+                    data = os.read(container.stdout_read, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                try:
+                    connection.sendall(struct.pack(">BxxxI", 1, len(data)) + data)
+                except OSError:
+                    return
+        finally:
+            # Nothing reads the container's output after the stream has ended.
+            self._close_read(container, "stdout_read")
         with contextlib.suppress(OSError):
             connection.shutdown(socket.SHUT_RDWR)
 

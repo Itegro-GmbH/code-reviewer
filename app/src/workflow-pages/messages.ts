@@ -139,6 +139,12 @@ const STEP_FAILURE_TEXT: Record<
     "A repository of the step is not one the workspace's GitHub App can reach (or write to).",
   base_branch_not_found:
     "A repository of the step has no branch with the name of its base.",
+  push_branch_invalid:
+    "The branch the step pushes to is not usable (not a branch name, the base or default branch, or it clashes with another branch).",
+  push_branch_protected:
+    "The branch the step pushes to is protected, so it is not pushed to.",
+  push_branch_exists:
+    "The branch the step pushes to exists already and no earlier run of this lane made it, so it is not pushed to.",
   agent_start_failed: "The agent could not be started.",
   turn_unreadable: "The result of the agent could not be read.",
   no_result:

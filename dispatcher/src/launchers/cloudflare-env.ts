@@ -6,12 +6,12 @@
 // |-----------------------------|------------------------------------------------------------------------------------------------------|---------|
 // | CF_SANDBOX_URL              | The address of the Worker `cr-sandbox`: `https://host`, no path, query or credentials                  | none |
 // | CF_SANDBOX_TOKEN            | The bearer token of its API (a secret, at least 32 characters, no space)                               | none |
-// | CF_SANDBOX_INSTANCE_TYPES   | A map from a size in vCPUs to the Cloudflare instance type that runs it, `4=standard-4,8=custom-8`    | none |
+// | CF_SANDBOX_INSTANCE_TYPES   | A map from a size in vCPUs to the Cloudflare instance type that runs it, `4=standard-4,8=custom-8:32768` (`:<MiB>`: its memory, #1178) | none |
 // | CF_SANDBOX_SYSBOX_PROOF     | The Sysbox verdict of the Cloudflare image (`proven` or `unproven`): `unproven` keeps the Implementer out | `proven` |
 //
 // **All three of the first set or none.** With none the Dispatcher is as it was before #1158: it has no Cloudflare client, never names the
 // claim feature `placement_cloudflare` and so never takes a job of that placement. One of them without the others is a mistake, not "off", and
-// refuses the start: a Dispatcher that takes no Cloudflare job would look healthy. A larger size is a new entry of the map (`8=<type>`), nothing else.
+// refuses the start: a Dispatcher that takes no Cloudflare job would look healthy. A larger size is a new entry of the map (`8=<type>:<MiB>`), nothing else.
 import { ConfigError, read, type Environment } from "../config.ts";
 import { claimFeaturesForPlacements } from "../core/claim-features.ts";
 import type { KnownClaimFeature } from "../contracts/runner-api.ts";
@@ -25,6 +25,16 @@ import type { CloudflarePlacement, SysboxProof } from "./sandbox.ts";
 const PLAIN = /^[^\s\p{Cc}]+$/u;
 const MIN_TOKEN_LENGTH = 32;
 const INSTANCE_TYPE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+/** The memory of an entry, in MiB (#1178): digits only, 1024 (the least the agent needs by itself) to 1,048,575. */
+const MEMORY_MIB = /^[0-9]{4,7}$/;
+const MIN_MEMORY_MIB = 1024;
+/**
+ * The memory of the instance types Cloudflare has that the Dispatcher knows (#1178): standard-4 is 4 vCPU / 12 GiB / 20 GB. A custom type names its memory in its
+ * entry (`8=custom-8:32768`, the `memoryMib` of the Worker's `CUSTOM_INSTANCE_TYPES`; the two are one figure kept in two places).
+ */
+const KNOWN_INSTANCE_MEMORY_MIB: Readonly<Record<string, number>> = {
+  "standard-4": 12288,
+};
 /** The sizes an environment may name (`environmentVcpus` of contracts/environment-sizes.v1.json): 1 vCPU leaves the agent no memory. */
 const SIZES = [2, 4, 6, 8] as const;
 
@@ -70,23 +80,45 @@ function parseUrl(value: string): string {
   return url.origin;
 }
 
-function parseInstanceTypes(value: string): Map<number, string> {
+/**
+ * The sizes with their instance type and memory. An entry is `<vCPUs>=<type>` or `<vCPUs>=<type>:<MiB>`: the old form stays valid. Without a memory the type's
+ * is the table's (standard-4), else 2048 MiB per vCPU, the cautious figure of before #1178 (an operator who names no memory for a bigger type gets less than it has).
+ */
+function parseInstanceTypes(value: string): {
+  types: Map<number, string>;
+  memoryMb: Map<number, number>;
+} {
   const types = new Map<number, string>();
+  const memoryMb = new Map<number, number>();
   for (const entry of value.split(",")) {
-    const [size, type, ...more] = entry.split("=").map((part) => part.trim());
+    const [size, spelled, ...more] = entry
+      .split("=")
+      .map((part) => part.trim());
+    const [type, memory, ...extra] = (spelled ?? "")
+      .split(":")
+      .map((part) => part.trim());
     if (
       size === undefined ||
       type === undefined ||
       more.length > 0 ||
+      extra.length > 0 ||
       !/^[0-9]{1,2}$/.test(size) ||
       !(SIZES as readonly number[]).includes(Number(size)) ||
       !INSTANCE_TYPE.test(type) ||
+      (memory !== undefined &&
+        (!MEMORY_MIB.test(memory) || Number(memory) < MIN_MEMORY_MIB)) ||
       types.has(Number(size))
     )
       throw new ConfigError("CF_SANDBOX_INSTANCE_TYPES", "invalid");
     types.set(Number(size), type);
+    memoryMb.set(
+      Number(size),
+      memory !== undefined
+        ? Number(memory)
+        : (KNOWN_INSTANCE_MEMORY_MIB[type] ?? Number(size) * 2048),
+    );
   }
-  return types;
+  return { types, memoryMb };
 }
 
 /**
@@ -110,7 +142,7 @@ export function cloudflareFromEnvironment(
   const baseUrl = parseUrl(url);
   if (token.length < MIN_TOKEN_LENGTH || !PLAIN.test(token))
     throw new ConfigError("CF_SANDBOX_TOKEN", "invalid");
-  const instanceTypes = parseInstanceTypes(types);
+  const { types: instanceTypes, memoryMb } = parseInstanceTypes(types);
   const proof = read(env, "CF_SANDBOX_SYSBOX_PROOF");
   if (proof !== undefined && proof !== "proven" && proof !== "unproven")
     throw new ConfigError("CF_SANDBOX_SYSBOX_PROOF", "invalid");
@@ -157,6 +189,7 @@ export function cloudflareFromEnvironment(
     placement: {
       health,
       sizes: [...instanceTypes.keys()].sort((a, b) => a - b),
+      memoryMb,
       sysboxProof,
     },
     claimFeatures: (vercel) => async () => {

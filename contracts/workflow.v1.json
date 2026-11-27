@@ -180,7 +180,7 @@
           "pattern": "^[^\\u0000]*$"
         },
         "network": {
-          "description": "#1105 (ADR 0007, decision 11), settings of the step itself: the rule for the agent's network, as the environment held it: `off` (the default), `list` (the exact or `*.suffix` host names in `hosts`, at least one) or `open`; `hosts` only with `list`. For a step on a hosted or a self-hosted runner. On the harness `claude-code` `open` is refused (`subscription_network_open`), a `*.suffix` entry on a domain anybody can get a subdomain of is refused (`subscription_network_wildcard`) and the listed hosts are only read (GET and HEAD) beside the model's own host. Not with `profile`.",
+          "description": "#1105 (ADR 0007, decision 11), settings of the step itself: the rule for the agent's network, as the environment held it: `off` (the default), `list` (the exact or `*.suffix` host names in `hosts`, at least one) or `open`; `hosts` only with `list`. For a step on a hosted or a self-hosted runner. On the harness `claude-code` the rule is the agent's own, `open` included: the subscription token is held by the model door and never enters the agent's container (#1176). Not with `profile`.",
           "type": "object",
           "additionalProperties": false,
           "required": ["mode"],
@@ -255,6 +255,12 @@
         },
         "branch": {
           "description": "The branch a session of its own starts from, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger or `{{<agent step>.branch}}` (the branch of an earlier agent step that may push). A target, so no other reference (`target_from_untrusted_value`); not with `session.continue` (checked by the validator: a session that goes on keeps its branch).",
+          "type": "string",
+          "pattern": "\\S",
+          "maxLength": 20000
+        },
+        "pushBranch": {
+          "description": "#1177 (epic #1175): the branch the session works on and pushes to, instead of the branch the platform names (`workflow/<run id>/<step id>`): a literal, an input of a manual trigger (`{{trigger.input.branch}}`) or a text around such inputs. A target, so no other reference (`target_from_untrusted_value`); never text an agent wrote. It is created from the branch the session starts from (`branch`, else the run's base branch), or continued when an earlier run of this lane made it. Not with `canPush: false` or a profile that may not push (`push_branch_without_push`), not with `session.continue` (`session_target_invalid`) and not with `repos` (`push_branch_with_repos`). When the step runs it also refuses (free, before the agent starts) the repository's default branch, the run's base branch, the branch the session starts from and a protected branch (`push_branch_invalid`, `push_branch_protected`), and a branch that exists on the remote and that no earlier run of this lane made (`push_branch_exists`). Nothing is ever force pushed. `{{<step>.branch}}` is the named branch.",
           "type": "string",
           "pattern": "\\S",
           "maxLength": 20000

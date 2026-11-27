@@ -105,6 +105,19 @@ export function checkBranchName(name: string, base: string): BranchNameCheck {
 }
 
 /**
+ * #1177: whether `name` can be the named branch of a `pushBranch` step: a branch name that does not start with `refs/` or `heads/` (read
+ * without regard to case), which git or the platform would take as a full ref name and so as another branch than the one written.
+ */
+export function isPushBranchName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    checkBranchName(name, "").ok &&
+    !lower.startsWith("refs/") &&
+    !lower.startsWith("heads/")
+  );
+}
+
+/**
  * A branch of `existing` that cannot live beside the new `name`, or null. Git holds a name as a file or as a folder, never both:
  * `foo` and `foo/bar` exclude each other, whichever is made second fails. `existing` is what the platform lists, which is the
  * first 100 branches of a repository: a conflict with a branch beyond them is not seen here (git finds it at the push). The same

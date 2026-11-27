@@ -349,6 +349,21 @@ def test_the_narrowed_rule_of_a_subscription_turn_is_accepted_and_the_signed_one
     assert post.bodies[0]["network"] == signed.to_json()
 
 
+# #1176-T32: with the token behind the model door the job's rule is the signed rule itself, `open`
+# included, so the switch needs no special form for it.
+@pytest.mark.parametrize(
+    "signed", [OPEN, NetworkRule(MODE_LIST, ("registry.npmjs.org", "*.github.io")), OFF]
+)
+def test_a_subscription_turn_behind_the_door_has_the_signed_rule_as_its_own(
+    signed: NetworkRule,
+) -> None:
+    post = Dispatcher(APPLIED)
+    switch = parse_switch(switch_text(signed))
+    assert switch is not None
+    assert narrow_policy(switch, signed, MODEL_HOST, post=post, sleep=lambda _: None) == 1
+    assert post.bodies[0]["network"] == signed.to_json()
+
+
 # #1171: only the subscription form of the signed rule is accepted, not any other narrower one.
 def test_a_rule_that_is_neither_the_signed_one_nor_its_subscription_form_is_refused() -> None:
     post = Dispatcher(APPLIED)
