@@ -1883,6 +1883,10 @@ async function prepareSubscription(
         version: RUNNER_API_VERSION,
         job: {
           ...base,
+          // #1158: a turn of a Cloudflare runner names its placement here too, or the Dispatcher launches it on the Vercel Sandbox.
+          ...(placementOfRequiredLabels(job.requiredLabels) === "cloudflare"
+            ? { placement: "cloudflare" as const }
+            : {}),
           sizeLabel:
             sizeLabelOf(job.requiredLabels) ??
             sizeLabel(environment?.vcpus ?? DEFAULT_IMPLEMENTER_VCPUS),
